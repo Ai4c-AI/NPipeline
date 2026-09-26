@@ -198,6 +198,30 @@ public sealed class ObservablePipelineContextFactoryTests
         Assert.IsType<MetricsCollectingExecutionObserver>(context.Observability.ExecutionObserver);
     }
 
+    [Fact]
+    public async Task CreatePipelineContext_ProducesMetricsAndALineageReport()
+    {
+        // Arrange - the DI package's CreatePipelineContext, for callers that run pipelines through the runner themselves.
+        var sink = new CollectingPipelineLineageSink();
+        var services = new ServiceCollection();
+        _ = services.AddNPipeline(typeof(ObservablePipelineContextFactoryTests).Assembly);
+        _ = services.AddNPipelineObservability();
+        _ = services.AddNPipelineLineage(_ => sink);
+        await using var provider = services.BuildServiceProvider();
+        await using var scope = provider.CreateAsyncScope();
+        var runner = scope.ServiceProvider.GetRequiredService<IPipelineRunner>();
+        await using var context = scope.ServiceProvider.CreatePipelineContext();
+
+        // Act
+        await runner.RunAsync<LineageReportPipeline>(context);
+
+        // Assert
+        _ = Assert.Single(sink.Reports);
+        var collector = scope.ServiceProvider.GetRequiredService<IObservabilityCollector>();
+        Assert.NotNull(collector.GetNodeMetrics("source", context.RunIdentity.PipelineId));
+        Assert.NotNull(collector.GetNodeMetrics("sink", context.RunIdentity.PipelineId));
+    }
+
     private sealed class LineageReportPipeline : IPipelineDefinition
     {
         public void Define(PipelineBuilder builder, PipelineContext context)

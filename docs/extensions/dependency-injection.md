@@ -126,6 +126,17 @@ await provider.RunPipelineAsync<OrderPipeline>(new Dictionary<string, object>
 });
 ```
 
+To run a pipeline through `IPipelineRunner` yourself, create the context with `CreatePipelineContext`. It takes every service the configuration leaves unset from the container (error handler, lineage and observability factories, `ILoggerFactory`, `IPipelineTracer`) and attaches the registered execution observer:
+
+```csharp
+await using var scope = provider.CreateAsyncScope();
+var runner = scope.ServiceProvider.GetRequiredService<IPipelineRunner>();
+await using var context = scope.ServiceProvider.CreatePipelineContext(PipelineContextConfiguration.WithCancellation(ct));
+await runner.RunAsync<OrderPipeline>(context);
+```
+
+A context created with `new PipelineContext()` gets none of these, so lineage reports, metrics and NPipeline's own logging are silently lost.
+
 ## Resolving Services in Nodes
 
 Nodes participate in DI - inject dependencies via constructor:

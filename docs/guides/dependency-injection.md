@@ -98,18 +98,20 @@ await host.Services.RunPipelineAsync<MyPipeline>(
 
 ### From an Injected Runner
 
-Inject `IPipelineRunner` into your own services:
+Inject `IPipelineRunner` into your own services, and create the context with `CreatePipelineContext`:
 
 ```csharp
-public class OrderService(IPipelineRunner runner)
+public class OrderService(IPipelineRunner runner, IServiceProvider services)
 {
     public async Task ProcessOrdersAsync(CancellationToken ct)
     {
-        var context = PipelineContext.CreateDefault();
-        await runner.RunAsync<OrderPipeline>(context, ct);
+        await using var context = services.CreatePipelineContext(PipelineContextConfiguration.WithCancellation(ct));
+        await runner.RunAsync<OrderPipeline>(context);
     }
 }
 ```
+
+`CreatePipelineContext` fills whatever the configuration leaves unset from the container: the error handler, lineage and observability factories, the `ILoggerFactory` and the `IPipelineTracer`. It also attaches the registered execution observer, which collects metrics when you use `AddNPipelineObservability`. A context created with `new PipelineContext()` or `PipelineContext.CreateDefault()` gets none of these, so lineage reports, metrics and NPipeline's own logging are silently lost. Pass the provider of the scope the run belongs to, the same one the runner comes from, and dispose the context when the run ends.
 
 ## Constructor Injection in Nodes
 

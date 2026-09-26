@@ -135,6 +135,21 @@ var parameters = new Dictionary<string, object>
 await serviceProvider.RunPipelineAsync<MyDataPipeline>(parameters);
 ```
 
+### Creating a Context for Your Own Runner
+
+To run a pipeline through `IPipelineRunner` yourself, create the context with `CreatePipelineContext`. It takes every
+service the configuration leaves unset from the container (the error handler, lineage and observability factories,
+`ILoggerFactory` and `IPipelineTracer`) and attaches the registered execution observer. A context created with
+`new PipelineContext()` gets none of these, so lineage reports, metrics and NPipeline's own logging are silently lost.
+
+```csharp
+await using var scope = serviceProvider.CreateAsyncScope();
+var runner = scope.ServiceProvider.GetRequiredService<IPipelineRunner>();
+await using var context = scope.ServiceProvider.CreatePipelineContext(
+    PipelineContextConfiguration.WithCancellation(cancellationToken));
+await runner.RunAsync<MyDataPipeline>(context);
+```
+
 ### Error Handler Registration
 
 ```csharp

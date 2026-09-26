@@ -5,6 +5,7 @@ using AwesomeAssertions;
 using FakeItEasy;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using NPipeline.Configuration;
 using NPipeline.DataFlow;
 using NPipeline.ErrorHandling;
 using NPipeline.Execution;
@@ -253,6 +254,84 @@ public sealed class ServiceCollectionExtensionsTests
         // Assert
         sink.LoggerFactory.Should().NotBeNull();
         sink.Tracer.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task CreatePipelineContext_TakesUnsetServicesAndTheExecutionObserverFromTheContainer()
+    {
+        // Arrange
+        var loggerFactory = A.Fake<ILoggerFactory>();
+        var tracer = A.Fake<IPipelineTracer>();
+        var observer = A.Fake<IExecutionObserver>();
+
+        var services = new ServiceCollection();
+        services.AddNPipeline(Assembly.GetExecutingAssembly());
+        services.AddSingleton(loggerFactory);
+        services.AddSingleton(tracer);
+        services.AddSingleton(observer);
+        await using var serviceProvider = services.BuildServiceProvider();
+        await using var scope = serviceProvider.CreateAsyncScope();
+
+        // Act
+        await using var context = scope.ServiceProvider.CreatePipelineContext();
+
+        // Assert
+        context.Observability.LoggerFactory.Should().BeSameAs(loggerFactory);
+        context.Observability.Tracer.Should().BeSameAs(tracer);
+        context.Observability.ExecutionObserver.Should().BeSameAs(observer);
+        context.Observability.ObservabilityFactory.Should().BeSameAs(scope.ServiceProvider.GetRequiredService<IObservabilityFactory>());
+        context.Lineage.LineageFactory.Should().BeSameAs(scope.ServiceProvider.GetRequiredService<ILineageFactory>());
+        context.ErrorHandlerFactory.Should().BeSameAs(scope.ServiceProvider.GetRequiredService<IErrorHandlerFactory>());
+    }
+
+    [Fact]
+    public async Task CreatePipelineContext_KeepsWhatTheConfigurationSets()
+    {
+        // Arrange
+        var services = new ServiceCollection();
+        services.AddNPipeline(Assembly.GetExecutingAssembly());
+        services.AddSingleton(A.Fake<ILoggerFactory>());
+        await using var serviceProvider = services.BuildServiceProvider();
+
+        var ownLoggerFactory = A.Fake<ILoggerFactory>();
+        using var cts = new CancellationTokenSource();
+        var configuration = new PipelineContextConfiguration(
+            new Dictionary<string, object> { ["answer"] = 42 },
+            LoggerFactory: ownLoggerFactory,
+            CancellationToken: cts.Token);
+
+        // Act
+        await using var context = serviceProvider.CreatePipelineContext(configuration);
+
+        // Assert
+        context.Observability.LoggerFactory.Should().BeSameAs(ownLoggerFactory);
+        context.CancellationToken.Should().Be(cts.Token);
+        context.Parameters["answer"].Should().Be(42);
+    }
+
+    [Fact]
+    public async Task CreatePipelineContext_WithoutARegisteredObserver_KeepsTheNullObserver()
+    {
+        // Arrange
+        var services = new ServiceCollection();
+        services.AddNPipeline(Assembly.GetExecutingAssembly());
+        await using var serviceProvider = services.BuildServiceProvider();
+
+        // Act
+        await using var context = serviceProvider.CreatePipelineContext();
+
+        // Assert
+        context.Observability.ExecutionObserver.Should().BeOfType<NullExecutionObserver>();
+    }
+
+    [Fact]
+    public void CreatePipelineContext_WithNullServiceProvider_Throws()
+    {
+        // Act
+        var act = () => ((IServiceProvider)null!).CreatePipelineContext();
+
+        // Assert
+        act.Should().Throw<ArgumentNullException>();
     }
 
     [Fact]

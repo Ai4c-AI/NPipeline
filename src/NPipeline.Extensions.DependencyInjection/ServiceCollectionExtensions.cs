@@ -125,6 +125,52 @@ public static class ServiceCollectionExtensions
     }
 
     /// <summary>
+    ///     Creates a pipeline context wired to the services registered in <paramref name="serviceProvider" />.
+    /// </summary>
+    /// <remarks>
+    ///     <para>
+    ///         Every service <paramref name="configuration" /> leaves unset is taken from the container: the error handler,
+    ///         lineage and observability factories, the <see cref="Microsoft.Extensions.Logging.ILoggerFactory" /> and the
+    ///         <see cref="Observability.Tracing.IPipelineTracer" />. The registered <see cref="IExecutionObserver" />, such as
+    ///         the metrics observer <c>AddNPipelineObservability</c> registers, is attached to the context. Use this whenever
+    ///         you run a pipeline through <see cref="IPipelineRunner" /> yourself rather than through
+    ///         <see cref="RunPipelineAsync{TDefinition}(IServiceProvider, CancellationToken)" />; a context created with
+    ///         <c>new PipelineContext()</c> gets none of these, so lineage reports, metrics and the framework's logging are
+    ///         silently lost.
+    ///     </para>
+    ///     <para>
+    ///         Pass the service provider of the scope the run belongs to, the same one you resolve the runner from, so the
+    ///         run gets its own scoped services such as the observability collector. The caller owns the returned context
+    ///         and must dispose it.
+    ///     </para>
+    /// </remarks>
+    /// <param name="serviceProvider">The run's (scoped) service provider.</param>
+    /// <param name="configuration">The configuration to start from, or null for the default configuration.</param>
+    /// <returns>A new pipeline context.</returns>
+    /// <example>
+    ///     <code>
+    ///     await using var scope = serviceProvider.CreateAsyncScope();
+    ///     var runner = scope.ServiceProvider.GetRequiredService&lt;IPipelineRunner&gt;();
+    ///     await using var context = scope.ServiceProvider.CreatePipelineContext(
+    ///         PipelineContextConfiguration.WithCancellation(cancellationToken));
+    ///     await runner.RunAsync&lt;MyPipeline&gt;(context);
+    ///     </code>
+    /// </example>
+    public static PipelineContext CreatePipelineContext(this IServiceProvider serviceProvider, PipelineContextConfiguration? configuration = null)
+    {
+        ArgumentNullException.ThrowIfNull(serviceProvider);
+
+        var context = new PipelineContext((configuration ?? PipelineContextConfiguration.Default).WithServiceDefaults(serviceProvider));
+
+        // Without this the context keeps its NullExecutionObserver and no metrics are collected. It is not part of the
+        // configuration, so it is attached to the context itself.
+        if (serviceProvider.GetService<IExecutionObserver>() is { } executionObserver)
+            context.Observability.ExecutionObserver = executionObserver;
+
+        return context;
+    }
+
+    /// <summary>
     ///     Runs the specified pipeline definition.
     /// </summary>
     /// <typeparam name="TDefinition">The type of the pipeline definition to run.</typeparam>
@@ -150,25 +196,11 @@ public static class ServiceCollectionExtensions
         var sp = scope.ServiceProvider;
 
         var runner = sp.GetRequiredService<IPipelineRunner>();
-
-        // Take the factories, logger factory and tracer from the run's scope. Without the logger factory and tracer the
-        // context falls back to null implementations, and the framework's own logging and tracing go nowhere.
-        var config = new PipelineContextConfiguration(parameters, CancellationToken: cancellationToken)
-            .WithServiceDefaults(sp);
-
-        var context = new PipelineContext(config);
+        var context = sp.CreatePipelineContext(new PipelineContextConfiguration(parameters, CancellationToken: cancellationToken));
 
         // The context owns the run-scoped resources handed to it during the run (a dead-letter sink or lineage
         // sink the factory constructed itself, for example). Disposing it releases them even when the run fails.
         await using var contextScope = context.ConfigureAwait(false);
-
-        // Wire up the execution observer if one has been registered (e.g., MetricsCollectingExecutionObserver
-        // registered by AddNPipelineObservability). Without this, context.Observability.ExecutionObserver defaults to
-        // NullExecutionObserver and no metrics are collected.
-        var executionObserver = sp.GetService<IExecutionObserver>();
-
-        if (executionObserver is not null)
-            context.Observability.ExecutionObserver = executionObserver;
 
         await runner.RunAsync<TDefinition>(context).ConfigureAwait(false);
     }
