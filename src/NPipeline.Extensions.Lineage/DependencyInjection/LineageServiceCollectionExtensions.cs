@@ -7,6 +7,10 @@ namespace NPipeline.Lineage.DependencyInjection;
 /// <summary>
 ///     Provides extension methods for setting up NPipeline lineage services in an <see cref="IServiceCollection" />.
 /// </summary>
+/// <remarks>
+///     The default logging sink needs logging registered (<c>services.AddLogging()</c> or a host); without it, it logs to a
+///     null logger.
+/// </remarks>
 public static class LineageServiceCollectionExtensions
 {
     /// <summary>

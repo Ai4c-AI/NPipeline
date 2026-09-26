@@ -23,6 +23,16 @@ services.AddNPipelineObservability();
 
 This enables automatic metrics collection for every pipeline run - node work timing, wait timing, throughput, retry counts, and pipeline lifecycle events.
 
+Metrics are recorded when:
+
+- **You register logging** (`services.AddLogging(...)` or a host). Without it, the built-in logging sinks log to a null
+  logger.
+- **The context is created via the container.** Use `serviceProvider.RunPipelineAsync<T>()`,
+  `serviceProvider.CreatePipelineContext()` or `IObservablePipelineContextFactory`. A run with a `new PipelineContext()`
+  records nothing and logs a warning. So does a runner from `PipelineRunner.Create()` when nodes use `WithObservability`.
+- **You enable item counts per node.** Only nodes configured with `WithObservability` count items, unless you set
+  `AutoObserveAllNodes`. Other nodes still report timing and outcome, with `ItemCountsRecorded = false`.
+
 For nodes that return lazy streams, timing differentiates node setup completion from stream/dataflow completion. With per-node observability enabled via `WithObservability(...)`, node timing is finalized when stream consumption completes, not when the node first returns its output stream.
 
 ### Using the Observable Context Factory
@@ -51,6 +61,7 @@ await using var context = contextFactory.Create();
 | `ItemsProcessed` | `long` | Items consumed, each counted once even when a node restart reads it again |
 | `ItemsReplayed` | `long` | Items a node restart read again after they had already been processed |
 | `ItemsEmitted` | `long` | Items produced |
+| `ItemCountsRecorded` | `bool` | Whether the node counted items. When false, counts are 0 because item counting is disabled |
 | `Exception` | `Exception?` | Error, if any |
 | `RetryCount` | `int` | Highest retry attempt number seen, at any retry layer |
 | `RetryEvents` | `long` | Retries at every layer: item retry, node restart, and node retry |
@@ -108,7 +119,7 @@ The three retry layers report to the same observer, so one counter covers the wh
 | `Exception` | `Exception?` | Error, if any |
 
 Item counts are recorded only for nodes configured with `WithObservability`, so configure a pipeline's source and sink
-nodes with it to get `ItemsIn` and `ItemsOut`. `INodeMetrics.Kind` reports each node's kind.
+nodes with it to get `ItemsIn` and `ItemsOut`, or set `AutoObserveAllNodes`. `INodeMetrics.Kind` reports each node's kind.
 
 ### Metrics Analysis
 
@@ -136,6 +147,9 @@ services.AddNPipelineObservability();
 
 // Enable memory metrics (GC-based delta per node)
 services.AddNPipelineObservability(ObservabilityExtensionOptions.WithMemoryMetrics);
+
+// Count items at every node, not only those configured with WithObservability
+services.AddNPipelineObservability(new ObservabilityExtensionOptions { AutoObserveAllNodes = true });
 ```
 
 `ObservabilityExtensionOptions`:
@@ -143,6 +157,7 @@ services.AddNPipelineObservability(ObservabilityExtensionOptions.WithMemoryMetri
 | Property | Default | Description |
 |----------|---------|-------------|
 | `EnableMemoryMetrics` | `false` | Track per-node memory allocation delta |
+| `AutoObserveAllNodes` | `false` | Observe nodes without `WithObservability` using `ObservabilityOptions.Default`. A node's specific options take precedence |
 
 ### Registration Methods
 

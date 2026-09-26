@@ -24,6 +24,11 @@ services.AddNPipelineObservability(); // logs metrics via ILogger
 ```
 
 This registers the default sinks: `LoggingMetricsSink` (per-node metrics) and `LoggingPipelineMetricsSink` (per-pipeline summary).
+The sinks use `ILogger<T>`, so register logging (`services.AddLogging(...)`, or use a host).
+
+Run the pipeline with `serviceProvider.RunPipelineAsync<T>()`, or create its context with
+`serviceProvider.CreatePipelineContext()`. A `new PipelineContext()` isn't connected to the container's collector, so
+nothing is recorded and the run logs a warning.
 
 ## What Gets Collected
 
@@ -37,7 +42,7 @@ For each node, the `MetricsCollectingExecutionObserver` records:
 | Work duration (`DurationMs`) | Node-owned processing time (primary node duration) |
 | Input wait duration | Time spent waiting for upstream items |
 | Wall duration | Total elapsed node dataflow time |
-| Items processed/emitted | Count of input and output items |
+| Items processed/emitted | Count of input and output items. Only for nodes with `WithObservability`, or with `AutoObserveAllNodes` set |
 | Throughput (items/sec) | Processing rate derived from work duration |
 | Average item processing time | Mean time per item derived from work duration |
 | Retry count | Number of retries (if resilience is enabled) |
@@ -67,13 +72,22 @@ After each run, a `IPipelineMetrics` summary is emitted:
 
 ## Per-Node Observability
 
-Enable metrics collection on specific nodes:
+Item counts introduce slight overhead and are recorded only for nodes configured for observability. Enable them on specific nodes:
 
 ```csharp
 var transform = builder.AddTransform<MyTransform, In, Out>("transform");
 transform.WithObservability(builder);  // default options
 transform.WithObservability(builder, ObservabilityOptions.Full);  // full metrics
 ```
+
+Or observe every node with `ObservabilityOptions.Default`. A node's own `WithObservability` options take precedence:
+
+```csharp
+services.AddNPipelineObservability(new ObservabilityExtensionOptions { AutoObserveAllNodes = true });
+```
+
+A node without either still reports timing and outcome. Its `ItemCountsRecorded` is false, and the logging sinks indicate that its
+item counts were not recorded instead of reporting 0 items.
 
 ## Memory Metrics
 

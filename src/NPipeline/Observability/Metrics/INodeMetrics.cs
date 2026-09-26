@@ -101,6 +101,13 @@ public interface INodeMetrics
     NodeKind? Kind => null;
 
     /// <summary>
+    ///     Whether this node recorded item counts. When false, <see cref="ItemsProcessed" /> and <see cref="ItemsEmitted" />
+    ///     are 0 because nothing counted them, not because no items passed through: the node had no observability options
+    ///     (see <c>WithObservability</c> in NPipeline.Extensions.Observability).
+    /// </summary>
+    bool ItemCountsRecorded => true;
+
+    /// <summary>
     ///     The peak memory usage in megabytes during node execution.
     /// </summary>
     double? PeakMemoryUsageMb { get; }

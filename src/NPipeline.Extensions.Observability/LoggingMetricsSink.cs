@@ -58,6 +58,19 @@ public sealed class LoggingMetricsSink : IMetricsSink
             new EventId(7, nameof(LoggingMetricsSink)),
             "Node {NodeId} average item time: {AverageMs:F2} ms");
 
+    private static readonly Action<ILogger, string, double, Exception?> s_logSuccessWithoutCounts =
+        LoggerMessage.Define<string, double>(
+            LogLevel.Information,
+            new EventId(9, nameof(LoggingMetricsSink)),
+            "Node {NodeId} completed successfully in {DurationMs:F3}ms. Item counts were not recorded; configure the node with "
+            + "WithObservability, or set ObservabilityExtensionOptions.AutoObserveAllNodes, to record them");
+
+    private static readonly Action<ILogger, string, string, Exception?> s_logFailureWithoutCounts =
+        LoggerMessage.Define<string, string>(
+            LogLevel.Warning,
+            new EventId(10, nameof(LoggingMetricsSink)),
+            "Node {NodeId} failed. Exception: {ExceptionMessage}");
+
     private readonly ILogger _logger;
 
     /// <summary>
@@ -85,6 +98,7 @@ public sealed class LoggingMetricsSink : IMetricsSink
                    ["Success"] = nodeMetrics.Success,
                    ["ItemsProcessed"] = nodeMetrics.ItemsProcessed,
                    ["ItemsEmitted"] = nodeMetrics.ItemsEmitted,
+                   ["ItemCountsRecorded"] = nodeMetrics.ItemCountsRecorded,
                    ["DurationMs"] = nodeMetrics.DurationMs,
                    ["RetryCount"] = nodeMetrics.RetryCount,
                    ["RetryEvents"] = nodeMetrics.RetryEvents,
@@ -94,7 +108,15 @@ public sealed class LoggingMetricsSink : IMetricsSink
                    ["AverageItemProcessingMs"] = nodeMetrics.AverageItemProcessingMs,
                }))
         {
-            if (nodeMetrics.Success)
+            if (!nodeMetrics.ItemCountsRecorded)
+            {
+                // Without counts, "processed 0 items" would read as a node that saw no data.
+                if (nodeMetrics.Success)
+                    s_logSuccessWithoutCounts(_logger, nodeMetrics.NodeId, nodeMetrics.DurationMs ?? 0.0, null);
+                else
+                    s_logFailureWithoutCounts(_logger, nodeMetrics.NodeId, nodeMetrics.Exception?.Message ?? "Unknown error", null);
+            }
+            else if (nodeMetrics.Success)
             {
                 if (nodeMetrics.AverageItemProcessingMs.HasValue)
                 {

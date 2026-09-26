@@ -7,6 +7,7 @@ using NPipeline.Graph;
 using NPipeline.Lineage;
 using NPipeline.Nodes;
 using NPipeline.Observability;
+using NPipeline.Observability.Configuration;
 using NPipeline.Observability.Logging;
 using NPipeline.Pipeline;
 
@@ -115,6 +116,7 @@ internal sealed class PipelineExecutionOrchestrator : IPipelineExecutionOrchestr
                 .ConfigureAwait(false);
 
             graph = setupResult.Graph;
+            WarnIfNodeObservabilityIgnored(definitionType, graph, context);
             nodeOutputs.EnsureCapacity(graph.Nodes.Length);
 
             await _nodeExecutionStage.ExecuteAsync(setupResult, context, nodeOutputs).ConfigureAwait(false);
@@ -163,6 +165,23 @@ internal sealed class PipelineExecutionOrchestrator : IPipelineExecutionOrchestr
 
         if (failure is not null)
             ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
+    /// <summary>
+    ///     Warns when nodes ask for metrics (<c>WithObservability</c>) but the runner has no observability surface to
+    ///     record them, which happens when a runner built without DI runs a definition written for the Observability
+    ///     extension. A sub-pipeline is skipped: its parent run has already warned.
+    /// </summary>
+    private void WarnIfNodeObservabilityIgnored(Type definitionType, PipelineGraph graph, PipelineContext context)
+    {
+        if (_observabilitySurface is not NullObservabilitySurface ||
+            context.Properties.ContainsKey(PipelineContextKeys.ParentPipelineId) ||
+            graph.ExecutionOptions.NodeExecutionAnnotations is not { Count: > 0 } annotations ||
+            !annotations.Values.Any(static value => value is ObservabilityOptions))
+            return;
+
+        var logger = context.Observability.LoggerFactory.CreateLogger(nameof(PipelineRunner));
+        PipelineRunnerLogMessages.NodeObservabilityIgnored(logger, context.RunIdentity.PipelineName ?? definitionType.Name);
     }
 
     private static void InitializeExecutionContext(PipelineContext context)

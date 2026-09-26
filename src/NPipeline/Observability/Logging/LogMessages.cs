@@ -57,6 +57,12 @@ internal static partial class ObservabilitySurfaceLogMessages
 
     [LoggerMessage(9, LogLevel.Error, "Node {NodeId} failed")]
     public static partial void NodeFailed(ILogger logger, Exception exception, string nodeId);
+
+    [LoggerMessage(10, LogLevel.Warning,
+        "Observability is registered, but the context running pipeline {PipelineName} has no observability collector, so no metrics "
+        + "will be recorded. Run the pipeline with serviceProvider.RunPipelineAsync(), or create its context with "
+        + "serviceProvider.CreatePipelineContext() or IObservablePipelineContextFactory, instead of new PipelineContext().")]
+    public static partial void ObservabilityCollectorMissing(ILogger logger, string pipelineName);
 }
 
 /// <summary>
@@ -181,6 +187,11 @@ internal static partial class PipelineRunnerLogMessages
 
     [LoggerMessage(12, LogLevel.Warning, "A callback registered on the run's cancellation token threw while the run was being cancelled")]
     public static partial void CancellationCallbackFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(13, LogLevel.Warning,
+        "Pipeline {PipelineName} has nodes configured with WithObservability, but the runner has no observability surface, so no "
+        + "metrics will be recorded. Register services.AddNPipelineObservability() and run the pipeline through dependency injection.")]
+    public static partial void NodeObservabilityIgnored(ILogger logger, string pipelineName);
 }
 
 /// <summary>

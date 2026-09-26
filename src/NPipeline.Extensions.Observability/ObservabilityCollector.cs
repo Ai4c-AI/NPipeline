@@ -523,7 +523,8 @@ public sealed class ObservabilityCollector : IObservabilityCollector
                     Interlocked.Read(ref _retriesExhausted),
                     Interlocked.Read(ref _circuitBreakerTrips),
                     Interlocked.Read(ref _itemsReplayed),
-                    Kind);
+                    Kind,
+                    ItemCountsRecorded);
             }
         }
     }

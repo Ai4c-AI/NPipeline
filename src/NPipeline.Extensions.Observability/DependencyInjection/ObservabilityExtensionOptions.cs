@@ -20,6 +20,18 @@ public sealed record ObservabilityExtensionOptions
     public bool EnableMemoryMetrics { get; init; }
 
     /// <summary>
+    ///     Gets or sets whether to record item counts and timing for every node, not only those configured with
+    ///     <c>WithObservability</c>.
+    /// </summary>
+    /// <remarks>
+    ///     Off by default, so a node without observability options pays nothing per item. When on, such a node is observed with
+    ///     <see cref="Configuration.ObservabilityOptions.Default" />; a node's own <c>WithObservability</c> options still win.
+    ///     When off, a node without options still reports its duration and outcome, but its item counts are reported as not
+    ///     recorded (<see cref="Metrics.INodeMetrics.ItemCountsRecorded" /> is false).
+    /// </remarks>
+    public bool AutoObserveAllNodes { get; init; }
+
+    /// <summary>
     ///     Gets the default observability extension options with memory metrics disabled.
     /// </summary>
     public static ObservabilityExtensionOptions Default => new() { EnableMemoryMetrics = false };

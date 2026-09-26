@@ -360,6 +360,26 @@ public sealed class LoggingPipelineMetricsSinkTests
     }
 
     [Fact]
+    public async Task RecordAsync_NodeWithoutItemCounts_SaysCountsWereNotRecordedInsteadOfZero()
+    {
+        // Arrange
+        var loggerMock = CreateLogger();
+        var sink = new LoggingPipelineMetricsSink(loggerMock);
+        var unobserved = (NodeMetrics)CreateNodeMetrics("unobserved", true, itemsProcessed: 0) with { ItemCountsRecorded = false };
+        var failed = (NodeMetrics)CreateNodeMetrics("failed", false, new InvalidOperationException("boom")) with { ItemCountsRecorded = false };
+        var metrics = CreatePipelineMetrics(true, nodeMetrics: [unobserved, failed]);
+
+        // Act
+        await sink.RecordAsync(metrics, CancellationToken.None);
+
+        // Assert
+        var entries = GetLogEntries(loggerMock);
+        Assert.Equal("unobserved", Assert.Single(entries, static e => e.EventId.Id == 12).Values["NodeId"]);
+        Assert.Equal("failed", Assert.Single(entries, static e => e.EventId.Id == 13).Values["NodeId"]);
+        Assert.DoesNotContain(entries, static e => e.EventId.Id is 3 or 4);
+    }
+
+    [Fact]
     public async Task RecordAsync_WithZeroDuration_ShouldNotLogOverallThroughput()
     {
         // Arrange

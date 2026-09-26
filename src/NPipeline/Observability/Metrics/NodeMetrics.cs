@@ -33,6 +33,7 @@ namespace NPipeline.Observability.Metrics;
 /// <param name="CircuitBreakerTrips">The number of times this node's circuit breaker opened.</param>
 /// <param name="ItemsReplayed">The number of items a node restart read again after they had already been processed once.</param>
 /// <param name="Kind">The node's kind, or null when it was not recorded.</param>
+/// <param name="ItemCountsRecorded">Whether the node recorded item counts. When false, the item counts are 0 because nothing counted them.</param>
 public sealed record NodeMetrics(
     string NodeId,
     DateTimeOffset? StartTime,
@@ -58,4 +59,5 @@ public sealed record NodeMetrics(
     long RetriesExhausted = 0,
     long CircuitBreakerTrips = 0,
     long ItemsReplayed = 0,
-    NodeKind? Kind = null) : INodeMetrics;
+    NodeKind? Kind = null,
+    bool ItemCountsRecorded = true) : INodeMetrics;

@@ -36,7 +36,9 @@ NumberGenerator → NumberFilter → NumberMultiplier → ResultAggregator
 
 ### 1. Node-Level Metrics
 
-Each node automatically records:
+Item counts are recorded only for nodes configured with `.WithObservability(builder)`. This sample's nodes have no
+options of their own, so `Program.cs` registers observability with `AutoObserveAllNodes = true`, which observes every
+node. Each node then records:
 
 - **Duration**: Total execution time in milliseconds
 - **Items Processed**: Total items received

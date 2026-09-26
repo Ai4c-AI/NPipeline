@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Microsoft.Extensions.Logging;
 using NPipeline.Attributes;
 using NPipeline.DataFlow.Branching;
 using NPipeline.Execution;
@@ -17,6 +18,28 @@ namespace NPipeline.Observability;
 /// </summary>
 public sealed class ObservabilitySurface : IObservabilitySurface
 {
+    private readonly ObservabilityOptions? _defaultNodeOptions;
+
+    /// <summary>
+    ///     Initializes a new instance of the <see cref="ObservabilitySurface" /> class that records item counts only for nodes
+    ///     configured with <c>WithObservability</c>.
+    /// </summary>
+    public ObservabilitySurface()
+    {
+    }
+
+    /// <summary>
+    ///     Initializes a new instance of the <see cref="ObservabilitySurface" /> class.
+    /// </summary>
+    /// <param name="defaultNodeOptions">
+    ///     The options to observe a node with when it has none of its own, or null to observe only nodes configured with
+    ///     <c>WithObservability</c>.
+    /// </param>
+    public ObservabilitySurface(ObservabilityOptions? defaultNodeOptions)
+    {
+        _defaultNodeOptions = defaultNodeOptions;
+    }
+
     /// <summary>
     ///     Begins a pipeline run and returns the created activity.
     /// </summary>
@@ -28,6 +51,7 @@ public sealed class ObservabilitySurface : IObservabilitySurface
         var logger = context.Observability.LoggerFactory.CreateLogger(nameof(ObservabilitySurface));
         var activity = context.Observability.Tracer.StartActivity($"Pipeline.Run: {typeof(TDefinition).Name}");
         ObservabilitySurfaceLogMessages.PipelineStarting(logger, typeof(TDefinition).Name);
+        WarnIfCollectorMissing(context, logger, typeof(TDefinition).Name);
         return activity;
     }
 
@@ -125,20 +149,19 @@ public sealed class ObservabilitySurface : IObservabilitySurface
         var collector = context.Observability.ObservabilityFactory.ResolveObservabilityCollector();
         collector?.RecordNodeKind(nodeDef.Id, nodeDef.Kind, context.RunIdentity.PipelineId, context.RunIdentity.PipelineName);
 
-        // Check for per-node observability configuration
+        // The node's own options (WithObservability) win; otherwise the surface's default, when AutoObserveAllNodes is on.
         IAutoObservabilityScope? autoObservabilityScope = null;
-        var optionsKey = "NPipeline.Observability.Options:" + nodeDef.Id;
+        var optionsKey = ObservabilityConfigurationExtensions.ObservabilityOptionsKey + ":" + nodeDef.Id;
 
-        if (graph.ExecutionOptions.NodeExecutionAnnotations != null &&
-            graph.ExecutionOptions.NodeExecutionAnnotations.TryGetValue(
-                optionsKey,
-                out var optionsValue))
+        var nodeOptions = graph.ExecutionOptions.NodeExecutionAnnotations?.TryGetValue(optionsKey, out var optionsValue) == true &&
+                          optionsValue is ObservabilityOptions obsOptions
+            ? obsOptions
+            : _defaultNodeOptions;
+
+        if (collector != null && nodeOptions != null)
         {
-            if (collector != null && optionsValue is ObservabilityOptions obsOptions)
-            {
-                autoObservabilityScope = new AutoObservabilityScope(collector, nodeDef.Id, obsOptions, context.RunIdentity.PipelineId,
-                    context.RunIdentity.PipelineName);
-            }
+            autoObservabilityScope = new AutoObservabilityScope(collector, nodeDef.Id, nodeOptions, context.RunIdentity.PipelineId,
+                context.RunIdentity.PipelineName);
         }
 
         // Store the scope in context so execution strategies can access it to track item counts
@@ -236,6 +259,7 @@ public sealed class ObservabilitySurface : IObservabilitySurface
         var logger = context.Observability.LoggerFactory.CreateLogger(nameof(ObservabilitySurface));
         var activity = context.Observability.Tracer.StartActivity($"Pipeline.Run: {definitionType.Name}");
         ObservabilitySurfaceLogMessages.PipelineStarting(logger, definitionType.Name);
+        WarnIfCollectorMissing(context, logger, definitionType.Name);
         return activity;
     }
 
@@ -288,6 +312,20 @@ public sealed class ObservabilitySurface : IObservabilitySurface
         {
             ObservabilitySurfaceLogMessages.MetricsEmissionFailedAfterPipelineFailure(logger, emitEx, definitionType.Name);
         }
+    }
+
+    /// <summary>
+    ///     This surface is only registered by <c>AddNPipelineObservability</c>, so a context without a collector means the run
+    ///     was started with a context that bypassed the container (typically <c>new PipelineContext()</c>), and nothing
+    ///     will be recorded. A sub-pipeline is skipped: its parent run has already warned.
+    /// </summary>
+    private static void WarnIfCollectorMissing(PipelineContext context, ILogger logger, string pipelineName)
+    {
+        if (context.Properties.ContainsKey(PipelineContextKeys.ParentPipelineId) ||
+            context.Observability.ObservabilityFactory.ResolveObservabilityCollector() is not null)
+            return;
+
+        ObservabilitySurfaceLogMessages.ObservabilityCollectorMissing(logger, pipelineName);
     }
 
     private static void PublishNodeDataflowCompleted(

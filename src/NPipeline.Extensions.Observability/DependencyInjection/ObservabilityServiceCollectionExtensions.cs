@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using NPipeline.Execution;
 using NPipeline.Extensions.Observability;
+using NPipeline.Observability.Configuration;
 using NPipeline.Observability.Metrics;
 
 namespace NPipeline.Observability.DependencyInjection;
@@ -9,6 +10,21 @@ namespace NPipeline.Observability.DependencyInjection;
 /// <summary>
 ///     Provides extension methods for setting up NPipeline observability services in an <see cref="IServiceCollection" />.
 /// </summary>
+/// <remarks>
+///     <para>
+///         Metrics are recorded for runs whose context comes from the container: <c>RunPipelineAsync</c>,
+///         <c>CreatePipelineContext</c> or <see cref="IObservablePipelineContextFactory" />. A run with a
+///         <c>new PipelineContext()</c> records nothing and logs a warning.
+///     </para>
+///     <para>
+///         Item counts are recorded only for nodes configured with <c>WithObservability</c>, unless
+///         <see cref="ObservabilityExtensionOptions.AutoObserveAllNodes" /> is set.
+///     </para>
+///     <para>
+///         The default logging sinks need logging registered (<c>services.AddLogging()</c> or a host); without it they log
+///         to a null logger.
+///     </para>
+/// </remarks>
 public static class ObservabilityServiceCollectionExtensions
 {
     /// <summary>
@@ -252,6 +268,7 @@ public static class ObservabilityServiceCollectionExtensions
         services.TryAddScoped<IObservablePipelineContextFactory, ObservablePipelineContextFactory>();
 
         // Replace the core null observability surface with the real one.
-        services.AddScoped<IObservabilitySurface, ObservabilitySurface>();
+        var defaultNodeOptions = options.AutoObserveAllNodes ? ObservabilityOptions.Default : null;
+        services.AddScoped<IObservabilitySurface>(_ => new ObservabilitySurface(defaultNodeOptions));
     }
 }

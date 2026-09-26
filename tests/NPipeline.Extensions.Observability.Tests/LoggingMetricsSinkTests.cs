@@ -369,5 +369,47 @@ public sealed class LoggingMetricsSinkTests
         _ = Assert.Single(logCalls);
     }
 
+        [Fact]
+    public async Task RecordAsync_WithoutItemCounts_SaysCountsWereNotRecordedInsteadOfZero()
+    {
+        // Arrange
+        var logger = CreateLogger();
+        var sink = new LoggingMetricsSink(logger);
+        var metrics = (NodeMetrics)CreateNodeMetrics(true, itemsProcessed: 0, itemsEmitted: 0) with { ItemCountsRecorded = false };
+
+        // Act
+        await sink.RecordAsync(metrics, CancellationToken.None);
+
+        // Assert
+        var eventIds = GetEventIds(logger);
+        Assert.Contains(9, eventIds);
+        Assert.DoesNotContain(1, eventIds);
+        Assert.DoesNotContain(2, eventIds);
+    }
+
+    [Fact]
+    public async Task RecordAsync_FailedWithoutItemCounts_LogsTheFailureWithoutCounts()
+    {
+        // Arrange
+        var logger = CreateLogger();
+        var sink = new LoggingMetricsSink(logger);
+        var metrics = (NodeMetrics)CreateNodeMetrics(false, new InvalidOperationException("boom")) with { ItemCountsRecorded = false };
+
+        // Act
+        await sink.RecordAsync(metrics, CancellationToken.None);
+
+        // Assert
+        var eventIds = GetEventIds(logger);
+        Assert.Contains(10, eventIds);
+        Assert.DoesNotContain(3, eventIds);
+    }
+
+    private static List<int> GetEventIds(ILogger logger) =>
+    [
+        .. Fake.GetCalls(logger)
+            .Where(static c => c.Method.Name == "Log")
+            .Select(static c => c.GetArgument<EventId>(1).Id),
+    ];
+
     #endregion
 }

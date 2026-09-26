@@ -27,7 +27,7 @@ public sealed class LoggingPipelineMetricsSink : IPipelineMetricsSink
             LogLevel.Information,
             new EventId(10, nameof(LoggingPipelineMetricsSink)),
             "Pipeline {PipelineName} (RunId: {RunId}) completed successfully in {DurationMs:F3}ms. Item counts were not recorded; "
-            + "configure its source and sink nodes with WithObservability to record them");
+            + "configure its source and sink nodes with WithObservability, or set ObservabilityExtensionOptions.AutoObserveAllNodes, to record them");
 
     private static readonly Action<ILogger, string, Guid, string, Exception?> s_logPipelineFailureWithoutCounts =
         LoggerMessage.Define<string, Guid, string>(
@@ -76,6 +76,18 @@ public sealed class LoggingPipelineMetricsSink : IPipelineMetricsSink
             LogLevel.Information,
             new EventId(8, nameof(LoggingPipelineMetricsSink)),
             "Overall pipeline throughput: {Throughput:F2} items/sec");
+
+    private static readonly Action<ILogger, string, double, Exception?> s_logNodeSuccessWithoutCounts =
+        LoggerMessage.Define<string, double>(
+            LogLevel.Information,
+            new EventId(12, nameof(LoggingPipelineMetricsSink)),
+            "  Node {NodeId}: Completed in {DurationMs:F3}ms (item counts not recorded)");
+
+    private static readonly Action<ILogger, string, string, Exception?> s_logNodeFailureWithoutCounts =
+        LoggerMessage.Define<string, string>(
+            LogLevel.Warning,
+            new EventId(13, nameof(LoggingPipelineMetricsSink)),
+            "  Node {NodeId}: Failed (item counts not recorded). Exception: {ExceptionMessage}");
 
     private readonly ILogger _logger;
 
@@ -136,7 +148,14 @@ public sealed class LoggingPipelineMetricsSink : IPipelineMetricsSink
             // Log node-level metrics
             foreach (var nodeMetric in pipelineMetrics.NodeMetrics)
             {
-                if (nodeMetric.Success)
+                if (!nodeMetric.ItemCountsRecorded)
+                {
+                    if (nodeMetric.Success)
+                        s_logNodeSuccessWithoutCounts(_logger, nodeMetric.NodeId, nodeMetric.DurationMs ?? 0.0, null);
+                    else
+                        s_logNodeFailureWithoutCounts(_logger, nodeMetric.NodeId, nodeMetric.Exception?.Message ?? "Unknown error", null);
+                }
+                else if (nodeMetric.Success)
                 {
                     s_logNodeSuccess(
                         _logger,

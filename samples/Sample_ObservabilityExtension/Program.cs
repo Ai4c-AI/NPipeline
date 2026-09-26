@@ -28,10 +28,12 @@ async Task RunPipelineAsync()
                 // - IExecutionObserver (scoped, connected to the collector)
                 // - IObservablePipelineContextFactory (scoped, for creating contexts with observability)
                 //
+                // Item counts are recorded only for nodes configured with .WithObservability(builder). This demo's nodes
+                // have no options of their own, so AutoObserveAllNodes observes every node with ObservabilityOptions.Default.
+                //
                 // By default, memory metrics are disabled for optimal performance. Enable them with:
-                // services.AddNPipelineObservability(ObservabilityExtensionOptions.WithMemoryMetrics);
-                // or: services.AddNPipelineObservability(new ObservabilityExtensionOptions { EnableMemoryMetrics = true });
-                _ = services.AddNPipelineObservability();
+                // new ObservabilityExtensionOptions { AutoObserveAllNodes = true, EnableMemoryMetrics = true }
+                _ = services.AddNPipelineObservability(new ObservabilityExtensionOptions { AutoObserveAllNodes = true });
             })
             .Build();
 

@@ -35,6 +35,18 @@ dotnet add package NPipeline.Extensions.Observability.OpenTelemetry
 
 ## Quick Start
 
+> [!IMPORTANT]
+> Three things must line up, or you get no metrics or zero item counts:
+>
+> 1. **Logging.** The built-in sinks log through `ILogger<T>`. Register logging (`services.AddLogging(...)`, or use a host),
+>    or they log to a null logger.
+> 2. **A context from the container.** Run with `serviceProvider.RunPipelineAsync<T>()`, or create the context with
+>    `serviceProvider.CreatePipelineContext()` or `IObservablePipelineContextFactory`. A `new PipelineContext()` has no
+>    collector, and the run logs a warning saying so.
+> 3. **Item counts are opt-in per node.** Only nodes configured with `.WithObservability(builder)` count items. Set
+>    `AutoObserveAllNodes` to count every node (see [Observing every node](#observing-every-node)). Nodes without either
+>    still report duration and outcome, and the logging sinks say their item counts were not recorded.
+
 The simplest way to enable automatic observability is to use `IObservablePipelineContextFactory`:
 
 ```csharp
@@ -42,7 +54,8 @@ using Microsoft.Extensions.DependencyInjection;
 using NPipeline.Observability;
 using NPipeline.Observability.DependencyInjection;
 
-// Register observability services - this wires everything up automatically
+// Register logging and observability services
+services.AddLogging(b => b.AddConsole());
 services.AddNPipelineObservability();
 
 // In your pipeline execution code:
@@ -151,6 +164,22 @@ public class MyPipeline : IPipelineDefinition
 2. Creates an `IAutoObservabilityScope` when the node starts executing
 3. Automatically records item counts, failures, and performance metrics
 4. Disposes the scope when the node completes, ensuring all metrics are captured
+
+### Observing every node
+
+Item counting costs a little per item, so it's off for nodes without `WithObservability`. To observe every node with
+`ObservabilityOptions.Default`, turn on `AutoObserveAllNodes`:
+
+```csharp
+services.AddNPipelineObservability(new ObservabilityExtensionOptions { AutoObserveAllNodes = true });
+```
+
+A node's own `WithObservability` options still win, so you can opt a node out with
+`.WithObservability(builder, ObservabilityOptions.Minimal)`.
+
+A node that isn't observed reports `INodeMetrics.ItemCountsRecorded = false`, and its `ItemsProcessed` and
+`ItemsEmitted` are 0 because nothing counted them. The pipeline's `ItemsIn` and `ItemsOut` are null unless its sources
+and sinks are observed.
 
 ### ObservabilityOptions Presets
 
@@ -295,9 +324,23 @@ This ensures accurate metrics collection even when multiple nodes execute concur
 **Solutions**:
 
 1. Verify observability is registered: `services.AddNPipelineObservability()`
-2. Check that the pipeline is using `IObservablePipelineContextFactory` to create the context
-3. Ensure logging is configured properly for `LoggingMetricsSink`
-4. Verify sink implementations are not throwing exceptions
+2. Run with `RunPipelineAsync`, or create the context with `CreatePipelineContext()` or `IObservablePipelineContextFactory`.
+   Look for a warning that the context "has no observability collector".
+3. Register logging (`services.AddLogging(...)`). Without it, `LoggingMetricsSink` and `LoggingPipelineMetricsSink` log
+   to a null logger.
+4. Run through DI. A runner from `PipelineRunner.Create()` has no observability surface; it logs a warning when nodes
+   use `WithObservability`.
+5. Verify sink implementations are not throwing exceptions. A failing sink is logged as "Failed to emit observability
+   metrics".
+
+### Item Counts Are Zero or "Not Recorded"
+
+**Problem**: Nodes report 0 items, or the logs say item counts were not recorded.
+
+**Solutions**:
+
+1. Configure the nodes with `.WithObservability(builder)`, or set `AutoObserveAllNodes = true`.
+2. Check the node's options: `ObservabilityOptions.Minimal` and `Disabled` don't record item counts.
 
 ### Performance Degradation
 
