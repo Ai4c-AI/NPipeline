@@ -2,7 +2,9 @@
 
 using System.Reflection;
 using AwesomeAssertions;
+using FakeItEasy;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using NPipeline.DataFlow;
 using NPipeline.ErrorHandling;
 using NPipeline.Execution;
@@ -10,6 +12,7 @@ using NPipeline.Extensions.Testing;
 using NPipeline.Lineage;
 using NPipeline.Nodes;
 using NPipeline.Observability;
+using NPipeline.Observability.Tracing;
 using NPipeline.Pipeline;
 
 namespace NPipeline.Extensions.DependencyInjection.Tests;
@@ -198,6 +201,58 @@ public sealed class ServiceCollectionExtensionsTests
 
         // Assert
         sink.Tracker.Disposed.Should().BeTrue("RunPipelineAsync creates the context, so it must dispose it");
+    }
+
+    [Fact]
+    public async Task RunPipelineAsync_UsesTheContainersLoggerFactoryAndTracer()
+    {
+        // Arrange - without these the context falls back to null implementations and the framework's logging goes nowhere.
+        var loggerFactory = A.Fake<ILoggerFactory>();
+        var tracer = A.Fake<IPipelineTracer>();
+
+        var services = new ServiceCollection();
+        services.AddNPipeline(Assembly.GetExecutingAssembly());
+        services.AddSingleton(loggerFactory);
+        services.AddSingleton(tracer);
+
+        var descriptor = services.Single(d => d.ServiceType == typeof(ContextCapturingSinkNode));
+        services.Remove(descriptor);
+        var sink = new ContextCapturingSinkNode();
+        services.AddSingleton(sink);
+
+        await using var serviceProvider = services.BuildServiceProvider();
+        var parameters = new Dictionary<string, object> { ["answer"] = 42 };
+
+        // Act
+        await serviceProvider.RunPipelineAsync<ContextCapturingPipelineDefinition>(parameters);
+
+        // Assert
+        sink.LoggerFactory.Should().BeSameAs(loggerFactory);
+        sink.Tracer.Should().BeSameAs(tracer);
+        sink.Answer.Should().Be(42, "the caller's parameters must still reach the context");
+        A.CallTo(() => loggerFactory.CreateLogger(A<string>._)).MustHaveHappened();
+    }
+
+    [Fact]
+    public async Task RunPipelineAsync_WithoutLoggingRegistered_FallsBackToNullImplementations()
+    {
+        // Arrange
+        var services = new ServiceCollection();
+        services.AddNPipeline(Assembly.GetExecutingAssembly());
+
+        var descriptor = services.Single(d => d.ServiceType == typeof(ContextCapturingSinkNode));
+        services.Remove(descriptor);
+        var sink = new ContextCapturingSinkNode();
+        services.AddSingleton(sink);
+
+        await using var serviceProvider = services.BuildServiceProvider();
+
+        // Act
+        await serviceProvider.RunPipelineAsync<ContextCapturingPipelineDefinition>();
+
+        // Assert
+        sink.LoggerFactory.Should().NotBeNull();
+        sink.Tracer.Should().NotBeNull();
     }
 
     [Fact]
@@ -446,6 +501,36 @@ public sealed class ServiceCollectionExtensionsTests
             var source = builder.AddSource<InMemorySourceNode<string>, string>("source");
             var sink = builder.AddSink<RegisteringSinkNode, string>("sink");
             builder.Connect(source, sink);
+        }
+    }
+
+    private sealed class ContextCapturingPipelineDefinition : IPipelineDefinition
+    {
+        public void Define(PipelineBuilder builder, PipelineContext context)
+        {
+            var source = builder.AddSource<InMemorySourceNode<string>, string>("source");
+            var sink = builder.AddSink<ContextCapturingSinkNode, string>("sink");
+            builder.Connect(source, sink);
+        }
+    }
+
+    public sealed class ContextCapturingSinkNode : SinkNode<string>
+    {
+        public ILoggerFactory? LoggerFactory { get; private set; }
+
+        public IPipelineTracer? Tracer { get; private set; }
+
+        public object? Answer { get; private set; }
+
+        public override async Task ConsumeAsync(IDataStream<string> input, PipelineContext context, CancellationToken cancellationToken)
+        {
+            LoggerFactory = context.Observability.LoggerFactory;
+            Tracer = context.Observability.Tracer;
+            Answer = context.Parameters.TryGetValue("answer", out var answer) ? answer : null;
+
+            await foreach (var _ in input.WithCancellation(cancellationToken))
+            {
+            }
         }
     }
 

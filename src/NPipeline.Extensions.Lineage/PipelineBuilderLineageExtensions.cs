@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using NPipeline.Pipeline;
 
 namespace NPipeline.Lineage;
@@ -12,19 +13,37 @@ public static class PipelineBuilderLineageExtensions
     ///     Configures the pipeline to use a <see cref="LoggingPipelineLineageSink" /> for pipeline-level lineage reporting.
     /// </summary>
     /// <param name="builder">The pipeline builder.</param>
-    /// <param name="jsonOptions">Optional JSON serialization options for the sink.</param>
     /// <returns>The current PipelineBuilder instance for method chaining.</returns>
     /// <remarks>
-    ///     This is a convenience method that registers a logging sink for pipeline-level lineage information.
-    ///     The sink will serialize lineage reports to JSON and log them using the configured logger.
+    ///     The sink is registered by type, so the run's lineage factory constructs it with the run's logging: the container's
+    ///     <see cref="ILogger{TCategoryName}" /> when the pipeline runs through dependency injection, and the context's
+    ///     <see cref="ILoggerFactory" /> otherwise. To log through a specific logger factory or customize the JSON output, use
+    ///     <see cref="UseLoggingPipelineLineageSink(PipelineBuilder, ILoggerFactory, JsonSerializerOptions?)" />.
     /// </remarks>
-    public static PipelineBuilder UseLoggingPipelineLineageSink(
-        this PipelineBuilder builder,
-        JsonSerializerOptions? jsonOptions = null)
+    public static PipelineBuilder UseLoggingPipelineLineageSink(this PipelineBuilder builder)
     {
         ArgumentNullException.ThrowIfNull(builder);
 
-        var sink = new LoggingPipelineLineageSink(jsonOptions: jsonOptions);
+        return builder.AddPipelineLineageSink<LoggingPipelineLineageSink>();
+    }
+
+    /// <summary>
+    ///     Configures the pipeline to use a <see cref="LoggingPipelineLineageSink" /> that logs pipeline-level lineage reports
+    ///     through the specified logger factory.
+    /// </summary>
+    /// <param name="builder">The pipeline builder.</param>
+    /// <param name="loggerFactory">The logger factory to create the sink's logger from.</param>
+    /// <param name="jsonOptions">Optional JSON serialization options for the sink.</param>
+    /// <returns>The current PipelineBuilder instance for method chaining.</returns>
+    public static PipelineBuilder UseLoggingPipelineLineageSink(
+        this PipelineBuilder builder,
+        ILoggerFactory loggerFactory,
+        JsonSerializerOptions? jsonOptions = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
+
+        var sink = new LoggingPipelineLineageSink(loggerFactory.CreateLogger<LoggingPipelineLineageSink>(), jsonOptions);
         return builder.AddPipelineLineageSink(sink);
     }
 }

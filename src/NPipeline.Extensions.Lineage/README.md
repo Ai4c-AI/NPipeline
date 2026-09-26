@@ -62,7 +62,9 @@ var builder = new PipelineBuilder("MyPipeline");
 // Enable item-level lineage tracking
 builder.EnableItemLevelLineage();
 
-// Add a logging sink for pipeline-level lineage reports
+// Add a logging sink for pipeline-level lineage reports. It logs through the container's logging when the
+// pipeline runs through DI. Pass an ILoggerFactory to choose the logging yourself:
+// builder.UseLoggingPipelineLineageSink(loggerFactory);
 builder.UseLoggingPipelineLineageSink();
 
 // Build and execute the pipeline

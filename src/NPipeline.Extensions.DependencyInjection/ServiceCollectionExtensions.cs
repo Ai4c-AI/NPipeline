@@ -150,16 +150,11 @@ public static class ServiceCollectionExtensions
         var sp = scope.ServiceProvider;
 
         var runner = sp.GetRequiredService<IPipelineRunner>();
-        var errorHandlerFactory = sp.GetRequiredService<IErrorHandlerFactory>();
-        var lineageFactory = sp.GetRequiredService<ILineageFactory>();
-        var observabilityFactory = sp.GetRequiredService<IObservabilityFactory>();
 
-        var config = new PipelineContextConfiguration(
-            parameters,
-            ErrorHandlerFactory: errorHandlerFactory,
-            LineageFactory: lineageFactory,
-            ObservabilityFactory: observabilityFactory,
-            CancellationToken: cancellationToken);
+        // Take the factories, logger factory and tracer from the run's scope. Without the logger factory and tracer the
+        // context falls back to null implementations, and the framework's own logging and tracing go nowhere.
+        var config = new PipelineContextConfiguration(parameters, CancellationToken: cancellationToken)
+            .WithServiceDefaults(sp);
 
         var context = new PipelineContext(config);
 

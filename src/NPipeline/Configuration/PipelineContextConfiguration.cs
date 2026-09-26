@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NPipeline.ErrorHandling;
 using NPipeline.Lineage;
@@ -134,5 +135,30 @@ public sealed record PipelineContextConfiguration(
     {
         ArgumentNullException.ThrowIfNull(resiliencePolicy);
         return new PipelineContextConfiguration(ResiliencePolicy: resiliencePolicy);
+    }
+
+    /// <summary>
+    ///     Returns a copy that fills each unset service from <paramref name="serviceProvider" />: the error handler, lineage and
+    ///     observability factories, the logger factory and the tracer. Services this configuration already sets are kept.
+    /// </summary>
+    /// <remarks>
+    ///     Use this when creating a context from a container, so that a run started through DI logs through the
+    ///     container's <see cref="ILoggerFactory" /> and traces through its <see cref="IPipelineTracer" /> instead of silently
+    ///     falling back to the null implementations.
+    /// </remarks>
+    /// <param name="serviceProvider">The service provider to resolve unset services from.</param>
+    /// <returns>A configuration with the container's services filled in.</returns>
+    internal PipelineContextConfiguration WithServiceDefaults(IServiceProvider serviceProvider)
+    {
+        ArgumentNullException.ThrowIfNull(serviceProvider);
+
+        return this with
+        {
+            ErrorHandlerFactory = ErrorHandlerFactory ?? serviceProvider.GetService<IErrorHandlerFactory>(),
+            LineageFactory = LineageFactory ?? serviceProvider.GetService<ILineageFactory>(),
+            ObservabilityFactory = ObservabilityFactory ?? serviceProvider.GetService<IObservabilityFactory>(),
+            LoggerFactory = LoggerFactory ?? serviceProvider.GetService<ILoggerFactory>(),
+            Tracer = Tracer ?? serviceProvider.GetService<IPipelineTracer>(),
+        };
     }
 }
