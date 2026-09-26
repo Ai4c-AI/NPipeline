@@ -124,6 +124,16 @@ internal sealed class SelfJoinNode<TKey, TItem, TOut> : KeyedJoinNode<TKey, Left
             right => rightKeySelector(right.Item));
     }
 
+    /// <summary>
+    ///     Dead-letters the caller's item rather than the wrapper the self-join adds to tell the inputs apart.
+    /// </summary>
+    private protected override object ToDeadLetterItem(object item) => item switch
+    {
+        LeftWrapper<TItem> left => left.Item!,
+        RightWrapper<TItem> right => right.Item!,
+        _ => item,
+    };
+
     private static TOut ProjectUnwrappedItem(object value, string wrapperRole)
     {
         var projector = GetProjection(value.GetType(), wrapperRole);

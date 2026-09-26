@@ -277,6 +277,12 @@ public static class ErrorCodes
     /// <summary>Node restart is configured for a transform whose execution strategy cannot resume.</summary>
     public const string NodeRestartRequiresResumableStrategy = "NP0425";
 
+    /// <summary>A one-to-one join received an item whose key had already matched or was already waiting on the same input.</summary>
+    public const string DuplicateJoinKey = "NP0426";
+
+    /// <summary>A keyed join sets one-to-one options while its cardinality is many-to-many.</summary>
+    public const string JoinOptionsRequireOneToOne = "NP0427";
+
     #endregion
 
     #region Resource Management Errors (NP05xx)

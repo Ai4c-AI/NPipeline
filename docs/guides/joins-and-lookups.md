@@ -70,6 +70,43 @@ public class MyJoin : KeyedJoinNode<int, Order, Customer, Result>
 
 When an input reaches capacity, its new items are still matched against the items already retained from the other input, but aren't retained themselves. As a result, they can't match items that arrive later. If an item that isn't retained also matched nothing, and the join type keeps its side (for example, a left item in a `LeftOuter` join), the join emits it immediately as unmatched. Otherwise, the join discards it.
 
+### One-to-One Joins
+
+Many joins pair each key exactly once: an order with its payment, a request with its response, a record with its correction. For these, set `Cardinality` to `JoinCardinality.OneToOne`. When an item finds its match on the other input, the join emits the pair and releases both items, so it holds only the items still waiting for a match:
+
+```csharp
+public class OrderPaymentJoin : KeyedJoinNode<string, Order, Payment, PaidOrder>
+{
+    public OrderPaymentJoin()
+    {
+        Cardinality = JoinCardinality.OneToOne;
+        DuplicateKeyPolicy = DuplicateKeyPolicy.DeadLetter;
+        JoinType = JoinType.LeftOuter; // Emit orders that were never paid
+    }
+
+    // CreateOutput and CreateOutputFromLeft as usual
+}
+```
+
+A one-to-one join treats a second item with the same key as a duplicate, which is a data-quality problem rather than another match. An item is a duplicate when its key has already matched, or when its own input already has an item waiting for that key. The first item to arrive wins. `DuplicateKeyPolicy` decides what happens to the duplicate:
+
+| Policy | Duplicate |
+|--------|-----------|
+| `Drop` (default) | Discarded. |
+| `DeadLetter` | Sent to the pipeline's dead-letter sink, with a `DuplicateJoinKeyException` ([NP0426](../reference/error-codes.md)) that names the key and the input. If no dead-letter sink is configured, the join fails before it reads any item ([NP0424](../reference/error-codes.md)). |
+| `EmitAsUnmatched` | Emitted as unmatched if the join type preserves its input (for example, a left item in a `LeftOuter` join). Otherwise discarded. |
+
+Null keys and `MaxCapacity` work the same way as in a many-to-many join. Setting `DuplicateKeyPolicy` or `MaxMatchedKeys` on a many-to-many join fails the join when it starts ([NP0427](../reference/error-codes.md)).
+
+To recognize duplicates, the join remembers every key that has matched, so that set grows with the number of distinct keys. Set `MaxMatchedKeys` to cap it. When the cap is reached, the join forgets the oldest key. A duplicate of a forgotten key is treated as a new item: the join retains it, and it can match or be emitted as unmatched.
+
+| Cardinality | Memory held |
+|-------------|-------------|
+| `ManyToMany` (default) | Every item from both inputs, until the inputs end |
+| `OneToOne` | Items waiting for a match, plus the keys that have matched (at most `MaxMatchedKeys`) |
+
+For an unbounded stream, prefer a [time-windowed join](#time-windowed-joins), whose windows bound what it retains. If one input is reference data, an [in-memory lookup](#in-memory-lookups) doesn't buffer the stream.
+
 ## Time-Windowed Joins
 
 For streams where items arrive over time and should be matched within a time window, use `TimeWindowedJoinNode`:
@@ -146,6 +183,7 @@ public class CustomerLookup : LookupNode<Order, int, Customer, EnrichedOrder>
 | Pattern | Use When |
 |---------|----------|
 | Keyed Join | Two live streams, match by key, both streams are finite or bounded |
+| Keyed Join (`OneToOne`) | Two live streams where each key occurs once per side, such as orders and payments |
 | Time-Windowed Join | Two live streams, match by key within a time window, continuous processing |
 | In-Memory Lookup | One live stream + one static reference dataset |
 | Custom Lookup | One live stream + dynamic lookups (DB, API) per item |
@@ -162,6 +200,8 @@ builder.AddSelfJoin<Event, string, MatchedEvent>(
     outputFactory: (e1, e2) => new MatchedEvent(e1, e2),
     leftKeySelector: e => e.CorrelationId);
 ```
+
+`AddSelfJoin` takes the optional `cardinality` and `duplicateKeyPolicy` parameters for a [one-to-one join](#one-to-one-joins). A dead-lettered duplicate is the original item, not the wrapper the self-join uses internally.
 
 ## Next Steps
 

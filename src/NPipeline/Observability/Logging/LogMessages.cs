@@ -294,3 +294,13 @@ internal static partial class DataStreamLog
     [LoggerMessage(1, LogLevel.Warning, "Multicast pump for stream '{StreamName}' did not shut down within {Timeout} after disposal cancelled it")]
     public static partial void MulticastPumpShutdownTimedOut(ILogger logger, string streamName, TimeSpan timeout);
 }
+
+/// <summary>
+///     Source-generated logging methods for keyed join nodes.
+/// </summary>
+[ExcludeFromCodeCoverage]
+internal static partial class KeyedJoinNodeLogMessages
+{
+    [LoggerMessage(1, LogLevel.Debug, "One-to-one join '{NodeId}' received a duplicate key on its {Side} input and applied {Policy}")]
+    public static partial void DuplicateKey(ILogger logger, string nodeId, string side, string policy);
+}

@@ -1,4 +1,5 @@
 using NPipeline.Execution;
+using NPipeline.Nodes;
 
 namespace NPipeline.ErrorHandling;
 
@@ -272,6 +273,12 @@ public sealed class DeadLetterSinkNotConfiguredException : PipelineException
         NodeId = nodeId;
     }
 
+    private DeadLetterSinkNotConfiguredException(string nodeId, string message)
+        : base(message)
+    {
+        NodeId = nodeId;
+    }
+
     /// <summary>
     ///     Gets the ID of the node whose item was dead-lettered.
     /// </summary>
@@ -281,6 +288,56 @@ public sealed class DeadLetterSinkNotConfiguredException : PipelineException
     ///     Gets the error code associated with this exception.
     /// </summary>
     public string ErrorCode => ErrorCodes.DeadLetterSinkNotConfigured;
+
+    /// <summary>
+    ///     Creates the exception for a one-to-one join that dead-letters duplicate keys, found before the join read any item.
+    /// </summary>
+    internal static DeadLetterSinkNotConfiguredException ForDuplicateJoinKeys(string nodeId) =>
+        new(nodeId, ErrorMessages.DeadLetterSinkNotConfiguredForDuplicateKeys(nodeId));
+}
+
+/// <summary>
+///     The error recorded with an item that a one-to-one join dead-lettered because its key was a duplicate.
+/// </summary>
+/// <remarks>
+///     A one-to-one join does not throw this exception. It is the <see cref="DeadLetterEnvelope.Error" /> of the envelope sent to
+///     the dead-letter sink when <see cref="DuplicateKeyPolicy.DeadLetter" /> is configured.
+/// </remarks>
+public sealed class DuplicateJoinKeyException : PipelineException
+{
+    /// <summary>
+    ///     Initializes a new instance of the <see cref="DuplicateJoinKeyException" /> class.
+    /// </summary>
+    /// <param name="nodeId">The ID of the join node.</param>
+    /// <param name="key">The duplicate key.</param>
+    /// <param name="side">The input the duplicate arrived on.</param>
+    public DuplicateJoinKeyException(string nodeId, object key, JoinInputSide side)
+        : base(ErrorMessages.DuplicateJoinKey(nodeId, key, side == JoinInputSide.Left ? "left" : "right"))
+    {
+        NodeId = nodeId;
+        Key = key;
+        Side = side;
+    }
+
+    /// <summary>
+    ///     Gets the ID of the join node.
+    /// </summary>
+    public string NodeId { get; }
+
+    /// <summary>
+    ///     Gets the duplicate key.
+    /// </summary>
+    public object Key { get; }
+
+    /// <summary>
+    ///     Gets the input the duplicate arrived on.
+    /// </summary>
+    public JoinInputSide Side { get; }
+
+    /// <summary>
+    ///     Gets the error code associated with this exception.
+    /// </summary>
+    public string ErrorCode => ErrorCodes.DuplicateJoinKey;
 }
 
 /// <summary>

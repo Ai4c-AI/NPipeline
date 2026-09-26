@@ -56,6 +56,14 @@ public static class SelfJoinExtensions
     ///     Optional function to create output from unmatched right items.
     ///     Used for right outer and full outer joins. If null, uses default behavior.
     /// </param>
+    /// <param name="cardinality">
+    ///     How many times a key can match. Defaults to <see cref="JoinCardinality.ManyToMany" />. See
+    ///     <see cref="KeyedJoinNode{TKey, TIn1, TIn2, TOut}.Cardinality" />.
+    /// </param>
+    /// <param name="duplicateKeyPolicy">
+    ///     What a one-to-one join does with a duplicate key. Defaults to <see cref="DuplicateKeyPolicy.Drop" />. Only valid with
+    ///     <see cref="JoinCardinality.OneToOne" />.
+    /// </param>
     /// <returns>A handle to the newly added join node.</returns>
     /// <exception cref="ArgumentNullException">
     ///     Thrown when <paramref name="builder" />, <paramref name="leftSource" />, <paramref name="rightSource" />,
@@ -99,7 +107,9 @@ public static class SelfJoinExtensions
         Func<TItem, TKey>? rightKeySelector = null,
         JoinType joinType = JoinType.Inner,
         Func<TItem, TOut>? leftFallback = null,
-        Func<TItem, TOut>? rightFallback = null)
+        Func<TItem, TOut>? rightFallback = null,
+        JoinCardinality cardinality = JoinCardinality.ManyToMany,
+        DuplicateKeyPolicy duplicateKeyPolicy = DuplicateKeyPolicy.Drop)
         where TKey : notnull
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -120,7 +130,9 @@ public static class SelfJoinExtensions
             rightKeySelector,
             joinType,
             leftFallback,
-            rightFallback);
+            rightFallback,
+            cardinality,
+            duplicateKeyPolicy);
     }
 
     /// <summary>
@@ -136,7 +148,9 @@ public static class SelfJoinExtensions
         Func<TItem, TKey>? rightKeySelector,
         JoinType joinType,
         Func<TItem, TOut>? leftFallback,
-        Func<TItem, TOut>? rightFallback)
+        Func<TItem, TOut>? rightFallback,
+        JoinCardinality cardinality,
+        DuplicateKeyPolicy duplicateKeyPolicy)
         where TKey : notnull
     {
         // Create and register wrapper transform instances explicitly
@@ -157,6 +171,8 @@ public static class SelfJoinExtensions
             JoinType = joinType,
             LeftFallback = leftFallback,
             RightFallback = rightFallback,
+            Cardinality = cardinality,
+            DuplicateKeyPolicy = duplicateKeyPolicy,
         };
 
         // Register join node with preconfigured instance

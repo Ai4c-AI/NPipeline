@@ -49,6 +49,31 @@ internal sealed class JoinSide<TKey, TItem> where TKey : notnull
         return true;
     }
 
+    /// <summary>
+    ///     Returns whether any item is retained for <paramref name="key" />.
+    /// </summary>
+    public bool ContainsKey(TKey key) => _buckets.ContainsKey(key);
+
+    /// <summary>
+    ///     Removes the item retained for <paramref name="key" /> and returns it, releasing it for collection.
+    /// </summary>
+    /// <remarks>
+    ///     Used by one-to-one joins, which never retain more than one item for a key, so the whole bucket is removed.
+    /// </remarks>
+    public bool TryTake(TKey key, out TItem item)
+    {
+        if (!_buckets.Remove(key, out var bucket))
+        {
+            item = default!;
+            return false;
+        }
+
+        Debug.Assert(bucket.Count == 1, "A one-to-one join retains at most one item per key.");
+        Count -= bucket.Count;
+        item = bucket.First;
+        return true;
+    }
+
     public void Add(TKey key, TItem item, bool hasMatched)
     {
         ref var bucket = ref CollectionsMarshal.GetValueRefOrAddDefault(_buckets, key, out var exists);

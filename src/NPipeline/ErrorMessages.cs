@@ -328,6 +328,22 @@ internal static class ErrorMessages
         $"Configure one with builder.AddDeadLetterSink(...), or set OnItemFailure to Skip or Fail. " +
         $"See: {DocsBaseUrl}#{ErrorCodes.DeadLetterSinkNotConfigured}";
 
+    public static string DeadLetterSinkNotConfiguredForDuplicateKeys(string nodeId) =>
+        $"[{ErrorCodes.DeadLetterSinkNotConfigured}] Node '{nodeId}': the join dead-letters duplicate keys (DuplicateKeyPolicy = DeadLetter), " +
+        $"but no dead-letter sink is configured, so the join did not start. " +
+        $"Configure one with builder.AddDeadLetterSink(...), or set DuplicateKeyPolicy to Drop or EmitAsUnmatched. " +
+        $"See: {DocsBaseUrl}#{ErrorCodes.DeadLetterSinkNotConfigured}";
+
+    public static string DuplicateJoinKey(string nodeId, object key, string side) =>
+        $"[{ErrorCodes.DuplicateJoinKey}] Node '{nodeId}': the {side} input produced another item with key '{key}', " +
+        $"which has already matched or is already waiting for a match. The join is one-to-one, so the item was not joined. " +
+        $"See: {DocsBaseUrl}#{ErrorCodes.DuplicateJoinKey}";
+
+    public static string JoinOptionsRequireOneToOne(string nodeId, string options) =>
+        $"[{ErrorCodes.JoinOptionsRequireOneToOne}] Node '{nodeId}': {options} only apply to a one-to-one join, but Cardinality is ManyToMany. " +
+        $"Set Cardinality = JoinCardinality.OneToOne, or remove these options. " +
+        $"See: {DocsBaseUrl}#{ErrorCodes.JoinOptionsRequireOneToOne}";
+
     public static string NodeRestartRequiresResumableStrategy(string nodeName, string strategyType) =>
         $"[{ErrorCodes.NodeRestartRequiresResumableStrategy}] Node '{nodeName}' has NodeRestart.MaxRestarts above zero, " +
         $"but its execution strategy {strategyType} does not implement IResumableExecutionStrategy, so it cannot resume after a restart. " +

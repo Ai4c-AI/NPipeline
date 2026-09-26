@@ -78,6 +78,8 @@ NPipeline error codes follow the pattern `NPxxxx` where the first two digits ind
 | NP0423 | NodeIdNotResolvable | A node asked the context for its own id, and no single id matched. Either no pipeline run owns the context (the node is being called directly, as in a unit test), or the same instance is wired into the graph under more than one id. Use `TryGetNodeId` where a node can run outside a pipeline, or give each graph position its own instance. |
 | NP0424 | DeadLetterSinkNotConfigured | An item was dead-lettered, but the pipeline has no dead-letter sink. A transform with `OnItemFailure = ItemFailureAction.DeadLetter` raises it before any node starts; a custom resilience policy that returns `DeadLetter` raises it when the item fails. Add a sink with `AddDeadLetterSink`, or use `Skip` or `Fail`. |
 | NP0425 | NodeRestartRequiresResumableStrategy | A transform has `NodeRestart.MaxRestarts` above zero, but its execution strategy does not implement `IResumableExecutionStrategy`. Use a resumable strategy, or set `MaxRestarts` to 0 for that node. |
+| NP0426 | DuplicateJoinKey | A one-to-one keyed join dead-letters an item because its key was a duplicate: the key had already matched, or the same input already had an item waiting for it. The join does not fail; the item goes to the dead-letter sink as a `DuplicateJoinKeyException`. Use `Drop` or `EmitAsUnmatched` if duplicates are expected. |
+| NP0427 | JoinOptionsRequireOneToOne | A keyed join sets `DuplicateKeyPolicy` or `MaxMatchedKeys`, which apply only to one-to-one joins, while `Cardinality` is `ManyToMany`. Set `Cardinality = JoinCardinality.OneToOne`, or remove the options. |
 
 ## NP05xx - Resource Management Errors
 
