@@ -1,8 +1,6 @@
-using Microsoft.Extensions.DependencyInjection;
 using NPipeline.Configuration;
 using NPipeline.Execution;
 using NPipeline.Observability;
-using NPipeline.Observability.Tracing;
 using NPipeline.Pipeline;
 
 namespace NPipeline.Extensions.Observability;
@@ -46,19 +44,16 @@ public sealed class ObservablePipelineContextFactory : IObservablePipelineContex
     {
         ArgumentNullException.ThrowIfNull(configuration);
 
-        // Resolve observability factory from the current scoped service provider
-        // This ensures we get the correct scoped instance of IObservabilityCollector
-        var observabilityFactory = _serviceProvider.GetService<IObservabilityFactory>();
+        // Fill whatever the caller left unset from the current scope: the error handler, lineage and observability
+        // factories, the logger factory and the tracer (for example the OpenTelemetry tracer). Without the lineage
+        // factory no pipeline lineage report is produced, and without the logger factory the framework's logging is
+        // silent. Resolving from the scope gives the run its own scoped IObservabilityCollector.
+        var configWithServices = configuration.WithServiceDefaults(_serviceProvider);
 
-        // Create a new configuration with the observability factory, and the container's tracer (for example the
-        // OpenTelemetry tracer) unless the caller supplied one.
-        var configWithObservability = configuration with
-        {
-            ObservabilityFactory = observabilityFactory ?? new DiObservabilityFactory(_serviceProvider),
-            Tracer = configuration.Tracer ?? _serviceProvider.GetService<IPipelineTracer>(),
-        };
+        if (configWithServices.ObservabilityFactory is null)
+            configWithServices = configWithServices with { ObservabilityFactory = new DiObservabilityFactory(_serviceProvider) };
 
-        var context = new PipelineContext(configWithObservability);
+        var context = new PipelineContext(configWithServices);
         context.Observability.ExecutionObserver = _executionObserver;
 
         return context;
