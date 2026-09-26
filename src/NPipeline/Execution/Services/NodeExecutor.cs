@@ -67,6 +67,11 @@ public sealed class NodeExecutor(
     {
         var output = await plan.ExecuteSource!(instance, context, context.CancellationToken).ConfigureAwait(false);
 
+        // Counted on a handle the output releases once it is read to the end, so the source's observation ends with
+        // its dataflow. Wrapped before lineage and fan-out, so each item the source yields is counted once.
+        output = NodeItemCounting.Wrap(output, context.NodeEnvironment.NodeExecutionScopeRegistry.BeginNodeScope(plan.NodeId),
+            NodeItemCount.Emitted, ownsScope: true);
+
         if (graph.Lineage.ItemLevelLineageEnabled)
             output = lineage.WrapSourceStream(output, plan.NodeId, context.RunIdentity.PipelineId, context.RunIdentity.PipelineName,
                 graph.Lineage.LineageOptions);
@@ -144,11 +149,18 @@ public sealed class NodeExecutor(
         NodeDefinition nodeDef,
         INode instance)
     {
+        // One handle for the whole node: the merge can finish reading the inputs before the output is read, so the
+        // inputs count on the handle the output holds rather than releasing their own and ending the observation early.
+        var observabilityScope = context.NodeEnvironment.NodeExecutionScopeRegistry.BeginNodeScope(plan.NodeId);
+
         // Gather inputs and merge using existing merge service (still reflection-free path).
         var joinInputPipes = new List<IDataStream>();
 
         foreach (var edge in inputLookup[plan.NodeId])
-            joinInputPipes.Add(TrackInputFlow(context, plan.NodeId, ResolveEdgeInput(edge, nodeOutputs, plan.NodeId)));
+        {
+            var edgeInput = TrackInputFlow(context, plan.NodeId, ResolveEdgeInput(edge, nodeOutputs, plan.NodeId));
+            joinInputPipes.Add(NodeItemCounting.Wrap(edgeInput, observabilityScope, NodeItemCount.Processed, ownsScope: false));
+        }
 
         var merged = await pipeMergeService
             .MergeAsync(nodeDef, instance, joinInputPipes, ExecutionAnnotationsService.GetMergeCapacity(graph, plan.NodeId), context.CancellationToken)
@@ -194,6 +206,8 @@ public sealed class NodeExecutor(
             }
         }
 
+        output = NodeItemCounting.Wrap(output, observabilityScope, NodeItemCount.Emitted, ownsScope: true);
+
         var counter = GetOrCreateCounter(context);
         output = dataStreamWrapperService.WrapWithCountingAndBranching(output, counter, context, graph, plan.NodeId);
         var disposable = output as IAsyncDisposable;
@@ -212,9 +226,14 @@ public sealed class NodeExecutor(
         NodeDefinition nodeDef,
         INode instance)
     {
+        // As for joins, one handle spans the input and the output, and the output releases it.
+        var observabilityScope = context.NodeEnvironment.NodeExecutionScopeRegistry.BeginNodeScope(plan.NodeId);
+
         var input = TrackInputFlow(context, plan.NodeId,
             await GetNodeInputAsync(plan.NodeId, graph, inputLookup, nodeOutputs, nodeInstances, nodeDefinitionMap, context.CancellationToken)
                 .ConfigureAwait(false));
+
+        input = NodeItemCounting.Wrap(input, observabilityScope, NodeItemCount.Processed, ownsScope: false);
 
         IDataStream output;
 
@@ -257,6 +276,8 @@ public sealed class NodeExecutor(
             }
         }
 
+        output = NodeItemCounting.Wrap(output, observabilityScope, NodeItemCount.Emitted, ownsScope: true);
+
         var counter = GetOrCreateCounter(context);
         output = dataStreamWrapperService.WrapWithCountingAndBranching(output, counter, context, graph, plan.NodeId);
         context.RegisterForDisposal(output as IAsyncDisposable ?? input);
@@ -293,6 +314,9 @@ public sealed class NodeExecutor(
         // A terminal failure is disposed by CompleteNodeFailure.
         var observabilityScope = context.NodeEnvironment.NodeExecutionScopeRegistry.BeginNodeScope(plan.NodeId);
         effectiveInput = NodeTimingDataStreamWrapper.WrapInputWait(effectiveInput, observabilityScope);
+
+        // Node retry runs a sink again only if it has read nothing, so counting each item read never double-counts.
+        effectiveInput = NodeItemCounting.Wrap(effectiveInput, observabilityScope, NodeItemCount.Processed, ownsScope: false);
 
         var before = observabilityScope.GetTimingBreakdown();
         var sinkStart = Stopwatch.GetTimestamp();

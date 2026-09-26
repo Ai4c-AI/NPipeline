@@ -226,10 +226,9 @@ public sealed class IntegrationTests
         Assert.NotNull(sourceMetrics);
         Assert.True(sourceMetrics.Success);
 
-        // Source nodes use CountingPassthroughDataStream which doesn't report to IObservabilityCollector
-        // Only transform nodes use AutoObservabilityScope for item tracking during item iteration
+        // A source reads nothing and emits every item it yields.
         Assert.Equal(0, sourceMetrics.ItemsProcessed);
-        Assert.Equal(0, sourceMetrics.ItemsEmitted);
+        Assert.Equal(10, sourceMetrics.ItemsEmitted);
 
         var transformMetrics = GetNodeMetricsById(collector, "transform");
         Assert.NotNull(transformMetrics);
@@ -243,8 +242,8 @@ public sealed class IntegrationTests
         Assert.NotNull(sinkMetrics);
         Assert.True(sinkMetrics.Success);
 
-        // Sink nodes don't use AutoObservabilityScope for item tracking
-        Assert.Equal(0, sinkMetrics.ItemsProcessed);
+        // A sink processes every item it reads and emits nothing.
+        Assert.Equal(10, sinkMetrics.ItemsProcessed);
         Assert.Equal(0, sinkMetrics.ItemsEmitted);
     }
 
@@ -276,10 +275,9 @@ public sealed class IntegrationTests
         Assert.NotNull(sourceMetrics);
         Assert.True(sourceMetrics.Success);
 
-        // Source nodes use CountingPassthroughDataStream which doesn't report to IObservabilityCollector
-        // Only transform nodes use AutoObservabilityScope for item tracking
+        // The transform fails on the first item, so the source is asked for exactly one item before the run fails.
         Assert.Equal(0, sourceMetrics.ItemsProcessed);
-        Assert.Equal(0, sourceMetrics.ItemsEmitted);
+        Assert.Equal(1, sourceMetrics.ItemsEmitted);
 
         // When a transform node fails before processing any items, metrics may not be recorded
         // because AutoObservabilityScope tracks items via IncrementProcessed()/IncrementEmitted()
