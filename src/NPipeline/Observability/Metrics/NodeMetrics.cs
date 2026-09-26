@@ -1,3 +1,5 @@
+using NPipeline.Graph;
+
 namespace NPipeline.Observability.Metrics;
 
 /// <summary>
@@ -30,6 +32,7 @@ namespace NPipeline.Observability.Metrics;
 /// <param name="RetriesExhausted">The number of times a retry layer gave up on this node after retrying it.</param>
 /// <param name="CircuitBreakerTrips">The number of times this node's circuit breaker opened.</param>
 /// <param name="ItemsReplayed">The number of items a node restart read again after they had already been processed once.</param>
+/// <param name="Kind">The node's kind, or null when it was not recorded.</param>
 public sealed record NodeMetrics(
     string NodeId,
     DateTimeOffset? StartTime,
@@ -54,4 +57,5 @@ public sealed record NodeMetrics(
     long RetryEvents = 0,
     long RetriesExhausted = 0,
     long CircuitBreakerTrips = 0,
-    long ItemsReplayed = 0) : INodeMetrics;
+    long ItemsReplayed = 0,
+    NodeKind? Kind = null) : INodeMetrics;

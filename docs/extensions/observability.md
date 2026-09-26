@@ -101,9 +101,14 @@ The three retry layers report to the same observer, so one counter covers the wh
 | `StartTime` / `EndTime` | `DateTimeOffset?` | Pipeline timestamps |
 | `DurationMs` | `double?` | Total pipeline time |
 | `Success` | `bool` | Overall success |
-| `TotalItemsProcessed` | `long` | Sum across all nodes |
+| `ItemsIn` | `long?` | Items emitted by source nodes; null when no source recorded item counts |
+| `ItemsOut` | `long?` | Items processed by sink nodes; null when no sink recorded item counts |
+| `TotalItemsProcessed` | `long` | Sum across all nodes (an item is counted once per node it passes through) |
 | `NodeMetrics` | `IReadOnlyList<INodeMetrics>` | Per-node breakdown |
 | `Exception` | `Exception?` | Error, if any |
+
+Item counts are recorded only for nodes configured with `WithObservability`, so configure a pipeline's source and sink
+nodes with it to get `ItemsIn` and `ItemsOut`. `INodeMetrics.Kind` reports each node's kind.
 
 ### Metrics Analysis
 

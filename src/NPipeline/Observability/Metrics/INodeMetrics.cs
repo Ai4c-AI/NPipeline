@@ -1,3 +1,5 @@
+using NPipeline.Graph;
+
 namespace NPipeline.Observability.Metrics;
 
 /// <summary>
@@ -92,6 +94,11 @@ public interface INodeMetrics
     ///     included in <see cref="ItemsProcessed" />.
     /// </summary>
     long ItemsReplayed => 0;
+
+    /// <summary>
+    ///     The node's kind, or null when it was not recorded.
+    /// </summary>
+    NodeKind? Kind => null;
 
     /// <summary>
     ///     The peak memory usage in megabytes during node execution.

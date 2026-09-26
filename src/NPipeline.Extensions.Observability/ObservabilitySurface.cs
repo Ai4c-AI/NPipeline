@@ -121,6 +121,10 @@ public sealed class ObservabilitySurface : IObservabilitySurface
         var startTimestamp = Stopwatch.GetTimestamp();
         observer.OnNodeStarted(new NodeExecutionStarted(nodeDef.Id, nodeType, startTs, context.RunIdentity.PipelineId, context.RunIdentity.PipelineName));
 
+        // The node's kind lets the pipeline metrics count the items entering (sources) and leaving (sinks) the run.
+        var collector = context.Observability.ObservabilityFactory.ResolveObservabilityCollector();
+        collector?.RecordNodeKind(nodeDef.Id, nodeDef.Kind, context.RunIdentity.PipelineId, context.RunIdentity.PipelineName);
+
         // Check for per-node observability configuration
         IAutoObservabilityScope? autoObservabilityScope = null;
         var optionsKey = "NPipeline.Observability.Options:" + nodeDef.Id;
@@ -130,8 +134,6 @@ public sealed class ObservabilitySurface : IObservabilitySurface
                 optionsKey,
                 out var optionsValue))
         {
-            var collector = context.Observability.ObservabilityFactory.ResolveObservabilityCollector();
-
             if (collector != null && optionsValue is ObservabilityOptions obsOptions)
             {
                 autoObservabilityScope = new AutoObservabilityScope(collector, nodeDef.Id, obsOptions, context.RunIdentity.PipelineId,

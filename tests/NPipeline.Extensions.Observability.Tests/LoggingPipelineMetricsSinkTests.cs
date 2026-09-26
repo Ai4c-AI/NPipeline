@@ -23,9 +23,20 @@ public sealed class LoggingPipelineMetricsSinkTests
     }
 
     private static IPipelineMetrics CreatePipelineMetrics(bool success, Exception? exception = null, IReadOnlyList<INodeMetrics>? nodeMetrics = null,
-        long totalItemsProcessed = 285, double? durationMs = 5000) =>
+        long totalItemsProcessed = 285, double? durationMs = 5000, long? itemsIn = 100, long? itemsOut = 95) =>
         new PipelineMetrics("TestPipeline", s_pipelineId, Guid.NewGuid(), DateTimeOffset.UtcNow.AddSeconds(-5), DateTimeOffset.UtcNow, durationMs,
-            success, totalItemsProcessed, nodeMetrics ?? [], exception);
+            success, totalItemsProcessed, nodeMetrics ?? [], exception, itemsIn, itemsOut);
+
+    private static List<(EventId EventId, LogLevel Level, IReadOnlyDictionary<string, object?> Values)> GetLogEntries(ILogger logger) =>
+    [
+        .. Fake.GetCalls(logger)
+            .Where(static c => c.Method.Name == "Log")
+            .Select(static c => (
+                c.GetArgument<EventId>(1),
+                c.GetArgument<LogLevel>(0),
+                (IReadOnlyDictionary<string, object?>)((IEnumerable<KeyValuePair<string, object?>>)c.Arguments[2]!)
+                .ToDictionary(static kv => kv.Key, static kv => kv.Value))),
+    ];
 
     private static INodeMetrics CreateNodeMetrics(
         string nodeId,
@@ -274,6 +285,78 @@ public sealed class LoggingPipelineMetricsSinkTests
         var calls = Fake.GetCalls(loggerMock);
         var logCalls = calls.Where(c => c.Method.Name == "Log" && c.GetArgument<LogLevel>(0) == LogLevel.Information).ToList();
         Assert.Equal(2, logCalls.Count);
+    }
+
+    [Fact]
+    public async Task RecordAsync_WithItemCounts_LogsItemsInAndOutAndThroughputFromItemsOut()
+    {
+        // Arrange - TotalItemsProcessed counts an item once per node, so it must not be reported as the pipeline's count.
+        var loggerMock = CreateLogger();
+        var sink = new LoggingPipelineMetricsSink(loggerMock);
+        var metrics = CreatePipelineMetrics(true, totalItemsProcessed: 3000, durationMs: 5000, itemsIn: 1000, itemsOut: 990);
+
+        // Act
+        await sink.RecordAsync(metrics, CancellationToken.None);
+
+        // Assert
+        var entries = GetLogEntries(loggerMock);
+        var pipeline = Assert.Single(entries, static e => e.EventId.Id == 1);
+        Assert.Equal(1000L, pipeline.Values["ItemsIn"]);
+        Assert.Equal(990L, pipeline.Values["ItemsOut"]);
+        Assert.False(pipeline.Values.ContainsKey("TotalItemsProcessed"));
+
+        var throughput = Assert.Single(entries, static e => e.EventId.Id == 8);
+        Assert.Equal(198.0, (double)throughput.Values["Throughput"]!, 3);
+    }
+
+    [Fact]
+    public async Task RecordAsync_WithOnlySourcesObserved_UsesItemsInForThroughput()
+    {
+        // Arrange
+        var loggerMock = CreateLogger();
+        var sink = new LoggingPipelineMetricsSink(loggerMock);
+        var metrics = CreatePipelineMetrics(true, durationMs: 5000, itemsIn: 1000, itemsOut: null);
+
+        // Act
+        await sink.RecordAsync(metrics, CancellationToken.None);
+
+        // Assert
+        var throughput = Assert.Single(GetLogEntries(loggerMock), static e => e.EventId.Id == 8);
+        Assert.Equal(200.0, (double)throughput.Values["Throughput"]!, 3);
+    }
+
+    [Fact]
+    public async Task RecordAsync_WithoutItemCounts_SaysCountsWereNotRecordedAndSkipsThroughput()
+    {
+        // Arrange
+        var loggerMock = CreateLogger();
+        var sink = new LoggingPipelineMetricsSink(loggerMock);
+        var metrics = CreatePipelineMetrics(true, totalItemsProcessed: 1000, durationMs: 5000, itemsIn: null, itemsOut: null);
+
+        // Act
+        await sink.RecordAsync(metrics, CancellationToken.None);
+
+        // Assert
+        var entries = GetLogEntries(loggerMock);
+        _ = Assert.Single(entries, static e => e.EventId.Id == 10 && e.Level == LogLevel.Information);
+        Assert.DoesNotContain(entries, static e => e.EventId.Id is 1 or 8);
+    }
+
+    [Fact]
+    public async Task RecordAsync_FailedWithoutItemCounts_LogsTheFailureWithoutCounts()
+    {
+        // Arrange
+        var loggerMock = CreateLogger();
+        var sink = new LoggingPipelineMetricsSink(loggerMock);
+        var metrics = CreatePipelineMetrics(false, new InvalidOperationException("boom"), itemsIn: null, itemsOut: null);
+
+        // Act
+        await sink.RecordAsync(metrics, CancellationToken.None);
+
+        // Assert
+        var failure = Assert.Single(GetLogEntries(loggerMock), static e => e.Level == LogLevel.Error);
+        Assert.Equal(11, failure.EventId.Id);
+        Assert.Equal("boom", failure.Values["ExceptionMessage"]);
     }
 
     [Fact]

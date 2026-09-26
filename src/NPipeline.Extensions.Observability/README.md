@@ -216,7 +216,10 @@ services.AddNPipelineObservability<CustomCollector, CustomMetricsSink, CustomPip
 - **StartTime/EndTime**: Pipeline execution timestamps
 - **DurationMs**: Total execution duration (fractional values supported)
 - **Success**: Overall pipeline success
-- **TotalItemsProcessed**: Sum of all items processed
+- **ItemsIn**: Items that entered the pipeline (emitted by its source nodes), or null when no source recorded item counts
+- **ItemsOut**: Items that left the pipeline (processed by its sink nodes), or null when no sink recorded item counts
+- **TotalItemsProcessed**: Sum of items processed across all nodes. An item that passes through several nodes is counted
+  once per node, so use `ItemsIn`/`ItemsOut` for the pipeline's item count
 - **NodeMetrics**: Collection of node-level metrics
 - **Exception**: Any pipeline-level error
 

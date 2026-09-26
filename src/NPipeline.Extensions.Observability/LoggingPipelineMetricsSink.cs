@@ -10,17 +10,30 @@ namespace NPipeline.Observability;
 public sealed class LoggingPipelineMetricsSink : IPipelineMetricsSink
 {
     // LoggerMessage delegates for high-performance logging - pipeline level
-    private static readonly Action<ILogger, string, Guid, long, double, Exception?> s_logPipelineSuccess =
-        LoggerMessage.Define<string, Guid, long, double>(
+    private static readonly Action<ILogger, string, Guid, double, long?, long?, Exception?> s_logPipelineSuccess =
+        LoggerMessage.Define<string, Guid, double, long?, long?>(
             LogLevel.Information,
             new EventId(1, nameof(LoggingPipelineMetricsSink)),
-            "Pipeline {PipelineName} (RunId: {RunId}) completed successfully. Processed {TotalItemsProcessed} items in {DurationMs:F3}ms");
+            "Pipeline {PipelineName} (RunId: {RunId}) completed successfully in {DurationMs:F3}ms. Items in: {ItemsIn}, items out: {ItemsOut}");
 
-    private static readonly Action<ILogger, string, Guid, long, string, Exception?> s_logPipelineFailure =
-        LoggerMessage.Define<string, Guid, long, string>(
+    private static readonly Action<ILogger, string, Guid, long?, long?, string, Exception?> s_logPipelineFailure =
+        LoggerMessage.Define<string, Guid, long?, long?, string>(
             LogLevel.Error,
             new EventId(2, nameof(LoggingPipelineMetricsSink)),
-            "Pipeline {PipelineName} (RunId: {RunId}) failed. Processed {TotalItemsProcessed} items before failure. Exception: {ExceptionMessage}");
+            "Pipeline {PipelineName} (RunId: {RunId}) failed. Items in: {ItemsIn}, items out: {ItemsOut}. Exception: {ExceptionMessage}");
+
+    private static readonly Action<ILogger, string, Guid, double, Exception?> s_logPipelineSuccessWithoutCounts =
+        LoggerMessage.Define<string, Guid, double>(
+            LogLevel.Information,
+            new EventId(10, nameof(LoggingPipelineMetricsSink)),
+            "Pipeline {PipelineName} (RunId: {RunId}) completed successfully in {DurationMs:F3}ms. Item counts were not recorded; "
+            + "configure its source and sink nodes with WithObservability to record them");
+
+    private static readonly Action<ILogger, string, Guid, string, Exception?> s_logPipelineFailureWithoutCounts =
+        LoggerMessage.Define<string, Guid, string>(
+            LogLevel.Error,
+            new EventId(11, nameof(LoggingPipelineMetricsSink)),
+            "Pipeline {PipelineName} (RunId: {RunId}) failed. Exception: {ExceptionMessage}");
 
     private static readonly Action<ILogger, string, long, long, double, Exception?> s_logNodeSuccess =
         LoggerMessage.Define<string, long, long, double>(
@@ -91,28 +104,33 @@ public sealed class LoggingPipelineMetricsSink : IPipelineMetricsSink
                    ["RunId"] = pipelineMetrics.RunId,
                    ["Success"] = pipelineMetrics.Success,
                    ["TotalItemsProcessed"] = pipelineMetrics.TotalItemsProcessed,
+                   ["ItemsIn"] = pipelineMetrics.ItemsIn,
+                   ["ItemsOut"] = pipelineMetrics.ItemsOut,
                    ["DurationMs"] = pipelineMetrics.DurationMs,
                }))
         {
-            if (pipelineMetrics.Success)
+            // Items in and out describe the pipeline as a whole. TotalItemsProcessed counts an item once per node it
+            // passes through, so it is not reported as the pipeline's item count.
+            var countsRecorded = pipelineMetrics.ItemsIn.HasValue || pipelineMetrics.ItemsOut.HasValue;
+            var exceptionMessage = pipelineMetrics.Exception?.Message ?? "Unknown error";
+
+            switch (pipelineMetrics.Success, countsRecorded)
             {
-                s_logPipelineSuccess(
-                    _logger,
-                    pipelineMetrics.PipelineName,
-                    pipelineMetrics.RunId,
-                    pipelineMetrics.TotalItemsProcessed,
-                    pipelineMetrics.DurationMs ?? 0.0,
-                    null);
-            }
-            else
-            {
-                s_logPipelineFailure(
-                    _logger,
-                    pipelineMetrics.PipelineName,
-                    pipelineMetrics.RunId,
-                    pipelineMetrics.TotalItemsProcessed,
-                    pipelineMetrics.Exception?.Message ?? "Unknown error",
-                    null);
+                case (true, true):
+                    s_logPipelineSuccess(_logger, pipelineMetrics.PipelineName, pipelineMetrics.RunId, pipelineMetrics.DurationMs ?? 0.0,
+                        pipelineMetrics.ItemsIn, pipelineMetrics.ItemsOut, null);
+                    break;
+                case (true, false):
+                    s_logPipelineSuccessWithoutCounts(_logger, pipelineMetrics.PipelineName, pipelineMetrics.RunId, pipelineMetrics.DurationMs ?? 0.0,
+                        null);
+                    break;
+                case (false, true):
+                    s_logPipelineFailure(_logger, pipelineMetrics.PipelineName, pipelineMetrics.RunId, pipelineMetrics.ItemsIn, pipelineMetrics.ItemsOut,
+                        exceptionMessage, null);
+                    break;
+                default:
+                    s_logPipelineFailureWithoutCounts(_logger, pipelineMetrics.PipelineName, pipelineMetrics.RunId, exceptionMessage, null);
+                    break;
             }
 
             // Log node-level metrics
@@ -151,10 +169,11 @@ public sealed class LoggingPipelineMetricsSink : IPipelineMetricsSink
                     s_logNodeAverageTime(_logger, nodeMetric.NodeId, nodeMetric.AverageItemProcessingMs.Value, null);
             }
 
-            // Calculate and log overall throughput
-            if (pipelineMetrics.DurationMs.HasValue && pipelineMetrics.DurationMs.Value > 0)
+            // Overall throughput is the items leaving the pipeline per second (or entering it, when only sources were
+            // observed).
+            if (pipelineMetrics.DurationMs is > 0 && (pipelineMetrics.ItemsOut ?? pipelineMetrics.ItemsIn) is { } items)
             {
-                var overallThroughput = pipelineMetrics.TotalItemsProcessed / (pipelineMetrics.DurationMs.Value / 1000.0);
+                var overallThroughput = items / (pipelineMetrics.DurationMs.Value / 1000.0);
 
                 s_logOverallThroughput(_logger, overallThroughput, null);
             }

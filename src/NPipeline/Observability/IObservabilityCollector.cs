@@ -1,4 +1,5 @@
 using NPipeline.Execution;
+using NPipeline.Graph;
 using NPipeline.Observability.Metrics;
 
 namespace NPipeline.Observability;
@@ -43,6 +44,18 @@ public interface IObservabilityCollector
     /// <param name="pipelineId">The unique pipeline identity this node belongs to.</param>
     /// <param name="pipelineName">The name of the pipeline this node belongs to. Null for top-level pipelines.</param>
     void RecordItemMetrics(string nodeId, long itemsProcessed, long itemsEmitted, Guid pipelineId, string? pipelineName = null);
+
+    /// <summary>
+    ///     Records the kind of a node, so the pipeline's metrics can tell the items entering the pipeline (emitted by its
+    ///     sources) from the items leaving it (processed by its sinks).
+    /// </summary>
+    /// <param name="nodeId">The unique identifier of the node.</param>
+    /// <param name="kind">The node's kind.</param>
+    /// <param name="pipelineId">The unique pipeline identity this node belongs to.</param>
+    /// <param name="pipelineName">The name of the pipeline this node belongs to. Null for top-level pipelines.</param>
+    void RecordNodeKind(string nodeId, NodeKind kind, Guid pipelineId, string? pipelineName = null)
+    {
+    }
 
     /// <summary>
     ///     Records the items a node restart read again after they had already been processed once. They are not

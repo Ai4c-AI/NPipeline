@@ -6,6 +6,7 @@ using NPipeline.DataFlow.DataStreams;
 using NPipeline.DataFlow.Windowing;
 using NPipeline.Execution;
 using NPipeline.Extensions.DependencyInjection;
+using NPipeline.Graph;
 using NPipeline.Lineage.DependencyInjection;
 using NPipeline.Nodes;
 using NPipeline.Observability;
@@ -85,15 +86,66 @@ public sealed class NodeItemCountTests
     }
 
     [Fact]
-    public async Task PipelineMetrics_SumItemsProcessedAcrossNodes()
+    public async Task PipelineMetrics_ReportItemsInAndOutAlongsideTheSumAcrossNodes()
     {
         // Act
         var collector = await RunAsync<LineagePipeline>(withLineage: true);
-        var metrics = collector.CreatePipelineMetrics("p", collector.GetNodeMetrics()[0].PipelineId, Guid.NewGuid(), s_eventTime, s_eventTime, true);
+        var metrics = CreatePipelineMetrics(collector);
 
-        // Assert - documented as the sum across all nodes: the transform's 3 plus the sink's 3.
+        // Assert - three items flow through the pipeline. TotalItemsProcessed is documented as the sum across all nodes:
+        // the transform's 3 plus the sink's 3.
+        Assert.Equal(3, metrics.ItemsIn);
+        Assert.Equal(3, metrics.ItemsOut);
         Assert.Equal(6, metrics.TotalItemsProcessed);
     }
+
+    [Fact]
+    public async Task PipelineMetrics_Join_ItemsInSumsEverySource()
+    {
+        // Act
+        var metrics = CreatePipelineMetrics(await RunAsync<JoinPipeline>());
+
+        // Assert - three left items and two right items enter; two joined items leave.
+        Assert.Equal(5, metrics.ItemsIn);
+        Assert.Equal(2, metrics.ItemsOut);
+    }
+
+    [Fact]
+    public async Task PipelineMetrics_Branching_ItemsOutSumsEverySink()
+    {
+        // Act
+        var metrics = CreatePipelineMetrics(await RunAsync<BranchingPipeline>());
+
+        // Assert - each of the three items reaches both sinks.
+        Assert.Equal(3, metrics.ItemsIn);
+        Assert.Equal(6, metrics.ItemsOut);
+    }
+
+    [Fact]
+    public async Task PipelineMetrics_WithoutObservedSourcesOrSinks_ReportItemsInAndOutAsUnknown()
+    {
+        // Act - the source and sink have metrics (from the execution observer) but no recorded item counts.
+        var metrics = CreatePipelineMetrics(await RunAsync<PartiallyObservedPipeline>());
+
+        // Assert - unknown, not zero.
+        Assert.Null(metrics.ItemsIn);
+        Assert.Null(metrics.ItemsOut);
+    }
+
+    [Fact]
+    public async Task NodeMetrics_RecordEachNodesKind()
+    {
+        // Act
+        var collector = await RunAsync<JoinPipeline>();
+
+        // Assert
+        Assert.Equal(NodeKind.Source, TestHelpers.GetNodeMetricsById(collector, "left")!.Kind);
+        Assert.Equal(NodeKind.Join, TestHelpers.GetNodeMetricsById(collector, "join")!.Kind);
+        Assert.Equal(NodeKind.Sink, TestHelpers.GetNodeMetricsById(collector, "sink")!.Kind);
+    }
+
+    private static IPipelineMetrics CreatePipelineMetrics(IObservabilityCollector collector) =>
+        collector.CreatePipelineMetrics("p", collector.GetNodeMetrics()[0].PipelineId, Guid.NewGuid(), s_eventTime, s_eventTime, true);
 
     private static void AssertCounts(IObservabilityCollector collector, string nodeId, long processed, long emitted)
     {

@@ -25,7 +25,7 @@ namespace NPipeline.Observability.Metrics;
 /// if (context.Metrics is IPipelineMetrics metrics)
 /// {
 ///     Console.WriteLine($"Pipeline: {metrics.PipelineName}");
-///     Console.WriteLine($"Items processed: {metrics.TotalItemsProcessed}");
+///     Console.WriteLine($"Items in: {metrics.ItemsIn}, items out: {metrics.ItemsOut}");
 ///     Console.WriteLine($"Duration: {metrics.DurationMs}ms");
 ///     Console.WriteLine($"Success: {metrics.Success}");
 /// 
@@ -74,9 +74,31 @@ public interface IPipelineMetrics
     bool Success { get; }
 
     /// <summary>
-    ///     The total number of items processed by all nodes in the pipeline.
+    ///     The sum of <see cref="INodeMetrics.ItemsProcessed" /> across all nodes in the pipeline.
     /// </summary>
+    /// <remarks>
+    ///     An item that passes through several nodes is counted once per node, so this is not the number of items the
+    ///     pipeline handled. Use <see cref="ItemsIn" /> and <see cref="ItemsOut" /> for that.
+    /// </remarks>
     long TotalItemsProcessed { get; }
+
+    /// <summary>
+    ///     The number of items that entered the pipeline: the items its source nodes emitted.
+    /// </summary>
+    /// <remarks>
+    ///     Null when no source node recorded item counts. Item counts are recorded for nodes configured with
+    ///     <c>WithObservability</c>.
+    /// </remarks>
+    long? ItemsIn => null;
+
+    /// <summary>
+    ///     The number of items that left the pipeline: the items its sink nodes processed.
+    /// </summary>
+    /// <remarks>
+    ///     Null when no sink node recorded item counts. Item counts are recorded for nodes configured with
+    ///     <c>WithObservability</c>.
+    /// </remarks>
+    long? ItemsOut => null;
 
     /// <summary>
     ///     Metrics for individual nodes in the pipeline.

@@ -10,9 +10,11 @@ namespace NPipeline.Observability.Metrics;
 /// <param name="EndTime">The timestamp when the pipeline execution completed.</param>
 /// <param name="DurationMs">The total duration of the pipeline execution in milliseconds.</param>
 /// <param name="Success">Whether the pipeline execution was successful.</param>
-/// <param name="TotalItemsProcessed">The total number of items processed by all nodes in the pipeline.</param>
+/// <param name="TotalItemsProcessed">The sum of the items processed by each node in the pipeline.</param>
 /// <param name="NodeMetrics">Metrics for individual nodes in the pipeline.</param>
 /// <param name="Exception">Any exception that occurred during execution.</param>
+/// <param name="ItemsIn">The items the pipeline's source nodes emitted, or null when none recorded item counts.</param>
+/// <param name="ItemsOut">The items the pipeline's sink nodes processed, or null when none recorded item counts.</param>
 public sealed record PipelineMetrics(
     string PipelineName,
     Guid PipelineId,
@@ -23,4 +25,6 @@ public sealed record PipelineMetrics(
     bool Success,
     long TotalItemsProcessed,
     IReadOnlyList<INodeMetrics> NodeMetrics,
-    Exception? Exception) : IPipelineMetrics;
+    Exception? Exception,
+    long? ItemsIn = null,
+    long? ItemsOut = null) : IPipelineMetrics;

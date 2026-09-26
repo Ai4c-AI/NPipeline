@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using NPipeline.Execution;
+using NPipeline.Graph;
 using NPipeline.Observability.Metrics;
 
 namespace NPipeline.Observability;
@@ -51,6 +52,16 @@ public sealed class ObservabilityCollector : IObservabilityCollector
         var builder = GetOrCreateBuilder(nodeId, pipelineId, pipelineName);
         builder.TrySetPipelineName(pipelineName);
         builder.RecordItemMetrics(itemsProcessed, itemsEmitted);
+    }
+
+    /// <inheritdoc />
+    public void RecordNodeKind(string nodeId, NodeKind kind, Guid pipelineId, string? pipelineName = null)
+    {
+        ArgumentNullException.ThrowIfNull(nodeId);
+
+        var builder = GetOrCreateBuilder(nodeId, pipelineId, pipelineName);
+        builder.TrySetPipelineName(pipelineName);
+        builder.Kind = kind;
     }
 
     /// <inheritdoc />
@@ -165,6 +176,7 @@ public sealed class ObservabilityCollector : IObservabilityCollector
         // node running a sub-pipeline per item), and summing every run it has seen inflates the totals.
         var nodeMetrics = GetNodeMetrics(pipelineId);
         var totalItemsProcessed = nodeMetrics.Sum(m => m.ItemsProcessed);
+        var (itemsIn, itemsOut) = GetBoundaryItemCounts(pipelineId);
 
         var durationMs = endTime.HasValue
             ? (double?)(endTime.Value - startTime).TotalMilliseconds
@@ -180,7 +192,38 @@ public sealed class ObservabilityCollector : IObservabilityCollector
             success,
             totalItemsProcessed,
             nodeMetrics,
-            exception);
+            exception,
+            itemsIn,
+            itemsOut);
+    }
+
+    /// <summary>
+    ///     The items entering the run (emitted by its sources) and leaving it (processed by its sinks). A sub-pipeline's
+    ///     composite input and output are its source and sink. Each is null when no such node recorded item counts, so
+    ///     "not recorded" is not reported as zero: a node with no observability options still has metrics, with counts of 0.
+    /// </summary>
+    private (long? ItemsIn, long? ItemsOut) GetBoundaryItemCounts(Guid pipelineId)
+    {
+        long? itemsIn = null;
+        long? itemsOut = null;
+
+        foreach (var builder in _nodeMetrics.Values)
+        {
+            if (builder.PipelineId != pipelineId || !builder.ItemCountsRecorded)
+                continue;
+
+            switch (builder.Kind)
+            {
+                case NodeKind.Source or NodeKind.CompositeInput:
+                    itemsIn = (itemsIn ?? 0) + builder.ItemsEmitted;
+                    break;
+                case NodeKind.Sink or NodeKind.CompositeOutput:
+                    itemsOut = (itemsOut ?? 0) + builder.ItemsProcessed;
+                    break;
+            }
+        }
+
+        return (itemsIn, itemsOut);
     }
 
     /// <inheritdoc />
@@ -255,6 +298,7 @@ public sealed class ObservabilityCollector : IObservabilityCollector
         private DateTimeOffset? _startTime;
         private bool _success = true;
         private int? _threadId;
+        private volatile bool _itemCountsRecorded;
         private double? _throughputItemsPerSec;
         private double? _wallDurationMs;
         private double? _workDurationMs;
@@ -264,6 +308,21 @@ public sealed class ObservabilityCollector : IObservabilityCollector
         public Guid PipelineId { get; } = pipelineId;
 
         public string? PipelineName { get; private set; } = pipelineName;
+
+        // Stored as an int (-1 for unset) so reads and writes are atomic; a NodeKind? is not.
+        private int _kind = -1;
+
+        public NodeKind? Kind
+        {
+            get => Volatile.Read(ref _kind) is var kind and >= 0 ? (NodeKind)kind : null;
+            set => Volatile.Write(ref _kind, value is { } kind ? (int)kind : -1);
+        }
+
+        public bool ItemCountsRecorded => _itemCountsRecorded;
+
+        public long ItemsProcessed => Interlocked.Read(ref _itemsProcessed);
+
+        public long ItemsEmitted => Interlocked.Read(ref _itemsEmitted);
 
         public void TrySetPipelineName(string? pipelineName)
         {
@@ -337,6 +396,7 @@ public sealed class ObservabilityCollector : IObservabilityCollector
         {
             _ = Interlocked.Add(ref _itemsProcessed, itemsProcessed);
             _ = Interlocked.Add(ref _itemsEmitted, itemsEmitted);
+            _itemCountsRecorded = true;
         }
 
         public void RecordItemsReplayed(long itemsReplayed)
@@ -462,7 +522,8 @@ public sealed class ObservabilityCollector : IObservabilityCollector
                     Interlocked.Read(ref _retryEvents),
                     Interlocked.Read(ref _retriesExhausted),
                     Interlocked.Read(ref _circuitBreakerTrips),
-                    Interlocked.Read(ref _itemsReplayed));
+                    Interlocked.Read(ref _itemsReplayed),
+                    Kind);
             }
         }
     }
