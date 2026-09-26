@@ -249,6 +249,19 @@ internal static partial class RuntimePipelineBinderLogMessages
 }
 
 /// <summary>
+///     Source-generated logging methods for pipeline lineage recording.
+/// </summary>
+[ExcludeFromCodeCoverage]
+internal static partial class PipelineLineageRecordingLogMessages
+{
+    [LoggerMessage(1, LogLevel.Warning,
+        "Pipeline lineage sink {SinkType} is configured but the runner has no lineage module, so no lineage report will be produced. "
+        + "Call services.AddNPipelineLineage() when using dependency injection, or build the runner with "
+        + "new PipelineRunnerBuilder().UseLineage() from NPipeline.Extensions.Lineage.")]
+    public static partial void PipelineLineageSinkIgnored(ILogger logger, string sinkType);
+}
+
+/// <summary>
 ///     Source-generated logging methods for branch node operations.
 /// </summary>
 [ExcludeFromCodeCoverage]

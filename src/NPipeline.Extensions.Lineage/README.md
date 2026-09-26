@@ -51,26 +51,48 @@ services.AddNPipelineLineage();
 var serviceProvider = services.BuildServiceProvider();
 ```
 
-Or configure directly on your pipeline builder:
+Then configure lineage in your pipeline definition:
 
 ```csharp
 using NPipeline.Pipeline;
 using NPipeline.Lineage;
 
-var builder = new PipelineBuilder("MyPipeline");
+public sealed class MyPipelineDefinition : IPipelineDefinition
+{
+    public void Define(PipelineBuilder builder, PipelineContext context)
+    {
+        // Enable item-level lineage tracking
+        builder.EnableItemLevelLineage();
 
-// Enable item-level lineage tracking
-builder.EnableItemLevelLineage();
+        // Add a logging sink for pipeline-level lineage reports. It logs through the run's logging: the container's
+        // under DI, or the context's ILoggerFactory otherwise. Pass an ILoggerFactory to choose the logging yourself:
+        // builder.UseLoggingPipelineLineageSink(loggerFactory);
+        builder.UseLoggingPipelineLineageSink();
 
-// Add a logging sink for pipeline-level lineage reports. It logs through the container's logging when the
-// pipeline runs through DI. Pass an ILoggerFactory to choose the logging yourself:
-// builder.UseLoggingPipelineLineageSink(loggerFactory);
-builder.UseLoggingPipelineLineageSink();
+        // Add nodes and connect them...
+    }
+}
+```
 
-// Build and execute the pipeline
-var pipeline = builder.Build();
+### Without dependency injection
+
+A runner from `PipelineRunner.Create()` doesn't track lineage. Build the runner with `UseLineage()` instead, and give
+the context your logging:
+
+```csharp
+using NPipeline.Configuration;
+using NPipeline.Execution;
+using NPipeline.Lineage;
+using NPipeline.Pipeline;
+
+var runner = new PipelineRunnerBuilder().UseLineage().Build();
+
+await using var context = new PipelineContext(PipelineContextConfiguration.WithLogging(loggerFactory));
 await runner.RunAsync<MyPipelineDefinition>(context);
 ```
+
+Without `UseLineage()`, item-level lineage fails the build, and a configured pipeline lineage sink logs a warning
+instead of receiving a report.
 
 ## Configuration
 

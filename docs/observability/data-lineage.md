@@ -55,6 +55,21 @@ public void Define(PipelineBuilder builder, PipelineContext context)
 An `ILineageSink` (item-level) is only invoked when item-level lineage is enabled. Configuring one without
 calling `EnableItemLevelLineage()` logs a warning, because the sink would otherwise never fire.
 
+### Without dependency injection
+
+`AddNPipelineLineage()` gives the DI runner its lineage module. A runner built without DI needs one too, or it tracks
+nothing. Build it with `UseLineage()`, and configure sinks in the pipeline definition:
+
+```csharp
+var runner = new PipelineRunnerBuilder().UseLineage().Build();
+
+await using var context = new PipelineContext(PipelineContextConfiguration.WithLogging(loggerFactory));
+await runner.RunAsync<MyPipelineDefinition>(context);
+```
+
+With a runner from `PipelineRunner.Create()`, item-level lineage fails the build, and a configured pipeline lineage
+sink logs a warning instead of receiving a report.
+
 ## What Gets Tracked
 
 ### Pipeline-Level Lineage

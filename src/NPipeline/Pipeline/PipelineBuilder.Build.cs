@@ -67,7 +67,7 @@ public sealed partial class PipelineBuilder
             throw new InvalidOperationException(
                 "Item-level lineage requires NPipeline.Extensions.Lineage. " +
                 "Install the NPipeline.Extensions.Lineage package and call services.AddNPipelineLineage() " +
-                "in your DI configuration.");
+                "in your DI configuration, or build the runner with new PipelineRunnerBuilder().UseLineage() without DI.");
         }
 
         var graph = CreateGraph(includeChildGraphs: true);
@@ -153,7 +153,7 @@ public sealed partial class PipelineBuilder
             issue = new ValidationIssue(ValidationSeverity.Error,
                 "Item-level lineage requires NPipeline.Extensions.Lineage. " +
                 "Install the NPipeline.Extensions.Lineage package and call services.AddNPipelineLineage() " +
-                "in your DI configuration.",
+                "in your DI configuration, or build the runner with new PipelineRunnerBuilder().UseLineage() without DI.",
                 "Lineage");
 
             return false;

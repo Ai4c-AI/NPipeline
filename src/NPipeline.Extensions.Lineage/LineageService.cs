@@ -96,7 +96,14 @@ public sealed class LineageService : ILineage
             ? Guid.NewGuid()
             : context.RunIdentity.RunId;
 
-        var report = context.Lineage.LineageFactory.CreateLineageReport(definitionType.Name, context.RunIdentity.PipelineId, graph, runId);
+        var lineageFactory = context.Lineage.LineageFactory;
+        var report = lineageFactory.CreateLineageReport(definitionType.Name, context.RunIdentity.PipelineId, graph, runId);
+
+        // Core's DefaultLineageFactory (used when there is no DI container) can't build reports because the generator
+        // lives in this package. Generate here instead, so a non-DI run still reports. Any other factory's null is
+        // taken as a deliberate "no report".
+        if (report is null && lineageFactory is DefaultLineageFactory)
+            report = LineageGenerator.Generate(definitionType.Name, context.RunIdentity.PipelineId, graph, runId);
 
         if (report is null)
             return;

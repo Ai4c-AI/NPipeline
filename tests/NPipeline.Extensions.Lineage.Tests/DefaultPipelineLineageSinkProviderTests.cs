@@ -1,6 +1,8 @@
 using AwesomeAssertions;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using NPipeline.Configuration;
+using NPipeline.Extensions.Testing;
 using NPipeline.Lineage;
 using NPipeline.Pipeline;
 
@@ -291,6 +293,32 @@ public class DefaultPipelineLineageSinkProviderTests
         sink2.Should().NotBeNull();
         sink1.Should().BeOfType<LoggingPipelineLineageSink>();
         sink2.Should().BeOfType<LoggingPipelineLineageSink>();
+    }
+
+    [Fact]
+    public async Task Create_FallbackSink_ShouldLogThroughContextLoggerFactory()
+    {
+        // Arrange - the fallback used to be built without a logger, so reports went to NullLogger.
+        var logger = new CapturingLogger();
+        using var loggerFactory = LoggerFactory.Create(b => b.AddProvider(new SingleLoggerProvider(logger)));
+        var provider = new DefaultPipelineLineageSinkProvider();
+        await using var context = new PipelineContext(PipelineContextConfiguration.WithLogging(loggerFactory));
+        var report = new PipelineLineageReport("Pipeline", Guid.NewGuid(), [], [], Guid.NewGuid());
+
+        // Act
+        await provider.Create(context)!.RecordAsync(report, CancellationToken.None);
+
+        // Assert
+        logger.LogEntries.Should().ContainSingle(e => e.LogLevel == LogLevel.Information);
+    }
+
+    private sealed class SingleLoggerProvider(ILogger logger) : ILoggerProvider
+    {
+        public ILogger CreateLogger(string categoryName) => logger;
+
+        public void Dispose()
+        {
+        }
     }
 
     private sealed class StubPipelineLineageSink : IPipelineLineageSink

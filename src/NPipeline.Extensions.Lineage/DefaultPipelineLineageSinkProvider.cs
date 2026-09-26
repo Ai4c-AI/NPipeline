@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using NPipeline.Pipeline;
 
 namespace NPipeline.Lineage;
@@ -47,8 +48,7 @@ public sealed class DefaultPipelineLineageSinkProvider : IPipelineLineageSinkPro
         if (registered is not null)
             return registered;
 
-        // No container, or nothing registered: fall back to a logging sink. It uses NullLogger internally when
-        // constructed without one, so this stays usable outside DI.
-        return new LoggingPipelineLineageSink();
+        // No container, or nothing registered: fall back to a logging sink that writes through the run's logging.
+        return new LoggingPipelineLineageSink(context.Observability.LoggerFactory.CreateLogger<LoggingPipelineLineageSink>());
     }
 }
