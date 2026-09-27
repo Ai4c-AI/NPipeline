@@ -123,6 +123,10 @@ internal sealed class PerItemRetryExecutor : IPerItemRetryExecutor
                 var decision = await policy.DecideItemFailureAsync(failure, cancellationToken).ConfigureAwait(false);
                 var retries = attempt - 1;
 
+                // The layer stops retrying this item whatever else the policy decided; Fail reports it where it throws.
+                if (retries > 0 && decision is ResilienceDecision.Skip or ResilienceDecision.DeadLetter)
+                    ResilienceRuntime.ReportRetryExhausted(context, nodeId, RetryKind.ItemRetry, attempt, ex);
+
                 switch (decision)
                 {
                     case ResilienceDecision.Skip:

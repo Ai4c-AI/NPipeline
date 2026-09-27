@@ -53,11 +53,12 @@ internal sealed class DefaultLineageAdapterBuilder
 
             var packetChannel = Channel.CreateUnbounded<LineagePacket<TIn>>(new UnboundedChannelOptions { SingleWriter = true, SingleReader = true });
 
-            // The pump stops when the transform stops reading, or it would stay blocked on a full data channel.
-            var pumpCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            _ = PumpInputAsync(typedInput, dataChannel.Writer, packetChannel.Writer, nodeLineage, pumpCts);
+            // The pump starts when the transform or the lineage mapping first reads, not when the node is set up: a
+            // transform whose output nothing reads must not pull its input, or the pump would outlive the run. It stops
+            // when the transform stops reading, or it would stay blocked on a full data channel.
+            var pump = new InputPump<TIn>(typedInput, dataChannel.Writer, packetChannel.Writer, nodeLineage, cancellationToken);
 
-            var unwrappedPipe = new DataStream<TIn>(ReadDataAsync(dataChannel.Reader, pumpCts, cancellationToken), $"Unwrapped_{typedInput.StreamName}");
+            var unwrappedPipe = new DataStream<TIn>(ReadDataAsync(dataChannel.Reader, pump, cancellationToken), $"Unwrapped_{typedInput.StreamName}");
 
             return (unwrappedPipe, RewrapFunc);
 
@@ -66,7 +67,7 @@ internal sealed class DefaultLineageAdapterBuilder
                 var typedOutputPipe = (IDataStream<TOut>)outputPipe;
 
                 var rewrappedStream = strategy.MapAsync(
-                    packetChannel.Reader.ReadAllAsync(cancellationToken),
+                    ReadPacketsAsync(packetChannel.Reader, pump, cancellationToken),
                     typedOutputPipe,
                     nodeId,
                     pipelineId,
@@ -104,9 +105,11 @@ internal sealed class DefaultLineageAdapterBuilder
 
         static async IAsyncEnumerable<TIn> ReadDataAsync(
             ChannelReader<TIn> reader,
-            CancellationTokenSource pumpCts,
+            InputPump<TIn> pump,
             [EnumeratorCancellation] CancellationToken ct = default)
         {
+            pump.EnsureStarted();
+
             try
             {
                 await foreach (var item in reader.ReadAllAsync(ct).ConfigureAwait(false))
@@ -114,26 +117,86 @@ internal sealed class DefaultLineageAdapterBuilder
             }
             finally
             {
-                // Harmless when the pump already finished; stops it when the transform left early.
-                try
-                {
-                    pumpCts.Cancel();
-                }
-                catch (ObjectDisposedException)
-                {
-                    // The pump finished and disposed its token source.
-                }
+                // Harmless when the pump already finished; stops it when the transform left early, and waits for it so
+                // it is out of the upstream stream before the run disposes that stream.
+                await pump.StopAsync().ConfigureAwait(false);
             }
         }
 
-        static async Task PumpInputAsync(
-            IDataStream<LineagePacket<TIn>> source,
-            ChannelWriter<TIn> dataWriter,
-            ChannelWriter<LineagePacket<TIn>> packetWriter,
-            LineageNodeOutcomeWriter nodeLineage,
-            CancellationTokenSource pumpCts)
+        static async IAsyncEnumerable<LineagePacket<TIn>> ReadPacketsAsync(
+            ChannelReader<LineagePacket<TIn>> reader,
+            InputPump<TIn> pump,
+            [EnumeratorCancellation] CancellationToken ct = default)
         {
-            var ct = pumpCts.Token;
+            pump.EnsureStarted();
+
+            await foreach (var packet in reader.ReadAllAsync(ct).ConfigureAwait(false))
+                yield return packet;
+        }
+    }
+
+    /// <summary>
+    ///     Reads a transform's lineage packets once and fans them out to the raw data the transform consumes and the
+    ///     packets the lineage mapping consumes. Started on first read and stopped when the transform stops reading.
+    /// </summary>
+    private sealed class InputPump<TIn>(
+        IDataStream<LineagePacket<TIn>> source,
+        ChannelWriter<TIn> dataWriter,
+        ChannelWriter<LineagePacket<TIn>> packetWriter,
+        LineageNodeOutcomeWriter nodeLineage,
+        CancellationToken runToken)
+    {
+        private readonly object _gate = new();
+        private CancellationTokenSource? _cts;
+        private Task? _pump;
+        private bool _stopped;
+
+        public void EnsureStarted()
+        {
+            lock (_gate)
+            {
+                if (_pump is not null || _stopped)
+                    return;
+
+                _cts = CancellationTokenSource.CreateLinkedTokenSource(runToken);
+                _pump = PumpAsync(_cts.Token);
+            }
+        }
+
+        public async ValueTask StopAsync()
+        {
+            Task? pump;
+            CancellationTokenSource? cts;
+
+            lock (_gate)
+            {
+                if (_stopped)
+                    return;
+
+                _stopped = true;
+                pump = _pump;
+                cts = _cts;
+            }
+
+            if (pump is null)
+            {
+                // Never started: complete the channels so a lineage mapping waiting on packets ends.
+                packetWriter.TryComplete();
+                dataWriter.TryComplete();
+                return;
+            }
+
+            await cts!.CancelAsync().ConfigureAwait(false);
+
+            // The pump reports its own failures through the channels, so awaiting it never throws.
+            await pump.ConfigureAwait(false);
+            cts.Dispose();
+        }
+
+        private async Task PumpAsync(CancellationToken ct)
+        {
+            // Off the caller's stack, so the first read does not run the upstream synchronously.
+            await Task.Yield();
 
             try
             {
@@ -173,10 +236,6 @@ internal sealed class DefaultLineageAdapterBuilder
             {
                 packetWriter.TryComplete(ex);
                 dataWriter.TryComplete(ex);
-            }
-            finally
-            {
-                pumpCts.Dispose();
             }
         }
     }

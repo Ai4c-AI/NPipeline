@@ -150,7 +150,13 @@ internal sealed class ResilientExecutionStrategy(IExecutionStrategy? innerStrate
                         ResilientExecutionStrategyLogMessages.ErrorHandlerDecision(logger, decision.ToString(), nodeId, restarts, checkpoint.Watermark);
 
                         if (decision == ResilienceDecision.ContinueWithoutNode)
+                        {
+                            // The node is given up on after at least one restart: that ends the restart layer too.
+                            if (totalRestarts > 0)
+                                ResilienceRuntime.ReportRetryExhausted(context, nodeId, RetryKind.NodeRestart, totalRestarts + 1, ex);
+
                             yield break;
+                        }
 
                         if (decision != ResilienceDecision.RestartNode)
                         {

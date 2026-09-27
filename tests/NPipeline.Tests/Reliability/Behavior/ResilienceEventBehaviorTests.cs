@@ -40,6 +40,43 @@ public sealed class ResilienceEventBehaviorTests
                 e.NodeId == "transform" && e.Kind == RetryKind.ItemRetry && e.Attempts == 3 && e.LastException is TimeoutException);
     }
 
+    public static TheoryData<string, ItemFailureAction> StrategiesAndRecoveringActions()
+    {
+        var data = new TheoryData<string, ItemFailureAction>();
+
+        foreach (var strategy in Strategies)
+        {
+            data.Add(strategy, ItemFailureAction.Skip);
+            data.Add(strategy, ItemFailureAction.DeadLetter);
+        }
+
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(StrategiesAndRecoveringActions))]
+    public async Task ExhaustedItemRetries_ThatEndInSkipOrDeadLetter_StillRaiseOnRetryExhausted(string strategy, ItemFailureAction action)
+    {
+        var observer = new RecordingObserver();
+        var deadLetters = new CollectingDeadLetterSink();
+
+        // The item runs out of retries but the pipeline carries on without it, so the run succeeds.
+        await BehaviorPipeline.RunAsync(b =>
+        {
+            var t = Wire(b, new FlakyTransform(100), new CollectingSink<int>(), [7], strategy);
+            _ = b.AddDeadLetterSink(deadLetters);
+            _ = b.WithResilience(t, o => o with { ItemRetry = new ItemRetryOptions { MaxRetries = 2 }, OnItemFailure = action });
+        }, observer);
+
+        observer.Retries.Select(e => e.Attempt).Should().Equal(1, 2);
+
+        observer.Exhaustions.Should().ContainSingle()
+            .Which.Should().Match<RetryExhaustedEvent>(e =>
+                e.NodeId == "transform" && e.Kind == RetryKind.ItemRetry && e.Attempts == 3 && e.LastException is TimeoutException);
+
+        deadLetters.Envelopes.Should().HaveCount(action == ItemFailureAction.DeadLetter ? 1 : 0);
+    }
+
     [Theory]
     [MemberData(nameof(Strategies))]
     public async Task AFailureThatIsNotRetried_RaisesNoExhaustionEvent(string strategy)
@@ -139,6 +176,35 @@ public sealed class ResilienceEventBehaviorTests
 
         observer.Exhaustions.Should().ContainSingle()
             .Which.Should().Match<RetryExhaustedEvent>(e => e.NodeId == "transform" && e.Kind == RetryKind.NodeRestart && e.Attempts == 2);
+    }
+
+    [Fact]
+    public async Task ExhaustedNodeRestarts_ThatContinueWithoutTheNode_StillRaiseOnRetryExhausted()
+    {
+        var observer = new RecordingObserver();
+
+        await BehaviorPipeline.RunAsync(b =>
+        {
+            var t = Wire(b, new FlakyTransform(100), new CollectingSink<int>(), [1], "sequential");
+            _ = b.AddResiliencePolicy(new ContinueWithoutNodeWhenRestartsRunOut());
+
+            _ = b.WithResilience(t, o => o with
+            {
+                ItemRetry = ItemRetryOptions.None,
+                NodeRestart = new NodeRestartOptions { MaxRestarts = 1, MaxReplayWindow = 100, Backoff = RetryBackoff.None },
+            });
+        }, observer);
+
+        observer.Retries.Should().ContainSingle().Which.Kind.Should().Be(RetryKind.NodeRestart);
+
+        observer.Exhaustions.Should().ContainSingle()
+            .Which.Should().Match<RetryExhaustedEvent>(e => e.NodeId == "transform" && e.Kind == RetryKind.NodeRestart && e.Attempts == 2);
+    }
+
+    private sealed class ContinueWithoutNodeWhenRestartsRunOut : ResiliencePolicyBase
+    {
+        public override ValueTask<ResilienceDecision> DecideRestartAsync(StreamFailure failure, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(failure.CanRestart ? ResilienceDecision.RestartNode : ResilienceDecision.ContinueWithoutNode);
     }
 
     [Fact]
