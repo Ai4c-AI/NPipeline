@@ -1,863 +1,172 @@
 using AwesomeAssertions;
-using NPipeline.DataFlow;
-using NPipeline.DataFlow.DataStreams;
-using NPipeline.Pipeline;
-using NPipeline.StorageProviders;
-using NPipeline.StorageProviders.Models;
+using NPipeline.Connectors.Errors;
+using NPipeline.Connectors.Mapping;
+using NPipeline.Tests.Common;
 
 namespace NPipeline.Connectors.Excel.Tests;
 
-public sealed class ExcelSourceNodeTests
+public sealed class ExcelSourceNodeTests : ExcelTestBase
 {
     [Fact]
-    public async Task Read_XLSX_WithFileSystemProvider_ShouldReadData()
+    public async Task Maps_columns_by_header_ignoring_case_order_and_surrounding_spaces()
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"np_{Guid.NewGuid():N}.xlsx");
+        PutWorkbook(("Sheet1", [[" balance ", "NAME", "id"], [12.5, "Ada", 1], [7, "Grace", 2]]));
 
-        try
-        {
-            var uri = StorageUri.FromFilePath(tempFile);
+        var rows = await ReadAsync(Source<Person>());
 
-            var config = new ExcelConfiguration
-            {
-                FirstRowIsHeader = false,
-            };
-
-            // Write test data using ExcelSinkNode
-            var resolver = StorageProviderFactory.CreateResolver();
-            var sink = new ExcelSinkNode<int>(uri, resolver, config);
-            IDataStream<int> input = new DataStream<int>(Enumerable.Range(1, 5).ToAsyncEnumerable());
-            await sink.ConsumeAsync(input, PipelineContext.CreateDefault(), CancellationToken.None);
-
-            // Read using ExcelSourceNode
-            var src = new ExcelSourceNode<int>(uri, MapIntRow, resolver, config);
-            var outPipe = src.OpenStream(PipelineContext.CreateDefault(), CancellationToken.None);
-
-            var result = new List<int>();
-
-            await foreach (var i in outPipe.WithCancellation(CancellationToken.None))
-            {
-                result.Add(i);
-            }
-
-            // Assert
-            result.Should().Equal(1, 2, 3, 4, 5);
-        }
-        finally
-        {
-            if (File.Exists(tempFile))
-                File.Delete(tempFile);
-        }
+        rows.Should().BeEquivalentTo([
+            new Person { Id = 1, Name = "Ada", Balance = 12.5m },
+            new Person { Id = 2, Name = "Grace", Balance = 7m },
+        ]);
     }
 
     [Fact]
-    public async Task Read_WithFirstRowIsHeader_ShouldUseHeaders()
+    public async Task A_missing_optional_column_keeps_the_member_initialiser()
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"np_{Guid.NewGuid():N}.xlsx");
+        PutWorkbook(("Sheet1", [["Id", "Name"], [1, "Ada"]]));
 
-        try
-        {
-            var uri = StorageUri.FromFilePath(tempFile);
-
-            var config = new ExcelConfiguration
-            {
-                FirstRowIsHeader = true,
-            };
-
-            // Write test data with headers
-            var testData = new List<TestRecord>
-            {
-                new() { Id = 1, Name = "Alice", Age = 30 },
-                new() { Id = 2, Name = "Bob", Age = 25 },
-                new() { Id = 3, Name = "Charlie", Age = 35 },
-            };
-
-            var resolver = StorageProviderFactory.CreateResolver();
-            var sink = new ExcelSinkNode<TestRecord>(uri, resolver, config);
-            IDataStream<TestRecord> input = new DataStream<TestRecord>(testData.ToAsyncEnumerable());
-            await sink.ConsumeAsync(input, PipelineContext.CreateDefault(), CancellationToken.None);
-
-            // Read using ExcelSourceNode
-            var src = new ExcelSourceNode<TestRecord>(uri, MapTestRecordFromHeaders, resolver, config);
-            var outPipe = src.OpenStream(PipelineContext.CreateDefault(), CancellationToken.None);
-
-            var result = new List<TestRecord>();
-
-            await foreach (var item in outPipe.WithCancellation(CancellationToken.None))
-            {
-                result.Add(item);
-            }
-
-            // Assert
-            result.Should().HaveCount(3);
-            result[0].Id.Should().Be(1);
-            result[0].Name.Should().Be("Alice");
-            result[0].Age.Should().Be(30);
-            result[1].Id.Should().Be(2);
-            result[1].Name.Should().Be("Bob");
-            result[1].Age.Should().Be(25);
-        }
-        finally
-        {
-            if (File.Exists(tempFile))
-                File.Delete(tempFile);
-        }
+        (await ReadAsync(Source<Person>())).Single().Country.Should().Be("AU");
     }
 
     [Fact]
-    public async Task Read_WithFirstRowIsHeaderFalse_ShouldReadAllRows()
+    public async Task Builds_positional_records()
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"np_{Guid.NewGuid():N}.xlsx");
+        PutWorkbook(("Sheet1", [["name", "id"], ["Ada", 1]]));
 
-        try
-        {
-            var uri = StorageUri.FromFilePath(tempFile);
-
-            var writeConfig = new ExcelConfiguration
-            {
-                FirstRowIsHeader = false,
-            };
-
-            // Write test data without headers
-            var testData = new List<TestRecord>
-            {
-                new() { Id = 1, Name = "Alice", Age = 30 },
-                new() { Id = 2, Name = "Bob", Age = 25 },
-            };
-
-            var resolver = StorageProviderFactory.CreateResolver();
-            var sink = new ExcelSinkNode<TestRecord>(uri, resolver, writeConfig);
-            IDataStream<TestRecord> input = new DataStream<TestRecord>(testData.ToAsyncEnumerable());
-            await sink.ConsumeAsync(input, PipelineContext.CreateDefault(), CancellationToken.None);
-
-            // Read with FirstRowIsHeader = false
-            var readConfig = new ExcelConfiguration
-            {
-                FirstRowIsHeader = false,
-            };
-
-            var src = new ExcelSourceNode<TestRecord>(uri, MapTestRecordFromIndexes, resolver, readConfig);
-            var outPipe = src.OpenStream(PipelineContext.CreateDefault(), CancellationToken.None);
-
-            var result = new List<TestRecord>();
-
-            await foreach (var item in outPipe.WithCancellation(CancellationToken.None))
-            {
-                if (item is not null)
-                    result.Add(item);
-            }
-
-            // Assert - should read all rows
-            result.Should().HaveCountGreaterThanOrEqualTo(2);
-        }
-        finally
-        {
-            if (File.Exists(tempFile))
-                File.Delete(tempFile);
-        }
+        (await ReadAsync(Source<PositionalPerson>())).Should().Equal(new PositionalPerson(1, "Ada"));
     }
 
     [Fact]
-    public async Task Read_WithSheetName_ShouldReadFromSpecificSheet()
+    public async Task Converts_cells_strictly()
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"np_{Guid.NewGuid():N}.xlsx");
+        PutWorkbook(("Sheet1", [["Id", "Name", "Balance"], [1.7, "Ada", 1]]));
 
-        try
-        {
-            var uri = StorageUri.FromFilePath(tempFile);
+        var read = () => ReadAsync(Source<Person>());
 
-            var config = new ExcelConfiguration
-            {
-                SheetName = "TestSheet",
-                FirstRowIsHeader = false,
-            };
-
-            // Write test data
-            var resolver = StorageProviderFactory.CreateResolver();
-            var sink = new ExcelSinkNode<int>(uri, resolver, config);
-            IDataStream<int> input = new DataStream<int>(Enumerable.Range(1, 3).ToAsyncEnumerable());
-            await sink.ConsumeAsync(input, PipelineContext.CreateDefault(), CancellationToken.None);
-
-            // Read using ExcelSourceNode with sheet name
-            var src = new ExcelSourceNode<int>(uri, MapIntRow, resolver, config);
-            var outPipe = src.OpenStream(PipelineContext.CreateDefault(), CancellationToken.None);
-
-            var result = new List<int>();
-
-            await foreach (var i in outPipe.WithCancellation(CancellationToken.None))
-            {
-                result.Add(i);
-            }
-
-            // Assert
-            result.Should().Equal(1, 2, 3);
-        }
-        finally
-        {
-            if (File.Exists(tempFile))
-                File.Delete(tempFile);
-        }
+        var failure = (await read.Should().ThrowAsync<RecordMappingException>()).Which;
+        failure.RecordNumber.Should().Be(1);
+        failure.Field.Should().Be("Id");
+        failure.RawExcerpt.Should().Be("Sheet1 row 2: 1.7 | Ada | 1");
     }
 
     [Fact]
-    public async Task Read_WithNullSheetName_ShouldReadFromFirstSheet()
+    public async Task Parses_numbers_stored_as_text()
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"np_{Guid.NewGuid():N}.xlsx");
+        PutWorkbook(("Sheet1", [["Id", "Name", "Balance"], ["42", "Ada", "1234.5"]]));
 
-        try
-        {
-            var uri = StorageUri.FromFilePath(tempFile);
-
-            var config = new ExcelConfiguration
-            {
-                SheetName = null,
-                FirstRowIsHeader = false,
-            };
-
-            // Write test data
-            var resolver = StorageProviderFactory.CreateResolver();
-            var sink = new ExcelSinkNode<int>(uri, resolver, config);
-            IDataStream<int> input = new DataStream<int>(Enumerable.Range(1, 3).ToAsyncEnumerable());
-            await sink.ConsumeAsync(input, PipelineContext.CreateDefault(), CancellationToken.None);
-
-            // Read using ExcelSourceNode with null sheet name
-            var src = new ExcelSourceNode<int>(uri, MapIntRow, resolver, config);
-            var outPipe = src.OpenStream(PipelineContext.CreateDefault(), CancellationToken.None);
-
-            var result = new List<int>();
-
-            await foreach (var i in outPipe.WithCancellation(CancellationToken.None))
-            {
-                result.Add(i);
-            }
-
-            // Assert
-            result.Should().Equal(1, 2, 3);
-        }
-        finally
-        {
-            if (File.Exists(tempFile))
-                File.Delete(tempFile);
-        }
+        (await ReadAsync(Source<Person>())).Single().Should().BeEquivalentTo(new { Id = 42, Balance = 1234.5m });
     }
 
     [Fact]
-    public async Task Read_WithDifferentDataTypes_ShouldConvertCorrectly()
+    public async Task A_row_error_handler_can_skip_bad_rows()
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"np_{Guid.NewGuid():N}.xlsx");
+        PutWorkbook(("Sheet1", [["Id", "Name"], [1, "a"], ["x", "b"], [3, "c"]]));
 
-        try
-        {
-            var uri = StorageUri.FromFilePath(tempFile);
+        var rows = await ReadAsync(Source<Person>(o => o with { RowErrorHandler = _ => RowErrorAction.Skip }));
 
-            var config = new ExcelConfiguration
-            {
-                FirstRowIsHeader = true,
-            };
-
-            // Write test data with various types
-            var testData = new List<ComplexRecord>
-            {
-                new()
-                {
-                    Id = 1,
-                    Name = "Test",
-                    Age = 30,
-                    Salary = 50000.50m,
-                    IsActive = true,
-                    BirthDate = new DateTime(1990, 1, 1),
-                    Score = 95.5,
-                    NullableValue = 10,
-                },
-                new()
-                {
-                    Id = 2,
-                    Name = "Test2",
-                    Age = 25,
-                    Salary = 60000.75m,
-                    IsActive = false,
-                    BirthDate = new DateTime(1995, 5, 15),
-                    Score = 87.3,
-                    NullableValue = null,
-                },
-            };
-
-            var resolver = StorageProviderFactory.CreateResolver();
-            var sink = new ExcelSinkNode<ComplexRecord>(uri, resolver, config);
-            IDataStream<ComplexRecord> input = new DataStream<ComplexRecord>(testData.ToAsyncEnumerable());
-            await sink.ConsumeAsync(input, PipelineContext.CreateDefault(), CancellationToken.None);
-
-            // Read using ExcelSourceNode
-            var src = new ExcelSourceNode<ComplexRecord>(uri, MapComplexRecordFromHeaders, resolver, config);
-            var outPipe = src.OpenStream(PipelineContext.CreateDefault(), CancellationToken.None);
-
-            var result = new List<ComplexRecord>();
-
-            await foreach (var item in outPipe.WithCancellation(CancellationToken.None))
-            {
-                result.Add(item);
-            }
-
-            // Assert
-            result.Should().HaveCount(2);
-            result[0].Id.Should().Be(1);
-            result[0].Name.Should().Be("Test");
-            result[0].Age.Should().Be(30);
-            result[0].Salary.Should().Be(50000.50m);
-            result[0].IsActive.Should().BeTrue();
-            result[0].BirthDate.Should().Be(new DateTime(1990, 1, 1));
-            result[0].Score.Should().Be(95.5);
-            result[0].NullableValue.Should().Be(10);
-
-            result[1].Id.Should().Be(2);
-            result[1].Name.Should().Be("Test2");
-            result[1].Age.Should().Be(25);
-            result[1].Salary.Should().Be(60000.75m);
-            result[1].IsActive.Should().BeFalse();
-            result[1].BirthDate.Should().Be(new DateTime(1995, 5, 15));
-            result[1].Score.Should().Be(87.3);
-            result[1].NullableValue.Should().BeNull();
-        }
-        finally
-        {
-            if (File.Exists(tempFile))
-                File.Delete(tempFile);
-        }
+        rows.Select(r => r.Id).Should().Equal(1, 3);
     }
 
     [Fact]
-    public async Task Read_WithNullableTypes_ShouldHandleNullValues()
+    public async Task Reads_numeric_headers()
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"np_{Guid.NewGuid():N}.xlsx");
+        PutWorkbook(("Sheet1", [["Id", 2024], [1, 99]]));
 
-        try
-        {
-            var uri = StorageUri.FromFilePath(tempFile);
+        var rows = await ReadAsync(ExcelConnector.Source(Uri(), row => row.Get<int>("2024"), o => o with { Provider = Provider }));
 
-            var config = new ExcelConfiguration
-            {
-                FirstRowIsHeader = true,
-            };
-
-            // Write test data with nullable values
-            var testData = new List<NullableRecord>
-            {
-                new() { Id = 1, NullableInt = 10, NullableString = "Test" },
-                new() { Id = 2, NullableInt = null, NullableString = null },
-                new() { Id = 3, NullableInt = 30, NullableString = "Test3" },
-            };
-
-            var resolver = StorageProviderFactory.CreateResolver();
-            var sink = new ExcelSinkNode<NullableRecord>(uri, resolver, config);
-            IDataStream<NullableRecord> input = new DataStream<NullableRecord>(testData.ToAsyncEnumerable());
-            await sink.ConsumeAsync(input, PipelineContext.CreateDefault(), CancellationToken.None);
-
-            // Read using ExcelSourceNode
-            var src = new ExcelSourceNode<NullableRecord>(uri, MapNullableRecordFromHeaders, resolver, config);
-            var outPipe = src.OpenStream(PipelineContext.CreateDefault(), CancellationToken.None);
-
-            var result = new List<NullableRecord>();
-
-            await foreach (var item in outPipe.WithCancellation(CancellationToken.None))
-            {
-                result.Add(item);
-            }
-
-            // Assert
-            result.Should().HaveCount(3);
-            result[0].NullableInt.Should().Be(10);
-            result[0].NullableString.Should().Be("Test");
-            result[1].NullableInt.Should().BeNull();
-            result[1].NullableString.Should().BeNull();
-            result[2].NullableInt.Should().Be(30);
-            result[2].NullableString.Should().Be("Test3");
-        }
-        finally
-        {
-            if (File.Exists(tempFile))
-                File.Delete(tempFile);
-        }
+        rows.Should().Equal(99);
     }
 
     [Fact]
-    public async Task Read_WithCaseInsensitiveHeaders_ShouldMatchCorrectly()
+    public async Task Selects_a_sheet_by_name_or_position()
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"np_{Guid.NewGuid():N}.xlsx");
+        PutWorkbook(("First", [["Id"], [1]]), ("Orders", [["Id"], [2]]));
 
-        try
-        {
-            var uri = StorageUri.FromFilePath(tempFile);
-
-            var config = new ExcelConfiguration
-            {
-                FirstRowIsHeader = true,
-            };
-
-            // Write test data - property names will be used as headers
-            var testData = new List<TestRecord>
-            {
-                new() { Id = 1, Name = "Alice", Age = 30 },
-                new() { Id = 2, Name = "Bob", Age = 25 },
-            };
-
-            var resolver = StorageProviderFactory.CreateResolver();
-            var sink = new ExcelSinkNode<TestRecord>(uri, resolver, config);
-            IDataStream<TestRecord> input = new DataStream<TestRecord>(testData.ToAsyncEnumerable());
-            await sink.ConsumeAsync(input, PipelineContext.CreateDefault(), CancellationToken.None);
-
-            // Read using ExcelSourceNode - headers should match case-insensitively
-            var src = new ExcelSourceNode<TestRecord>(uri, MapTestRecordFromHeaders, resolver, config);
-            var outPipe = src.OpenStream(PipelineContext.CreateDefault(), CancellationToken.None);
-
-            var result = new List<TestRecord>();
-
-            await foreach (var item in outPipe.WithCancellation(CancellationToken.None))
-            {
-                result.Add(item);
-            }
-
-            // Assert
-            result.Should().HaveCount(2);
-            result[0].Id.Should().Be(1);
-            result[0].Name.Should().Be("Alice");
-            result[0].Age.Should().Be(30);
-        }
-        finally
-        {
-            if (File.Exists(tempFile))
-                File.Delete(tempFile);
-        }
+        (await ReadAsync(Source<Person>(o => o with { SheetName = "orders" }))).Single().Id.Should().Be(2);
+        (await ReadAsync(Source<Person>(o => o with { SheetIndex = 1 }))).Single().Id.Should().Be(2);
+        (await ReadAsync(Source<Person>())).Single().Id.Should().Be(1);
     }
 
     [Fact]
-    public async Task Read_WithCancellationToken_ShouldCancelOperation()
+    public async Task A_missing_sheet_fails_naming_the_sheets()
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"np_{Guid.NewGuid():N}.xlsx");
+        PutWorkbook(("First", [["Id"]]), ("Second", [["Id"]]));
 
-        try
-        {
-            var uri = StorageUri.FromFilePath(tempFile);
+        var read = () => ReadAsync(Source<Person>(o => o with { SheetName = "Orders" }));
 
-            var config = new ExcelConfiguration
-            {
-                FirstRowIsHeader = false,
-            };
-
-            // Write test data
-            var resolver = StorageProviderFactory.CreateResolver();
-            var sink = new ExcelSinkNode<int>(uri, resolver, config);
-            IDataStream<int> input = new DataStream<int>(Enumerable.Range(1, 1000).ToAsyncEnumerable());
-            await sink.ConsumeAsync(input, PipelineContext.CreateDefault(), CancellationToken.None);
-
-            // Read using ExcelSourceNode with cancellation
-            var cts = new CancellationTokenSource();
-            var src = new ExcelSourceNode<int>(uri, MapIntRow, resolver, config);
-            var outPipe = src.OpenStream(PipelineContext.CreateDefault(), cts.Token);
-
-            var result = new List<int>();
-            var count = 0;
-
-            try
-            {
-                await foreach (var i in outPipe.WithCancellation(cts.Token))
-                {
-                    result.Add(i);
-                    count++;
-
-                    if (count >= 5)
-                        cts.Cancel();
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                // Expected
-            }
-
-            // Assert - should have read some items before cancellation
-            result.Should().HaveCountGreaterThanOrEqualTo(5);
-        }
-        finally
-        {
-            if (File.Exists(tempFile))
-                File.Delete(tempFile);
-        }
+        (await read.Should().ThrowAsync<InvalidOperationException>()).WithMessage("*no sheet 'Orders'. Sheets: First, Second.");
     }
 
     [Fact]
-    public async Task Read_WithMissingFile_ShouldThrowException()
+    public async Task Skips_title_rows_and_empty_rows()
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"np_{Guid.NewGuid():N}.xlsx");
+        PutWorkbook(("Sheet1", [["Quarterly report"], [], ["Id", "Name"], [1, "a"], [null, "  "], [], [2, "b"], []]));
 
-        try
-        {
-            var uri = StorageUri.FromFilePath(tempFile);
-            var config = new ExcelConfiguration();
-            var resolver = StorageProviderFactory.CreateResolver();
+        var rows = await ReadAsync(Source<Person>(o => o with { SkipRows = 2 }));
 
-            // Read using ExcelSourceNode with missing file
-            var src = new ExcelSourceNode<int>(uri, MapIntRow, resolver, config);
-            var outPipe = src.OpenStream(PipelineContext.CreateDefault(), CancellationToken.None);
-
-            var result = new List<int>();
-
-            await Assert.ThrowsAsync<FileNotFoundException>(async () =>
-            {
-                await foreach (var i in outPipe.WithCancellation(CancellationToken.None))
-                {
-                    result.Add(i);
-                }
-            });
-        }
-        finally
-        {
-            if (File.Exists(tempFile))
-                File.Delete(tempFile);
-        }
+        rows.Select(r => r.Id).Should().Equal(1, 2);
     }
 
     [Fact]
-    public async Task Read_WithInvalidSheetName_ShouldThrowException()
+    public async Task Without_a_header_columns_follow_member_declaration_order()
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"np_{Guid.NewGuid():N}.xlsx");
+        PutWorkbook(("Sheet1", [[1, "Ada", 2.5, "NZ"]]));
 
-        try
-        {
-            var uri = StorageUri.FromFilePath(tempFile);
-
-            var writeConfig = new ExcelConfiguration
-            {
-                SheetName = "ActualSheet",
-                FirstRowIsHeader = false,
-            };
-
-            // Write test data to one sheet
-            var resolver = StorageProviderFactory.CreateResolver();
-            var sink = new ExcelSinkNode<int>(uri, resolver, writeConfig);
-            IDataStream<int> input = new DataStream<int>(Enumerable.Range(1, 3).ToAsyncEnumerable());
-            await sink.ConsumeAsync(input, PipelineContext.CreateDefault(), CancellationToken.None);
-
-            // Try to read from non-existent sheet
-            var readConfig = new ExcelConfiguration
-            {
-                SheetName = "NonExistentSheet",
-                FirstRowIsHeader = false,
-            };
-
-            var src = new ExcelSourceNode<int>(uri, MapIntRow, resolver, readConfig);
-            var outPipe = src.OpenStream(PipelineContext.CreateDefault(), CancellationToken.None);
-
-            var result = new List<int>();
-
-            await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            {
-                await foreach (var i in outPipe.WithCancellation(CancellationToken.None))
-                {
-                    result.Add(i);
-                }
-            });
-        }
-        finally
-        {
-            if (File.Exists(tempFile))
-                File.Delete(tempFile);
-        }
+        (await ReadAsync(Source<Person>(o => o with { HasHeader = false }))).Single()
+            .Should().BeEquivalentTo(new Person { Id = 1, Name = "Ada", Balance = 2.5m, Country = "NZ" });
     }
 
     [Fact]
-    public async Task Read_StringType_ShouldReadCorrectly()
+    public async Task Applies_a_naming_policy_and_attributes()
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"np_{Guid.NewGuid():N}.xlsx");
+        PutWorkbook(("Sheet1", [["Customer ID", "secret"], [7, "leaked"]]), ("Prefixed", [["col_name", "col_id"], ["Ada", 1]]));
+        var prefixed = ColumnNamingPolicy.Custom(name => "col_" + name.ToLowerInvariant());
 
-        try
-        {
-            var uri = StorageUri.FromFilePath(tempFile);
-
-            var config = new ExcelConfiguration
-            {
-                FirstRowIsHeader = false,
-            };
-
-            // Write test data
-            var testData = new List<string> { "Apple", "Banana", "Cherry" };
-            var resolver = StorageProviderFactory.CreateResolver();
-            var sink = new ExcelSinkNode<string>(uri, resolver, config);
-            IDataStream<string> input = new DataStream<string>(testData.ToAsyncEnumerable());
-            await sink.ConsumeAsync(input, PipelineContext.CreateDefault(), CancellationToken.None);
-
-            // Read using ExcelSourceNode
-            var src = new ExcelSourceNode<string>(uri, MapStringRow, resolver, config);
-            var outPipe = src.OpenStream(PipelineContext.CreateDefault(), CancellationToken.None);
-
-            var result = new List<string>();
-
-            await foreach (var item in outPipe.WithCancellation(CancellationToken.None))
-            {
-                result.Add(item);
-            }
-
-            // Assert
-            result.Should().Equal("Apple", "Banana", "Cherry");
-        }
-        finally
-        {
-            if (File.Exists(tempFile))
-                File.Delete(tempFile);
-        }
+        (await ReadAsync(Source<Attributed>())).Single().Should().BeEquivalentTo(new { Id = 7, Secret = "unset" });
+        (await ReadAsync(Source<PositionalPerson>(o => o with { SheetName = "Prefixed", Naming = prefixed }))).Should().Equal(new PositionalPerson(1, "Ada"));
     }
 
     [Fact]
-    public async Task Read_DateTimeType_ShouldConvertCorrectly()
+    public async Task Reads_from_streams_that_cannot_seek()
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"np_{Guid.NewGuid():N}.xlsx");
+        var writer = new InMemoryStorageProvider();
+        var source = new InMemoryStorageProvider { NonSeekableReads = true };
+        await WriteAsync(ExcelConnector.Sink<Person>(Uri(), o => o with { Provider = writer }), new Person { Id = 1, Name = "Ada" });
+        source.Put(Uri(), writer.Get(Uri()));
 
-        try
-        {
-            var uri = StorageUri.FromFilePath(tempFile);
+        var rows = await ReadAsync(ExcelConnector.Source<Person>(Uri(), o => o with { Provider = source }));
 
-            var config = new ExcelConfiguration
-            {
-                FirstRowIsHeader = true,
-            };
-
-            // Write test data
-            var testData = new List<DateTimeRecord>
-            {
-                new() { Id = 1, Date = new DateTime(2020, 1, 1) },
-                new() { Id = 2, Date = new DateTime(2021, 6, 15) },
-            };
-
-            var resolver = StorageProviderFactory.CreateResolver();
-            var sink = new ExcelSinkNode<DateTimeRecord>(uri, resolver, config);
-            IDataStream<DateTimeRecord> input = new DataStream<DateTimeRecord>(testData.ToAsyncEnumerable());
-            await sink.ConsumeAsync(input, PipelineContext.CreateDefault(), CancellationToken.None);
-
-            // Read using ExcelSourceNode
-            var src = new ExcelSourceNode<DateTimeRecord>(uri, MapDateTimeRecordFromHeaders, resolver, config);
-            var outPipe = src.OpenStream(PipelineContext.CreateDefault(), CancellationToken.None);
-
-            var result = new List<DateTimeRecord>();
-
-            await foreach (var item in outPipe.WithCancellation(CancellationToken.None))
-            {
-                result.Add(item);
-            }
-
-            // Assert
-            result.Should().HaveCount(2);
-            result[0].Date.Should().Be(new DateTime(2020, 1, 1));
-            result[1].Date.Should().Be(new DateTime(2021, 6, 15));
-        }
-        finally
-        {
-            if (File.Exists(tempFile))
-                File.Delete(tempFile);
-        }
+        rows.Single().Name.Should().Be("Ada");
     }
 
     [Fact]
-    public async Task Read_BoolType_ShouldConvertCorrectly()
+    public async Task A_manual_mapper_reads_by_name_or_index()
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"np_{Guid.NewGuid():N}.xlsx");
+        PutWorkbook(("Sheet1", [["Id", "Name"], [1, "Ada"]]));
 
-        try
-        {
-            var uri = StorageUri.FromFilePath(tempFile);
+        var rows = await ReadAsync(ExcelConnector.Source(
+            Uri(),
+            row => $"{row.SheetName}:{row.RowNumber}:{row.RecordNumber}:{row.Get<int>("ID")}:{row.Get<string>(1)}:{row.TryGet<int>("Name", out _)}:{row["missing"] ?? "-"}",
+            o => o with { Provider = Provider }));
 
-            var config = new ExcelConfiguration
-            {
-                FirstRowIsHeader = true,
-            };
-
-            // Write test data
-            var testData = new List<BoolRecord>
-            {
-                new() { Id = 1, IsActive = true },
-                new() { Id = 2, IsActive = false },
-                new() { Id = 3, IsActive = true },
-            };
-
-            var resolver = StorageProviderFactory.CreateResolver();
-            var sink = new ExcelSinkNode<BoolRecord>(uri, resolver, config);
-            IDataStream<BoolRecord> input = new DataStream<BoolRecord>(testData.ToAsyncEnumerable());
-            await sink.ConsumeAsync(input, PipelineContext.CreateDefault(), CancellationToken.None);
-
-            // Read using ExcelSourceNode
-            var src = new ExcelSourceNode<BoolRecord>(uri, MapBoolRecordFromHeaders, resolver, config);
-            var outPipe = src.OpenStream(PipelineContext.CreateDefault(), CancellationToken.None);
-
-            var result = new List<BoolRecord>();
-
-            await foreach (var item in outPipe.WithCancellation(CancellationToken.None))
-            {
-                result.Add(item);
-            }
-
-            // Assert
-            result.Should().HaveCount(3);
-            result[0].IsActive.Should().BeTrue();
-            result[1].IsActive.Should().BeFalse();
-            result[2].IsActive.Should().BeTrue();
-        }
-        finally
-        {
-            if (File.Exists(tempFile))
-                File.Delete(tempFile);
-        }
+        rows.Should().Equal("Sheet1:2:1:1:Ada:False:-");
     }
 
     [Fact]
-    public async Task Read_DecimalType_ShouldConvertCorrectly()
+    public void A_member_that_is_not_a_single_value_fails_when_the_node_is_created()
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"np_{Guid.NewGuid():N}.xlsx");
+        var create = () => Source<NestedRow>();
 
-        try
-        {
-            var uri = StorageUri.FromFilePath(tempFile);
-
-            var config = new ExcelConfiguration
-            {
-                FirstRowIsHeader = true,
-            };
-
-            // Write test data
-            var testData = new List<DecimalRecord>
-            {
-                new() { Id = 1, Amount = 1234.56m },
-                new() { Id = 2, Amount = 7890.12m },
-            };
-
-            var resolver = StorageProviderFactory.CreateResolver();
-            var sink = new ExcelSinkNode<DecimalRecord>(uri, resolver, config);
-            IDataStream<DecimalRecord> input = new DataStream<DecimalRecord>(testData.ToAsyncEnumerable());
-            await sink.ConsumeAsync(input, PipelineContext.CreateDefault(), CancellationToken.None);
-
-            // Read using ExcelSourceNode
-            var src = new ExcelSourceNode<DecimalRecord>(uri, MapDecimalRecordFromHeaders, resolver, config);
-            var outPipe = src.OpenStream(PipelineContext.CreateDefault(), CancellationToken.None);
-
-            var result = new List<DecimalRecord>();
-
-            await foreach (var item in outPipe.WithCancellation(CancellationToken.None))
-            {
-                result.Add(item);
-            }
-
-            // Assert
-            result.Should().HaveCount(2);
-            result[0].Amount.Should().Be(1234.56m);
-            result[1].Amount.Should().Be(7890.12m);
-        }
-        finally
-        {
-            if (File.Exists(tempFile))
-                File.Delete(tempFile);
-        }
+        create.Should().Throw<NotSupportedException>().WithMessage("*Values*");
     }
 
-    private static int MapIntRow(ExcelRow row) => row.GetByIndex(0, 0);
-
-    private static string MapStringRow(ExcelRow row) => row.GetByIndex(0, string.Empty) ?? string.Empty;
-
-    private static TestRecord MapTestRecordFromHeaders(ExcelRow row) =>
-        new()
-        {
-            Id = row.Get("Id", 0),
-            Name = row.Get("Name", string.Empty) ?? string.Empty,
-            Age = row.Get("Age", 0),
-        };
-
-    private static TestRecord MapTestRecordFromIndexes(ExcelRow row) =>
-        new()
-        {
-            Id = row.GetByIndex(0, 0),
-            Name = row.GetByIndex(1, string.Empty) ?? string.Empty,
-            Age = row.GetByIndex(2, 0),
-        };
-
-    private static ComplexRecord MapComplexRecordFromHeaders(ExcelRow row) =>
-        new()
-        {
-            Id = row.Get("Id", 0),
-            Name = row.Get("Name", string.Empty) ?? string.Empty,
-            Age = row.Get("Age", 0),
-            Salary = row.Get("Salary", 0m),
-            IsActive = row.Get("IsActive", false),
-            BirthDate = row.Get("BirthDate", default(DateTime)),
-            Score = row.Get("Score", 0d),
-            NullableValue = row.Get<int?>("NullableValue"),
-        };
-
-    private static NullableRecord MapNullableRecordFromHeaders(ExcelRow row) =>
-        new()
-        {
-            Id = row.Get("Id", 0),
-            NullableInt = row.Get<int?>("NullableInt"),
-            NullableString = row.Get<string>("NullableString"),
-        };
-
-    private static DateTimeRecord MapDateTimeRecordFromHeaders(ExcelRow row) =>
-        new()
-        {
-            Id = row.Get("Id", 0),
-            Date = row.Get("Date", default(DateTime)),
-        };
-
-    private static BoolRecord MapBoolRecordFromHeaders(ExcelRow row) =>
-        new()
-        {
-            Id = row.Get("Id", 0),
-            IsActive = row.Get("IsActive", false),
-        };
-
-    private static DecimalRecord MapDecimalRecordFromHeaders(ExcelRow row) =>
-        new()
-        {
-            Id = row.Get("Id", 0),
-            Amount = row.Get("Amount", 0m),
-        };
-
-    // Test record classes
-    private sealed record TestRecord
+    [Fact]
+    public void Validates_options()
     {
-        public int Id { get; set; }
-        public string Name { get; set; } = string.Empty;
-        public int Age { get; set; }
-    }
+        var sheet = () => Source<Person>(o => o with { SheetIndex = -1 });
+        var skip = () => Source<Person>(o => o with { SkipRows = -1 });
 
-    private sealed record ComplexRecord
-    {
-        public int Id { get; set; }
-        public string Name { get; set; } = string.Empty;
-        public int Age { get; set; }
-        public decimal Salary { get; set; }
-        public bool IsActive { get; set; }
-        public DateTime BirthDate { get; set; }
-        public double Score { get; set; }
-        public int? NullableValue { get; set; }
-    }
-
-    private sealed record NullableRecord
-    {
-        public int Id { get; set; }
-        public int? NullableInt { get; set; }
-        public string? NullableString { get; set; }
-    }
-
-    private sealed record DateTimeRecord
-    {
-        public int Id { get; set; }
-        public DateTime Date { get; set; }
-    }
-
-    private sealed record BoolRecord
-    {
-        public int Id { get; set; }
-        public bool IsActive { get; set; }
-    }
-
-    private sealed record DecimalRecord
-    {
-        public int Id { get; set; }
-        public decimal Amount { get; set; }
+        sheet.Should().Throw<ArgumentOutOfRangeException>();
+        skip.Should().Throw<ArgumentOutOfRangeException>();
     }
 }

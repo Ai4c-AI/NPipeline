@@ -22,10 +22,6 @@
         <PackageReadmeFile>README.md</PackageReadmeFile>
     </PropertyGroup>
 
-    <PropertyGroup>
-        <WarningsNotAsErrors>$(WarningsNotAsErrors);CS1591</WarningsNotAsErrors>
-    </PropertyGroup>
-
     <ItemGroup>
         <ProjectReference Include="..\NPipeline.Connectors\NPipeline.Connectors.csproj"/>
         <ProjectReference Include="..\NPipeline.StorageProviders\NPipeline.StorageProviders.csproj"/>

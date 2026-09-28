@@ -6,10 +6,11 @@ using NPipeline.Pipeline;
 namespace Sample_ExcelConnector.Nodes;
 
 /// <summary>
-///     Transform node that validates customer data and filters out invalid records.
+///     Transform node that validates customer data and logs a warning for each invalid record. With
+///     <c>filterInvalidRecords</c>, an invalid record fails the run instead; the sample data has invalid rows on purpose.
 ///     This demonstrates comprehensive validation for Excel data with various data types.
 /// </summary>
-public partial class ValidationTransform(bool filterInvalidRecords = true) : TransformNode<Customer, Customer>
+public partial class ValidationTransform(bool filterInvalidRecords = false) : TransformNode<Customer, Customer>
 {
     private readonly List<string> _validationErrors = [];
 

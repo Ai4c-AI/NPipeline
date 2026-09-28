@@ -23,22 +23,22 @@ public sealed class ExcelRoundTripTests
     [Fact]
     public Task Nullables() => RoundTripScenarios.Nullables(_harness);
 
-    [KnownBugFact("XL-3")]
+    [Fact]
     public Task Enums() => RoundTripScenarios.Enums(_harness);
 
-    [KnownBugFact("XL-3")]
+    [Fact]
     public Task DateTimeOffsets() => RoundTripScenarios.DateTimeOffsets(_harness);
 
-    [KnownBugFact("XL-3")]
+    [Fact]
     public Task DateOnlys() => RoundTripScenarios.DateOnlys(_harness);
 
-    [KnownBugFact("XL-11")]
+    [Fact]
     public Task Text() => RoundTripScenarios.Text(_harness);
 
-    [KnownBugFact("XL-8")]
+    [Fact]
     public Task ControlCharacters() => RoundTripScenarios.ControlCharacters(_harness);
 
-    [KnownBugFact("X-1")]
+    [Fact]
     public Task PositionalRecords() => RoundTripScenarios.PositionalRecords(_harness);
 
     [Fact]
@@ -47,7 +47,7 @@ public sealed class ExcelRoundTripTests
     [Fact]
     public Task Empty() => RoundTripScenarios.Empty(_harness);
 
-    [KnownBugFact("XL-9")]
+    [Fact]
     public Task Reads_from_non_seekable_streams() =>
         RoundTripScenarios.Scalars(new ExcelHarness { Provider = new InMemoryStorageProvider { NonSeekableReads = true } });
 
@@ -59,25 +59,25 @@ public sealed class ExcelRoundTripTests
     public async Task Source_surfaces_row_mapper_exceptions()
     {
         await _harness.WriteAsync([ScalarRecord.Create(1)]);
-        var source = new ExcelSourceNode<int>(_harness.Provider, _harness.Uri, _ => throw new InvalidOperationException("mapper failed"));
+        var source = ExcelConnector.Source<int>(_harness.Uri, _ => throw new InvalidOperationException("mapper failed"), o => o with { Provider = _harness.Provider });
 
         var read = () => NodeRunner.ReadAsync(source);
 
         await read.Should().ThrowAsync<Exception>();
     }
 
-    [KnownBugFact("XL-2")]
+    [Fact]
     public async Task Source_rejects_unparseable_values_instead_of_defaulting()
     {
         await _harness.WriteAsync([new TextRecord { Id = 1, Text = "not-a-number" }]);
-        var source = new ExcelSourceNode<int>(_harness.Provider, _harness.Uri, row => row.Get<int>("text"));
+        var source = ExcelConnector.Source(_harness.Uri, row => row.Get<int>("text"), o => o with { Provider = _harness.Provider });
 
         var read = () => NodeRunner.ReadAsync(source);
 
         await read.Should().ThrowAsync<Exception>();
     }
 
-    [KnownBugFact("XL-4")]
+    [Fact]
     public async Task Missing_columns_keep_property_initialisers()
     {
         await _harness.WriteAsync([new IdOnlyRecord { Id = 1 }]);
@@ -87,20 +87,20 @@ public sealed class ExcelRoundTripTests
         rows.Should().ContainSingle().Which.Country.Should().Be("AU");
     }
 
-    [KnownBugFact("XL-6")]
+    [Fact]
     public async Task Source_reads_numeric_header_cells()
     {
         _harness.Provider.Put(_harness.Uri, BuildWorkbook(
             [Inline("Id"), Number("2024")],
             [Number("1"), Number("99")]));
 
-        var source = new ExcelSourceNode<(int Id, int Year2024)>(_harness.Provider, _harness.Uri, row => (row.Get<int>("Id"), row.Get<int>("2024")));
+        var source = ExcelConnector.Source(_harness.Uri, row => (row.Get<int>("Id"), row.Get<int>("2024")), o => o with { Provider = _harness.Provider });
         var rows = await NodeRunner.ReadAsync(source);
 
         rows.Should().Equal((1, 99));
     }
 
-    [KnownBugFact("XL-5")]
+    [Fact]
     public async Task Sink_styles_date_cells_as_dates()
     {
         await _harness.WriteAsync([ScalarRecord.Create(1)]);
@@ -110,7 +110,7 @@ public sealed class ExcelRoundTripTests
         document.WorkbookPart!.WorkbookStylesPart.Should().NotBeNull("date cells need a date number format to display as dates");
     }
 
-    [KnownBugFact("XL-11")]
+    [Fact]
     public async Task Sink_preserves_leading_and_trailing_whitespace_for_excel()
     {
         await _harness.WriteAsync([new TextRecord { Id = 1, Text = "  padded  " }]);

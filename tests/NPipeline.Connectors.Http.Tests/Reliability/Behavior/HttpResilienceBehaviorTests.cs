@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Threading.RateLimiting;
 using NPipeline.Connectors.Http.Configuration;
 using NPipeline.Connectors.Http.Metrics;
 using NPipeline.Connectors.Http.Nodes;
@@ -66,7 +67,7 @@ public sealed class HttpResilienceBehaviorTests
     {
         var handler = RespondWith(status, 10);
 
-        var act = () => RunSinkAsync(handler, new HttpSinkConfiguration { Uri = Endpoint, Method = SinkHttpMethod.Put, Resilience = Fast });
+        var act = () => RunSinkAsync(handler, new HttpSinkOptions<int> { Uri = Endpoint, Method = SinkHttpMethod.Put, Resilience = Fast });
 
         var thrown = await act.Should().ThrowAsync<HttpRequestException>();
         thrown.Which.StatusCode.Should().Be(status);
@@ -78,7 +79,7 @@ public sealed class HttpResilienceBehaviorTests
     {
         var handler = RespondWith(HttpStatusCode.BadRequest, 10);
 
-        var act = () => RunSinkAsync(handler, new HttpSinkConfiguration { Uri = Endpoint, Method = SinkHttpMethod.Put, Resilience = Fast });
+        var act = () => RunSinkAsync(handler, new HttpSinkOptions<int> { Uri = Endpoint, Method = SinkHttpMethod.Put, Resilience = Fast });
 
         _ = await act.Should().ThrowAsync<HttpRequestException>();
         handler.Requests.Should().ContainSingle();
@@ -93,7 +94,7 @@ public sealed class HttpResilienceBehaviorTests
 
         var metrics = new RecordingMetrics();
 
-        await RunSinkAsync(handler, new HttpSinkConfiguration { Uri = Endpoint, Method = SinkHttpMethod.Put, Resilience = Fast }, metrics);
+        await RunSinkAsync(handler, new HttpSinkOptions<int> { Uri = Endpoint, Method = SinkHttpMethod.Put, Resilience = Fast }, metrics);
 
         handler.Requests.Should().HaveCount(2);
         metrics.Retries.Should().Be(1);
@@ -109,7 +110,7 @@ public sealed class HttpResilienceBehaviorTests
         // D-6: retrying a POST or PATCH the server already applied would duplicate it.
         var handler = RespondWith(HttpStatusCode.ServiceUnavailable, 10);
 
-        var act = () => RunSinkAsync(handler, new HttpSinkConfiguration { Uri = Endpoint, Method = method, Resilience = Fast });
+        var act = () => RunSinkAsync(handler, new HttpSinkOptions<int> { Uri = Endpoint, Method = method, Resilience = Fast });
 
         _ = await act.Should().ThrowAsync<HttpRequestException>();
         handler.Requests.Should().ContainSingle();
@@ -120,12 +121,12 @@ public sealed class HttpResilienceBehaviorTests
     {
         var handler = RespondWith(HttpStatusCode.ServiceUnavailable, 2).Respond(HttpStatusCode.Created);
 
-        var configuration = new HttpSinkConfiguration
+        var configuration = new HttpSinkOptions<int>
         {
             Uri = Endpoint,
             Method = SinkHttpMethod.Post,
             Resilience = Fast,
-            IdempotencyKeyFactory = item => $"key-{item}",
+            IdempotencyKeyFactory = batch => $"key-{batch[0]}",
         };
 
         await RunSinkAsync(handler, configuration);
@@ -137,19 +138,20 @@ public sealed class HttpResilienceBehaviorTests
     }
 
     [Fact]
-    public async Task Sink_CapturesAnErrorResponseOnlyAfterRetriesAreSpent()
+    public async Task Sink_SkipsAFailedRequestOnlyAfterRetriesAreSpent()
     {
-        // H3: CaptureErrorResponses used to capture the first 503 and drop the batch without retrying.
+        // H3: the old CaptureErrorResponses captured the first 503 and dropped the batch without retrying. Skip, its
+        // replacement, must judge the response only once retries are spent.
         var handler = new MockHttpMessageHandler()
             .Respond(HttpStatusCode.ServiceUnavailable)
             .Respond(HttpStatusCode.OK);
 
-        var configuration = new HttpSinkConfiguration
+        var configuration = new HttpSinkOptions<int>
         {
             Uri = Endpoint,
             Method = SinkHttpMethod.Put,
             Resilience = Fast,
-            CaptureErrorResponses = true,
+            FailedRequests = HttpFailedRequestAction.Skip,
         };
 
         var metrics = new RecordingMetrics();
@@ -160,16 +162,16 @@ public sealed class HttpResilienceBehaviorTests
     }
 
     [Fact]
-    public async Task Sink_CapturesAPersistentErrorResponseWithoutThrowing()
+    public async Task Sink_SkipsAPersistentFailureWithoutThrowing()
     {
         var handler = RespondWith(HttpStatusCode.ServiceUnavailable, 10);
 
-        var configuration = new HttpSinkConfiguration
+        var configuration = new HttpSinkOptions<int>
         {
             Uri = Endpoint,
             Method = SinkHttpMethod.Put,
             Resilience = Fast,
-            CaptureErrorResponses = true,
+            FailedRequests = HttpFailedRequestAction.Skip,
         };
 
         await RunSinkAsync(handler, configuration);
@@ -190,7 +192,7 @@ public sealed class HttpResilienceBehaviorTests
         }
 
         var metrics = new RecordingMetrics();
-        await RunSinkAsync(handler, new HttpSinkConfiguration { Uri = Endpoint, Method = SinkHttpMethod.Put, Resilience = Fast }, metrics, items);
+        await RunSinkAsync(handler, new HttpSinkOptions<int> { Uri = Endpoint, Method = SinkHttpMethod.Put, Resilience = Fast }, metrics, items);
 
         handler.Requests.Should().HaveCount(items * 2);
         metrics.Written.Should().Be(items);
@@ -201,7 +203,7 @@ public sealed class HttpResilienceBehaviorTests
     {
         var handler = new SlowThenFastHandler(1, TimeSpan.FromSeconds(5));
 
-        var configuration = new HttpSinkConfiguration
+        var configuration = new HttpSinkOptions<int>
         {
             Uri = Endpoint,
             Method = SinkHttpMethod.Put,
@@ -220,7 +222,7 @@ public sealed class HttpResilienceBehaviorTests
         var handler = new SlowThenFastHandler(1, TimeSpan.FromSeconds(5));
         using var client = new HttpClient(handler) { Timeout = TimeSpan.FromMilliseconds(100) };
 
-        var sink = new HttpSinkNode<int>(new HttpSinkConfiguration { Uri = Endpoint, Method = SinkHttpMethod.Put, Resilience = Fast }, client);
+        var sink = new HttpSinkNode<int>(new HttpSinkOptions<int> { Uri = Endpoint, Method = SinkHttpMethod.Put, Resilience = Fast }, client);
         await using var input = new InMemoryDataStream<int>([1]);
         await sink.ConsumeAsync(input, new PipelineContext(), CancellationToken.None);
 
@@ -233,7 +235,7 @@ public sealed class HttpResilienceBehaviorTests
         using var cts = new CancellationTokenSource();
         var handler = new SlowThenFastHandler(10, TimeSpan.FromSeconds(30), cts.Cancel);
 
-        var act = () => RunSinkAsync(handler, new HttpSinkConfiguration { Uri = Endpoint, Method = SinkHttpMethod.Put, Resilience = Fast },
+        var act = () => RunSinkAsync(handler, new HttpSinkOptions<int> { Uri = Endpoint, Method = SinkHttpMethod.Put, Resilience = Fast },
             cancellationToken: cts.Token);
 
         _ = await act.Should().ThrowAsync<OperationCanceledException>();
@@ -253,10 +255,50 @@ public sealed class HttpResilienceBehaviorTests
             .Respond(HttpStatusCode.OK);
 
         var started = DateTimeOffset.UtcNow;
-        await RunSinkAsync(handler, new HttpSinkConfiguration { Uri = Endpoint, Method = SinkHttpMethod.Put, Resilience = Fast });
+        await RunSinkAsync(handler, new HttpSinkOptions<int> { Uri = Endpoint, Method = SinkHttpMethod.Put, Resilience = Fast });
 
         handler.Requests.Should().HaveCount(2);
         (DateTimeOffset.UtcNow - started).Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(250), "the server asked for 300 ms");
+    }
+
+    [Fact]
+    public async Task Sink_TakesARateLimiterLeaseForEveryAttempt()
+    {
+        // Retries take a lease too, so a burst of 503 retries cannot exceed the limit.
+        var handler = RespondWith(HttpStatusCode.ServiceUnavailable, 2).Respond(HttpStatusCode.OK);
+        using var limiter = new CountingRateLimiter();
+
+        await RunSinkAsync(handler, new HttpSinkOptions<int> { Uri = Endpoint, Method = SinkHttpMethod.Put, Resilience = Fast, RateLimiter = limiter });
+
+        handler.Requests.Should().HaveCount(3);
+        limiter.Acquired.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task Source_TakesARateLimiterLeaseForEveryAttempt()
+    {
+        var handler = new MockHttpMessageHandler()
+            .Respond(HttpStatusCode.ServiceUnavailable)
+            .Respond(HttpStatusCode.OK, "[1]");
+
+        using var limiter = new CountingRateLimiter();
+
+        var items = await DrainSourceAsync(handler, new HttpSourceOptions<int> { BaseUri = Endpoint, Resilience = Fast, RateLimiter = limiter });
+
+        items.Should().Equal(1);
+        limiter.Acquired.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Source_ARejectedRateLimiterLeaseFailsWithoutSending()
+    {
+        var handler = new MockHttpMessageHandler().Respond(HttpStatusCode.OK, "[1]");
+        using var limiter = new CountingRateLimiter(grant: false);
+
+        var act = () => DrainSourceAsync(handler, new HttpSourceOptions<int> { BaseUri = Endpoint, Resilience = Fast, RateLimiter = limiter });
+
+        _ = await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*rate limiter*");
+        handler.Requests.Should().BeEmpty();
     }
 
     [Fact]
@@ -265,7 +307,7 @@ public sealed class HttpResilienceBehaviorTests
         var handler = RespondWith(HttpStatusCode.BadGateway, 10);
         var metrics = new RecordingMetrics();
 
-        var act = () => DrainSourceAsync(handler, new HttpSourceConfiguration { BaseUri = Endpoint, Resilience = Fast }, metrics);
+        var act = () => DrainSourceAsync(handler, new HttpSourceOptions<int> { BaseUri = Endpoint, Resilience = Fast }, metrics);
 
         var thrown = await act.Should().ThrowAsync<HttpRequestException>();
         thrown.Which.StatusCode.Should().Be(HttpStatusCode.BadGateway);
@@ -279,7 +321,7 @@ public sealed class HttpResilienceBehaviorTests
     {
         var handler = RespondWith(HttpStatusCode.NotFound, 10);
 
-        var act = () => DrainSourceAsync(handler, new HttpSourceConfiguration { BaseUri = Endpoint, Resilience = Fast });
+        var act = () => DrainSourceAsync(handler, new HttpSourceOptions<int> { BaseUri = Endpoint, Resilience = Fast });
 
         _ = await act.Should().ThrowAsync<HttpRequestException>();
         handler.Requests.Should().ContainSingle();
@@ -292,7 +334,7 @@ public sealed class HttpResilienceBehaviorTests
             .Respond(HttpStatusCode.ServiceUnavailable)
             .Respond(HttpStatusCode.OK, "[1,2,3]");
 
-        var items = await DrainSourceAsync(handler, new HttpSourceConfiguration { BaseUri = Endpoint, Resilience = Fast });
+        var items = await DrainSourceAsync(handler, new HttpSourceOptions<int> { BaseUri = Endpoint, Resilience = Fast });
 
         items.Should().Equal(1, 2, 3);
         handler.Requests.Should().HaveCount(2);
@@ -306,7 +348,7 @@ public sealed class HttpResilienceBehaviorTests
             .Respond(HttpStatusCode.ServiceUnavailable)
             .Respond(HttpStatusCode.OK, "[1]");
 
-        var configuration = new HttpSourceConfiguration
+        var configuration = new HttpSourceOptions<int>
         {
             BaseUri = Endpoint,
             RequestMethod = HttpMethod.Post,
@@ -326,7 +368,7 @@ public sealed class HttpResilienceBehaviorTests
     {
         var handler = RespondWith(HttpStatusCode.ServiceUnavailable, 10);
 
-        var act = () => DrainSourceAsync(handler, new HttpSourceConfiguration { BaseUri = Endpoint, Resilience = Resilience.None });
+        var act = () => DrainSourceAsync(handler, new HttpSourceOptions<int> { BaseUri = Endpoint, Resilience = Resilience.None });
 
         _ = await act.Should().ThrowAsync<HttpRequestException>();
         handler.Requests.Should().ContainSingle();
@@ -357,7 +399,7 @@ public sealed class HttpResilienceBehaviorTests
 
     private static async Task RunSinkAsync(
         HttpMessageHandler handler,
-        HttpSinkConfiguration configuration,
+        HttpSinkOptions<int> configuration,
         IHttpConnectorMetrics? metrics = null,
         int items = 1,
         CancellationToken cancellationToken = default)
@@ -378,7 +420,7 @@ public sealed class HttpResilienceBehaviorTests
 
     private static async Task<List<int>> DrainSourceAsync(
         HttpMessageHandler handler,
-        HttpSourceConfiguration configuration,
+        HttpSourceOptions<int> configuration,
         IHttpConnectorMetrics? metrics = null)
     {
         using var httpClient = new HttpClient(handler, false);
@@ -415,6 +457,42 @@ public sealed class HttpResilienceBehaviorTests
                 await Task.Delay(slowDelay, cancellationToken);
 
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}", Encoding.UTF8, "application/json") };
+        }
+    }
+
+    private sealed class CountingRateLimiter(bool grant = true) : RateLimiter
+    {
+        private int _acquired;
+
+        public int Acquired => Volatile.Read(ref _acquired);
+
+        public override TimeSpan? IdleDuration => null;
+
+        public override RateLimiterStatistics? GetStatistics() => null;
+
+        protected override RateLimitLease AttemptAcquireCore(int permitCount)
+        {
+            _ = Interlocked.Increment(ref _acquired);
+            return new Lease(grant);
+        }
+
+        protected override ValueTask<RateLimitLease> AcquireAsyncCore(int permitCount, CancellationToken cancellationToken)
+        {
+            _ = Interlocked.Increment(ref _acquired);
+            return ValueTask.FromResult<RateLimitLease>(new Lease(grant));
+        }
+
+        private sealed class Lease(bool acquired) : RateLimitLease
+        {
+            public override bool IsAcquired => acquired;
+
+            public override IEnumerable<string> MetadataNames => [];
+
+            public override bool TryGetMetadata(string metadataName, out object? metadata)
+            {
+                metadata = null;
+                return false;
+            }
         }
     }
 

@@ -1,12 +1,16 @@
 ---
 title: "HTTP Connector"
-description: "Read from and post to HTTP APIs with pagination, rate limiting, authentication, and retry."
+description: "Read from and write to REST APIs with pagination, retries, rate limiting and safe telemetry."
 order: 6
 ---
 
 # HTTP Connector
 
-The `NPipeline.Connectors.Http` package provides source and sink nodes for HTTP APIs. Supports pluggable authentication, pagination strategies (offset, cursor, link-header), rate limiting, retry with exponential backoff, batch posting, and per-item URI routing.
+The `NPipeline.Connectors.Http` package reads items from REST APIs and writes items to them. The source follows
+pagination (page numbers, offsets, cursors, `Link` headers, next-page URLs, or your own rule) and reads each page's
+body once. The sink posts items one at a time or in batches. Both retry through
+[NResilience](https://github.com/nresilience/NResilience), take a rate-limiter lease for every attempt, and keep query
+values (which can hold API keys) out of metrics, traces, logs and errors.
 
 ## Installation
 
@@ -14,172 +18,169 @@ The `NPipeline.Connectors.Http` package provides source and sink nodes for HTTP 
 dotnet add package NPipeline.Connectors.Http
 ```
 
-**Dependencies:** [Microsoft.Extensions.Http](https://www.nuget.org/packages/Microsoft.Extensions.Http) 10.x
-
-## Source Node - `HttpSourceNode<T>`
-
-Fetches data from an HTTP endpoint and emits each item. Supports paginated APIs.
-
-### Constructors
+## Reading
 
 ```csharp
-// With IHttpClientFactory (recommended)
-public HttpSourceNode(
-    HttpSourceConfiguration configuration,
-    IHttpClientFactory httpClientFactory)
+public sealed record Order(int Id, string Customer, decimal Total);
 
-// With metrics and logging
-public HttpSourceNode(
-    HttpSourceConfiguration configuration,
-    IHttpClientFactory httpClientFactory,
-    IHttpConnectorMetrics metrics,
-    ILogger<HttpSourceNode<T>>? logger = null)
-
-// With explicit HttpClient
-public HttpSourceNode(
-    HttpSourceConfiguration configuration,
-    HttpClient httpClient,
-    IHttpConnectorMetrics? metrics = null,
-    ILogger<HttpSourceNode<T>>? logger = null)
-```
-
-### Example: Paginated API
-
-```csharp
-var config = new HttpSourceConfiguration
+var source = HttpConnector.Source<Order>(new Uri("https://api.example.com/orders"), httpClient, o => o with
 {
-    BaseUri = new Uri("https://api.example.com/orders"),
-    Auth = new BearerTokenAuthProvider("eyJ..."),
-    Pagination = new OffsetPaginationStrategy(pageSize: 100),
-    MaxPages = 50,
-    ItemsJsonPath = "data.orders",
-};
+    ItemsJsonPath = "data",
+    Pagination = HttpPagination.Cursor(new CursorPaginationOptions { CursorJsonPath = "meta.next_cursor" }),
+    Auth = new BearerTokenAuthProvider(token),
+});
 
-var source = new HttpSourceNode<Order>(config, httpClientFactory);
+builder.AddSource(source, "orders");
 ```
 
-## Sink Node - `HttpSinkNode<T>`
+Pass an `HttpClient` (you keep ownership of it) or an `IHttpClientFactory` (the node creates a client named by
+`HttpClientName`). Items are deserialized with System.Text.Json's web defaults: camelCase names, matched
+case-insensitively.
 
-Posts items to an HTTP endpoint. Supports batch sending, per-item routing, and idempotency keys.
+### Where the items are
 
-### Constructors
+When `ItemsJsonPath` is `null`, each response must be a JSON array. Otherwise the path names the array inside the
+response (`data`, `result.items`; a leading `$.` is allowed), matching property names exactly first and then ignoring
+case. A path that is missing, or that is not an array, fails the read with an `HttpSourceException` that lists the
+properties the response does have. It never quietly returns no items.
+
+A body that is not JSON (an HTML error page returned with 200, for example) fails with the URI, page number, content
+type and the first 512 bytes of the body.
+
+### Pagination
+
+| Strategy | Requests | Stops when |
+| --- | --- | --- |
+| `HttpPagination.None` (default) | One | Always |
+| `HttpPagination.PageNumber(new() { PageSize = 100 })` | `?page=1&pageSize=100`, `?page=2…` | A page is shorter than `PageSize`, or `TotalItemsJsonPath` says every item has been read |
+| `HttpPagination.Offset(new() { Limit = 100 })` | `?offset=0&limit=100`, `?offset=100…` | A page is shorter than `Limit`, or the total is reached |
+| `HttpPagination.Cursor(new() { CursorJsonPath = "meta.next" })` | `?cursor=<value>` | The cursor is missing, `null` or empty. It may be a string or a number |
+| `HttpPagination.LinkHeader` | The `Link` header's `rel="next"` URL | There is no next link |
+| `HttpPagination.NextUrl("links.next")` | The URL in the body, absolute or relative | The URL is missing, `null` or empty |
+| `HttpPagination.Custom(page => …)` | Whatever the delegate returns | It returns `null` |
+
+A strategy holds only configuration: each run pages independently, so one options instance can serve concurrent runs.
+A custom strategy gets an `HttpPageContext` with the page's URI, number, status, headers, item count, the run's item
+count so far, `TryGetValue(path)` for a value in the body, and `Body` for the whole body:
 
 ```csharp
-// With IHttpClientFactory
-public HttpSinkNode(
-    HttpSinkConfiguration configuration,
-    IHttpClientFactory httpClientFactory)
-
-// Per-item URI routing
-public HttpSinkNode(
-    HttpSinkConfiguration configuration,
-    Func<T, Uri> uriFactory,
-    IHttpClientFactory httpClientFactory,
-    IHttpConnectorMetrics? metrics = null,
-    ILogger<HttpSinkNode<T>>? logger = null)
+Pagination = HttpPagination.Custom(page =>
+    page.TryGetValue("paging.after", out var after) && after.ValueKind == JsonValueKind.String
+        ? new Uri($"https://api.example.com/orders?after={after.GetString()}")
+        : null),
 ```
 
-### Example: Batch POST with Idempotency
+`TryGetValue` parses only the value it finds, so it is cheaper than `Body`, which parses the whole page on first use.
+A strategy that returns the page it just read fails the read instead of looping, and `MaxPages` caps a run.
+
+### Items that do not convert
+
+A single bad item doesn't fail the entire page; if a page doesn't convert as a whole, the source reads items individually and only reports the failed ones as errors. By default an error fails the read with a
+`RecordMappingException` naming the item's position and JSON path (`$.total`). With `RowErrorHandler`, it can be
+skipped or dead-lettered instead, as in the [file connectors](file-connectors.md#row-errors).
+
+### Response size
+
+`MaxResponseBytes` caps each response body. It is checked against `Content-Length` and enforced while the body is read,
+before anything buffers it, so an oversized response cannot exhaust memory. A response over the limit fails with
+`HttpResponseTooLargeException` and is never retried.
+
+### Source options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `BaseUri` | required | The endpoint, without pagination parameters |
+| `RequestMethod` | GET | Use POST, with `RequestBodyFactory`, for APIs that take the query in a body |
+| `Headers` | none | Headers sent with every request |
+| `ItemsJsonPath` | `null` | The path to the items array |
+| `Pagination` | `None` | How pages follow one another |
+| `JsonOptions` | web defaults | Serializer options for items |
+| `TypeInfo` | `null` | Source-generated metadata (`JsonTypeInfo<T>`), for trimming and Native AOT |
+| `Auth` | none | See [Authentication](#authentication) |
+| `RateLimiter` | `null` | A `System.Threading.RateLimiting.RateLimiter`; see [Rate limiting](#rate-limiting) |
+| `Resilience` | `HttpConnectorResilience.Default` | See [Resilience](#resilience) |
+| `RequestCustomizer` | `null` | Changes each request just before it is sent, including retries |
+| `MaxPages` | `null` | The most pages per run |
+| `MaxResponseBytes` | `null` | The largest body to accept |
+| `RowErrorHandler` | `null` | What to do with items that do not convert |
+| `RawExcerptLength` | 256 | The raw text a row error carries; `0` omits it |
+
+## Writing
 
 ```csharp
-var config = new HttpSinkConfiguration
+var sink = HttpConnector.Sink<Order>(new Uri("https://api.example.com/orders"), httpClient, o => o with
 {
-    Uri = new Uri("https://api.example.com/orders"),
-    Method = SinkHttpMethod.Post,
-    Auth = new ApiKeyAuthProvider("X-Api-Key", "my-key"),
-    BatchSize = 50,
+    BatchSize = 100,
     BatchWrapperKey = "orders",
-    IdempotencyKeyFactory = item => ((Order)item).OrderId.ToString(),
-    RateLimiter = new TokenBucketRateLimiter(permitsPerSecond: 100)
-};
-
-var sink = new HttpSinkNode<Order>(config, httpClientFactory);
+    IdempotencyKeyFactory = batch => $"orders-{batch[0].Id}-{batch.Count}",
+});
 ```
+
+With `BatchSize = 1` (the default) each item is sent as a JSON object; larger batches are sent as an array, or as
+`{"orders":[…]}` with `BatchWrapperKey`. `UriFactory` sends each item to its own endpoint (`PUT /orders/{id}`): a batch
+holds consecutive items for one URI, so an item is never sent to another item's endpoint.
+
+### Failed requests
+
+A request that still fails once retries are spent is handled as `FailedRequests` says:
+
+| `FailedRequests` | Effect |
+| --- | --- |
+| `Fail` (default) | The write fails with an `HttpRequestException` carrying the status and the start of the response |
+| `Skip` | A warning is logged and the sink carries on; the items are lost |
+| `DeadLetter` | An `HttpRequestFailure<T>` (endpoint, method, status, response excerpt and the items) goes to the pipeline's dead-letter sink, attributed to the sink node, and the sink carries on |
+
+### Sink options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `Uri` | required unless `UriFactory` | The endpoint |
+| `UriFactory` | `null` | The endpoint for each item |
+| `Method` | `Post` | `Post`, `Put` or `Patch` |
+| `Headers` | none | Headers sent with every request |
+| `BatchSize` | 1 | The most items per request |
+| `BatchWrapperKey` | `null` | The property to wrap a batch in |
+| `JsonOptions`, `TypeInfo` | web defaults | How items are serialized |
+| `FailedRequests` | `Fail` | See above |
+| `IdempotencyKeyFactory` | `null` | The key for a request, given its items; see [Idempotency](#idempotency) |
+| `IdempotencyHeaderName` | `Idempotency-Key` | The header that carries it |
+| `Auth`, `RateLimiter`, `Resilience`, `RequestCustomizer` | | As for the source |
 
 ## Authentication
 
 | Provider | Usage |
-|----------|-------|
+| --- | --- |
 | `NullAuthProvider` (default) | No authentication |
 | `BasicAuthProvider(user, pass)` | HTTP Basic auth |
-| `BearerTokenAuthProvider(token)` | Bearer token in Authorization header |
-| `ApiKeyAuthProvider(header, key)` | API key in a custom header |
+| `BearerTokenAuthProvider(token)` | A bearer token in the `Authorization` header |
+| `ApiKeyAuthProvider(header, key)` | An API key in a header |
+| `ApiKeyAuthProvider(name, key, ApiKeyLocation.QueryString)` | An API key in the query string; it is redacted from telemetry and errors |
 
-Implement `IHttpAuthProvider` for custom schemes (OAuth2, HMAC, etc.).
+Implement `IHttpAuthProvider` for other schemes, such as OAuth2 or HMAC signatures.
 
-## Pagination
+## Rate limiting
 
-| Strategy | Description |
-|----------|-------------|
-| `NoPaginationStrategy` (default) | Single request, no pagination |
-| `OffsetPaginationStrategy(pageSize)` | Offset/limit pagination |
-| `CursorPaginationStrategy(cursorParam)` | Cursor-based (next token) pagination |
-| `LinkHeaderPaginationStrategy()` | RFC 5988 Link header pagination |
-
-Implement `IPaginationStrategy` for custom pagination patterns.
-
-## Rate Limiting
+Pass any `System.Threading.RateLimiting.RateLimiter`. A lease is taken for every attempt, including retries, so a burst
+of 429 or 503 retries cannot exceed the limit that caused it:
 
 ```csharp
-// Token bucket rate limiter
-var config = new HttpSourceConfiguration
+var limiter = new TokenBucketRateLimiter(new TokenBucketRateLimiterOptions
 {
-    RateLimiter = new TokenBucketRateLimiter(permitsPerSecond: 50)
-};
-```
-
-Implement `IRateLimiter` for custom rate limiting (sliding window, per-endpoint, etc.).
-
-## Configuration - Source
-
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `BaseUri` | `Uri` | (required) | Base URL (must be absolute) |
-| `RequestMethod` | `HttpMethod` | `GET` | HTTP method |
-| `Headers` | `Dictionary<string, string>` | `{}` | Default headers |
-| `ItemsJsonPath` | `string?` | `null` | Dot-separated path to items array (e.g., `"data.orders"`) |
-| `JsonOptions` | `JsonSerializerOptions?` | Web defaults | JSON deserialization options |
-| `Auth` | `IHttpAuthProvider` | `NullAuthProvider` | Authentication provider |
-| `Pagination` | `IPaginationStrategy` | `NoPaginationStrategy` | Pagination strategy |
-| `RateLimiter` | `IRateLimiter` | `NullRateLimiter` | Rate limiter |
-| `Resilience` | `NResilience.Resilience` | `HttpConnectorResilience.Default` | Retries, backoff, and the per-request timeout |
-| `MaxPages` | `int?` | `null` | Safety guard for pagination loops |
-| `MaxResponseBytes` | `long?` | `null` | Max response size |
-| `RequestCustomizer` | `Func<HttpRequestMessage, CancellationToken, ValueTask>?` | `null` | Per-request hook |
-
-## Configuration - Sink
-
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `Uri` | `Uri?` | `null` | Target URL |
-| `UriFactory` | `Func<object, Uri>?` | `null` | Per-item URL (overrides `Uri`) |
-| `Method` | `SinkHttpMethod` | `Post` | `Post`, `Put`, or `Patch` |
-| `Headers` | `Dictionary<string, string>` | `{}` | Default headers |
-| `BatchSize` | `int` | `1` | Items per request (1 = individual). With `UriFactory`, a batch holds consecutive items for the same URI and is sent early when the URI changes |
-| `BatchWrapperKey` | `string?` | `null` | JSON property name wrapping batch array |
-| `Auth` | `IHttpAuthProvider` | `NullAuthProvider` | Authentication provider |
-| `RateLimiter` | `IRateLimiter` | `NullRateLimiter` | Rate limiter |
-| `Resilience` | `NResilience.Resilience` | `HttpConnectorResilience.Default` | Retries, backoff, and the per-request timeout |
-| `IdempotencyKeyFactory` | `Func<object, string>?` | `null` | Generate idempotency keys |
-| `IdempotencyHeaderName` | `string` | `"Idempotency-Key"` | Header name for idempotency key |
-| `CaptureErrorResponses` | `bool` | `false` | Log a failed response and continue instead of throwing. Applies only after retries are spent |
-
-## Dependency Injection
-
-```csharp
-services.AddHttpConnector();
-services.AddHttpConnectorClient("orders-api", client =>
-{
-    client.BaseAddress = new Uri("https://api.example.com/");
-    client.DefaultRequestHeaders.Add("Accept", "application/json");
+    TokenLimit = 10,
+    TokensPerPeriod = 10,
+    ReplenishmentPeriod = TimeSpan.FromSeconds(1),
+    QueueLimit = int.MaxValue,
 });
+
+var source = HttpConnector.Source<Order>(uri, httpClient, o => o with { RateLimiter = limiter });
 ```
+
+A limiter shared between nodes limits them together. A lease the limiter rejects (its queue is full) fails the request.
 
 ## Resilience
 
-Both nodes send every request through [NResilience](https://github.com/nresilience/NResilience)'s
-`HttpResilienceHandler`. The `Resilience` property configures it. The default,
-`HttpConnectorResilience.Default`, does the following:
+Both nodes send every request through NResilience's `HttpResilienceHandler`. The `Resilience` option configures it.
+The default, `HttpConnectorResilience.Default`, does the following:
 
 - Makes up to four attempts (three retries).
 - Retries network failures, client timeouts, 408, 429, and 5xx responses. A 404 or other 4xx response is not
@@ -194,16 +195,15 @@ Both nodes send every request through [NResilience](https://github.com/nresilien
 a setting, derive a policy with a `with` expression:
 
 ```csharp
-var config = new HttpSourceConfiguration
+var source = HttpConnector.Source<Order>(uri, httpClient, o => o with
 {
-    BaseUri = new Uri("https://api.example.com/orders"),
     Resilience = HttpConnectorResilience.Default with
     {
         Attempts = 6,
         AttemptTimeout = TimeSpan.FromSeconds(10),
         Deadline = TimeSpan.FromMinutes(2),
     },
-};
+});
 ```
 
 To turn retries off, use `Resilience.None`. It has no timeout, so set one:
@@ -220,9 +220,9 @@ to 16 requests.
 
 The source retries every request, including POST requests that carry a query, because sources only read. The sink
 retries PUT requests, but sends POST and PATCH requests **once** unless they carry an idempotency key.
-Retrying a write that the server already applied would duplicate it. Set `IdempotencyKeyFactory` (see
-[Idempotency](#idempotency)) to make POST and PATCH retryable. To retry a POST or PATCH that is safe to repeat for
-another reason, mark the request in `RequestCustomizer`:
+Retrying a write that the server already applied would duplicate it. Set `IdempotencyKeyFactory` to make POST and
+PATCH retryable. To retry a POST or PATCH that is safe to repeat for another reason, mark the request in
+`RequestCustomizer`:
 
 ```csharp
 RequestCustomizer = (request, _) =>
@@ -234,30 +234,41 @@ RequestCustomizer = (request, _) =>
 
 ## Idempotency
 
-For sink operations, generate an idempotency key per item to prevent duplicate submissions. The key also makes POST
-and PATCH requests retryable, and every attempt sends the same key:
+`IdempotencyKeyFactory` gives each request a key, from the items it carries. The key makes POST and PATCH requests
+retryable, and every attempt sends the same key, so a server that supports the header discards duplicates:
 
 ```csharp
-var sink = new HttpSinkNode<Order>(new HttpSinkConfiguration
+IdempotencyKeyFactory = batch => string.Join(',', batch.Select(order => order.Id)),
+```
+
+## Observability
+
+Traces come from the `NPipeline.Connectors.Http` activity source, one client span per attempt, with OpenTelemetry
+names: `http.request.method`, `url.full`, `server.address`, `server.port`, `http.response.status_code` and
+`error.type`. `url.full` keeps the query's names but replaces its values with `REDACTED`, as do log messages and
+exception messages.
+
+`IHttpConnectorMetrics` receives each request, response, retry, rate-limiter wait, page and write, labelled by the
+endpoint without its query (`https://api.example.com/orders`), so page numbers and cursors never multiply the number
+of series. Items read and written are also counted by the shared `npipeline.connector.rows_read` and `rows_written`
+instruments, with `connector` = `http`.
+
+## Dependency Injection
+
+```csharp
+services.AddHttpConnector();
+services.AddHttpConnectorClient("orders-api", client =>
 {
-    Uri = new Uri("https://api.example.com/orders"),
-    Method = SinkHttpMethod.Post,
-    IdempotencyKeyFactory = order => order.OrderId.ToString(),
-    IdempotencyHeaderName = "Idempotency-Key"
+    client.BaseAddress = new Uri("https://api.example.com/");
 });
 ```
 
-## Best Practices
-
-1. **Use pagination** for large result sets - never fetch unbounded data
-2. **Set `MaxPages`** as a safety guard against infinite pagination loops
-3. **Use rate limiting** to avoid overwhelming downstream APIs
-4. **Use idempotency keys** for POST and PATCH operations, so they can be retried safely
-5. **Register named `HttpClient`** via DI with `AddHttpConnectorClient` for testability and pooling
-6. **Set `MaxResponseBytes`** to prevent memory exhaustion from unexpectedly large responses
-7. **Implement `IHttpAuthProvider`** for OAuth2/OIDC flows
+`AddHttpConnector` registers `IHttpConnectorMetrics`. The nodes take per-node options, so create them with
+`HttpConnector` (passing the container's `IHttpClientFactory`), or register an `HttpSourceOptions<T>` or
+`HttpSinkOptions<T>` for each item type the container should build nodes for.
 
 ## Next Steps
 
-- [Error Handling](../error-handling/index.md) - how pipeline-level retries relate to connector retries
-- [Dependency Injection](../guides/dependency-injection.md) - HttpClient integration
+- [Error Handling](../error-handling/index.md): how pipeline-level retries relate to connector retries
+- [Dependency Injection](../guides/dependency-injection.md): `HttpClient` integration
+- [JSON Connector](json.md): read and write JSON files

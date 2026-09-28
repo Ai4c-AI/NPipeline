@@ -26,7 +26,7 @@ public class HttpSourceNodeIntegrationTests(WireMockFixture fixture)
 
         using var httpClient = new HttpClient();
 
-        var config = new HttpSourceConfiguration
+        var config = new HttpSourceOptions<Item>
         {
             BaseUri = new Uri($"{fixture.BaseUrl}/items"),
         };
@@ -66,10 +66,10 @@ public class HttpSourceNodeIntegrationTests(WireMockFixture fixture)
 
         using var httpClient = new HttpClient();
 
-        var config = new HttpSourceConfiguration
+        var config = new HttpSourceOptions<Item>
         {
             BaseUri = new Uri($"{fixture.BaseUrl}/paged?page=1"),
-            Pagination = new LinkHeaderPaginationStrategy(),
+            Pagination = HttpPagination.LinkHeader,
         };
 
         var node = new HttpSourceNode<Item>(config, httpClient);
@@ -106,7 +106,7 @@ public class HttpSourceNodeIntegrationTests(WireMockFixture fixture)
 
         using var httpClient = new HttpClient();
 
-        var config = new HttpSourceConfiguration
+        var config = new HttpSourceOptions<Item>
         {
             BaseUri = new Uri($"{fixture.BaseUrl}/secure"),
             Auth = new BearerTokenAuthProvider("my-token"),
@@ -139,7 +139,7 @@ public class HttpSourceNodeIntegrationTests(WireMockFixture fixture)
 
         using var httpClient = new HttpClient();
 
-        var config = new HttpSourceConfiguration
+        var config = new HttpSourceOptions<Item>
         {
             BaseUri = new Uri($"{fixture.BaseUrl}/nested"),
             ItemsJsonPath = "results",

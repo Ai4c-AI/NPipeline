@@ -1,12 +1,18 @@
 ---
 title: "Excel Connector"
-description: "Read and write Excel files (XLS/XLSX) with header detection, sheet selection, and type conversion."
+description: "Read XLS and XLSX sheets and stream XLSX workbooks with typed, formatted cells."
 order: 5
 ---
 
 # Excel Connector
 
-The `NPipeline.Connectors.Excel` package reads and writes Excel workbooks. It reads both legacy XLS (binary) and modern XLSX (Open XML) formats, and writes XLSX. Supports sheet selection, header detection, attribute-based column mapping, and configurable type analysis.
+The `NPipeline.Connectors.Excel` package reads a sheet of an XLSX, XLSM or legacy XLS workbook with
+[ExcelDataReader](https://github.com/ExcelDataReader/ExcelDataReader), and writes XLSX workbooks with a streaming
+writer. Columns bind to members by header, cells convert strictly, and written numbers, booleans and dates are typed
+cells that Excel shows as numbers, checkboxes and dates.
+
+Globs, atomic writes, row errors and metrics work the same in every file connector; see
+[File Connectors: Shared Behaviour](file-connectors.md).
 
 ## Installation
 
@@ -14,170 +20,131 @@ The `NPipeline.Connectors.Excel` package reads and writes Excel workbooks. It re
 dotnet add package NPipeline.Connectors.Excel
 ```
 
-**Dependencies:** [ExcelDataReader](https://www.nuget.org/packages/ExcelDataReader) 3.x, [DocumentFormat.OpenXml](https://www.nuget.org/packages/DocumentFormat.OpenXml) 3.x, `NPipeline.Connectors`, `NPipeline.StorageProviders`
+**Dependencies:** [ExcelDataReader](https://www.nuget.org/packages/ExcelDataReader) 3.x, `NPipeline.Connectors`,
+`NPipeline.StorageProviders`
 
-## Storage Abstraction
-
-The Excel connector uses NPipeline's storage abstraction layer. See the [CSV Connector - Storage Abstraction](csv.md#storage-abstraction) section for full details on `StorageUri`, `IStorageResolver`, and when you need an explicit resolver.
+## Reading
 
 ```csharp
-// Local file (no resolver needed)
-var source = new ExcelSourceNode<Order>(StorageUri.FromFilePath("orders.xlsx"));
+public sealed record Order(int Id, string Customer, decimal Total, DateOnly Placed);
 
-// Cloud storage (explicit resolver)
-var source = new ExcelSourceNode<Order>(
-    StorageUri.Parse("s3://bucket/orders.xlsx"),
-    resolver: myResolver);
+var source = ExcelConnector.Source<Order>(StorageUri.FromFilePath("orders.xlsx"), o => o with { SheetName = "Orders" });
+builder.AddSource(source, "orders");
 ```
 
-## Column Mapping
+The header row binds to `Order`'s members case-insensitively, ignoring spaces around header text. Header cells may be
+numbers or dates (a `2024` column). Workbooks are zip archives, so a stream that cannot seek (S3, SFTP) is first copied
+to a temporary file.
 
-Use `[Column]` and `[IgnoreColumn]` from `NPipeline.Connectors.Attributes` to control property-to-column mapping:
+### Cell conversion
+
+| Cell | Converts to |
+| --- | --- |
+| Number | Numeric members when no information is lost (`3` to `int`, but `1.7` is an error); `DateTime` and the other date types as an Excel date |
+| Text | Any member type, parsed culture-invariantly (`"42"` to `int`, `"2026-01-02"` to `DateOnly`) |
+| Boolean | `bool` |
+| Date | `DateTime` (UTC), `DateTimeOffset`, `DateOnly` (at midnight), `TimeOnly` |
+| Empty | `null` for nullable members; an error for other value types |
+
+A cell that does not convert is a row error. Its `RowError` names the column, and the raw excerpt names the sheet and
+row and lists the row's cells (`Orders row 17: 16 | Ada | twelve`).
+
+### Manual mapping
 
 ```csharp
-using NPipeline.Connectors.Attributes;
+var source = ExcelConnector.Source(uri, row => new Order(
+    row.Get<int>("Order No"),
+    row.Get<string>("Customer"),
+    row.TryGet<decimal>("Total", out var total) ? total : 0m,
+    row.Get<DateOnly>(3)));
+```
 
-public class Product
+| `ExcelRow` member | Description |
+| --- | --- |
+| `Get<T>(string name)`, `Get<T>(int index)` | Reads and converts a cell; throws `FieldMappingException` naming the column |
+| `TryGet<T>(string name, out T value)`, `TryGet<T>(int index, out T value)` | The lenient form |
+| `this[string name]`, `this[int index]` | The cell's raw value: `double`, `string`, `bool`, `DateTime` or `null` |
+| `HasColumn(string name)` | Whether the header has the column |
+| `Headers`, `SheetName`, `RowNumber`, `RecordNumber`, `FieldCount` | The header, the sheet, the row as Excel numbers it, its position among data rows, and its cell count |
+
+### Read options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `SheetName` | `null` | The sheet to read, matched case-insensitively |
+| `SheetIndex` | `0` | The sheet to read by position when `SheetName` is `null` |
+| `HasHeader` | `null` | `null`: a header is expected, except for a single-value type read without a mapper |
+| `SkipRows` | `0` | Rows above the header to skip, such as a title |
+| `SkipEmptyRows` | `true` | Skip rows whose cells are all empty |
+| `Password` | `null` | The password of an encrypted workbook |
+| `Naming` | `AsIs` | How member names become column names |
+| `MissingColumns` | `ThrowForRequired` | What a member without a column means; see [column binding](file-connectors.md#column-binding) |
+
+Plus the [shared source options](file-connectors.md#options-every-file-source-and-sink-has). A directory reads its
+`.xlsx`, `.xlsm` and `.xls` files. Stream compression does not apply, since workbooks are already compressed.
+
+## Writing
+
+```csharp
+var sink = ExcelConnector.Sink<Order>(StorageUri.FromFilePath("orders.xlsx"), o => o with
 {
-    [Column("product_id")]
-    public int Id { get; set; }
-
-    [Column("product_name")]
-    public string Name { get; set; } = string.Empty;
-
-    public decimal Price { get; set; }
-
-    [IgnoreColumn]
-    public string DisplayLabel => $"{Name} (${Price:F2})";
-}
+    SheetName = "Orders",
+    FreezeHeader = true,
+    AutoFilter = true,
+});
 ```
 
-When no `[Column]` attribute is present, properties are matched by name (case-insensitive).
+The sink writes a bold header of member names, then one row per item. The workbook is streamed: rows go to storage as
+they are written, so memory usage remains constant regardless of the number of rows, and object stores need no buffer.
 
-### Lambda-Based Mapping
+| Type | Cell |
+| --- | --- |
+| Integers, `double`, `float` | Number |
+| `decimal` | Number, or text when a workbook's double cannot hold it exactly |
+| `long`, `ulong` beyond ±2^53 | Text, so no digit is lost |
+| `bool` | Boolean |
+| `DateTime`, `DateTimeOffset` | Date and time (`yyyy-mm-dd hh:mm:ss`), in UTC |
+| `DateOnly` | Date (`yyyy-mm-dd`) |
+| `TimeOnly` | Time (`h:mm:ss`) |
+| `string`, `char` | Text; leading and trailing spaces and line breaks are kept |
+| `TimeSpan`, `Guid`, enums, `byte[]` | Text, as the other connectors write them |
+| `null` | An empty cell |
+
+Excel stores dates to the millisecond, so finer precision is lost. Characters XML cannot hold (control characters)
+are written with Excel's `_xHHHH_` escapes and read back unchanged.
+
+A sheet holds at most 1,048,576 rows and 16,384 columns, and a cell at most 32,767 characters: the write fails past
+those limits, naming the cell. A `null` item fails the write by default; set `NullItems = NullItemHandling.Skip` to
+drop it.
+
+### Manual writing
 
 ```csharp
-var source = new ExcelSourceNode<Product>(
-    StorageUri.FromFilePath("products.xlsx"),
-    row => new Product
+var sink = ExcelConnector.Sink<Order>(
+    StorageUri.FromFilePath("summary.xlsx"),
+    ["Customer", "Total"],
+    (row, order) =>
     {
-        Id = row.Get<int>("product_id") ?? 0,
-        Name = row.Get<string>("product_name") ?? string.Empty,
-        Price = row.Get<decimal>("price") ?? 0m
+        row.Write(order.Customer);
+        row.Write(order.Total);
     });
 ```
 
-## Source Node - `ExcelSourceNode<T>`
+### Write options
 
-Reads an Excel file and emits each row as an item of type `T`.
+| Option | Default | Description |
+| --- | --- | --- |
+| `SheetName` | `Sheet1` | 1 to 31 characters, without `[ ] : * ? / \` |
+| `HasHeader` | `null` | `null`: records get a header and single-value types do not |
+| `BoldHeader` | `true` | Make the header row bold |
+| `FreezeHeader` | `false` | Keep the header visible while scrolling |
+| `AutoFilter` | `false` | Add filter buttons to the header |
+| `Naming` | `AsIs` | How member names become column names, such as `ColumnNamingPolicy.Custom(name => ...)` |
 
-> ⚠️ **Note:** Excel files are fully materialized in memory during read (ExcelDataReader requirement). For datasets larger than a few hundred MB, consider converting to CSV or Parquet first.
+Plus the [shared sink options](file-connectors.md#options-every-file-source-and-sink-has): `Provider`, `Resolver`,
+`BufferSize`, `AtomicWrite`, `NullItems` and `DeletePartialOnFailure`.
 
-### Constructors
-
-```csharp
-// Attribute-based mapping with optional resolver
-public ExcelSourceNode(
-    StorageUri uri,
-    IStorageResolver? resolver = null,
-    ExcelConfiguration? configuration = null)
-
-// Lambda-based mapping with optional resolver
-public ExcelSourceNode(
-    StorageUri uri,
-    Func<ExcelRow, T> rowMapper,
-    IStorageResolver? resolver = null,
-    ExcelConfiguration? configuration = null)
-
-// Attribute-based mapping with explicit provider
-public ExcelSourceNode(
-    IStorageProvider provider,
-    StorageUri uri,
-    ExcelConfiguration? configuration = null)
-
-// Lambda-based mapping with explicit provider
-public ExcelSourceNode(
-    IStorageProvider provider,
-    StorageUri uri,
-    Func<ExcelRow, T> rowMapper,
-    ExcelConfiguration? configuration = null)
-```
-
-### Example: Reading a Specific Sheet
-
-```csharp
-var config = new ExcelConfiguration { SheetName = "Q1 Orders" };
-
-var source = new ExcelSourceNode<Order>(
-    StorageUri.FromFilePath("report.xlsx"),
-    configuration: config);
-```
-
-## Sink Node - `ExcelSinkNode<T>`
-
-Writes items to an XLSX file using attribute-based mapping.
-
-### Constructors
-
-```csharp
-// Attribute-based mapping with optional resolver
-public ExcelSinkNode(
-    StorageUri uri,
-    IStorageResolver? resolver = null,
-    ExcelConfiguration? configuration = null)
-
-// Attribute-based mapping with explicit provider
-public ExcelSinkNode(
-    IStorageProvider provider,
-    StorageUri uri,
-    ExcelConfiguration? configuration = null)
-```
-
-### Example
-
-```csharp
-var sink = new ExcelSinkNode<OrderSummary>(
-    StorageUri.FromFilePath("summary.xlsx"),
-    configuration: new ExcelConfiguration { SheetName = "Summary" });
-```
-
-## Configuration
-
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `BufferSize` | `int` | `4096` | Stream buffer size in bytes |
-| `SheetName` | `string?` | `null` | Sheet to read/write. `null` reads the first sheet; writes to "Sheet1". |
-| `FirstRowIsHeader` | `bool` | `true` | Treat the first row as column headers |
-| `HasHeaderRow` | `bool` | `true` | Alias for `FirstRowIsHeader` |
-| `Encoding` | `Encoding?` | `null` | Override text encoding for legacy XLS files |
-| `AutodetectSeparators` | `bool` | `true` | Auto-detect separators in CSV-like data |
-| `AnalyzeAllColumns` | `bool` | `false` | Analyze the entire workbook for type detection (slower, more accurate) |
-| `AnalyzeInitialRowCount` | `int` | `30` | Rows to analyze for type detection when `AnalyzeAllColumns` is `false` |
-
-### Type Detection
-
-ExcelDataReader infers .NET types from cell values. By default, it analyzes the first 30 rows (`AnalyzeInitialRowCount`). If your data has mixed types further down:
-
-```csharp
-// Accurate but slower: analyze all rows
-var config = new ExcelConfiguration { AnalyzeAllColumns = true };
-
-// Compromise: analyze more rows
-var config = new ExcelConfiguration { AnalyzeInitialRowCount = 500 };
-```
-
-### Legacy XLS Encoding
-
-If a legacy `.xls` file uses non-UTF-8 text:
-
-```csharp
-var config = new ExcelConfiguration
-{
-    Encoding = Encoding.GetEncoding("windows-1252")
-};
-```
-
-## Example: Full Pipeline (Excel → Parquet)
+## Example: Excel to Parquet
 
 ```csharp
 public sealed class ExcelToParquetPipeline : IPipelineDefinition
@@ -185,76 +152,25 @@ public sealed class ExcelToParquetPipeline : IPipelineDefinition
     public void Define(PipelineBuilder builder, PipelineContext context)
     {
         var source = builder.AddSource(
-            new ExcelSourceNode<Order>(
-                StorageUri.FromFilePath("orders.xlsx"),
-                configuration: new ExcelConfiguration { SheetName = "Orders" }),
+            ExcelConnector.Source<Order>(StorageUri.FromFilePath("orders.xlsx"), o => o with { SheetName = "Orders", SkipRows = 2 }),
             "excel-source");
 
-        var sink = builder.AddSink(
-            new ParquetSinkNode<Order>(StorageUri.FromFilePath("orders.parquet")),
-            "parquet-sink");
+        var sink = builder.AddSink(new ParquetSinkNode<Order>(StorageUri.FromFilePath("orders.parquet")), "parquet-sink");
 
         builder.Connect(source, sink);
     }
 }
 ```
 
-## Next Steps
-
-- [CSV Connector](csv.md) - streaming alternative for tabular data
-- [Parquet Connector](parquet.md) - efficient columnar format for large datasets
-- [Storage Providers](../storage-providers/index.md) - read Excel from cloud storage
-
-## Storage Abstraction
-
-All file connectors use `StorageUri` + `IStorageResolver`:
-
-```csharp
-// Local file
-var source = new ExcelSourceNode<Order>(StorageUri.FromFilePath("orders.xlsx"));
-
-// Cloud storage
-var source = new ExcelSourceNode<Order>(
-    StorageUri.Parse("az://container/data/orders.xlsx"),
-    resolver: myStorageResolver);
-```
-
-## Format Support
-
-| Format | Extension | Library | Notes |
-|--------|-----------|---------|-------|
-| XLSX (Open XML) | `.xlsx` | ExcelDataReader | Full support - recommended |
-| XLS (BIFF) | `.xls` | ExcelDataReader | Legacy - may need encoding config |
-
-The connector auto-detects the format from the file content.
-
-## Multi-Sheet Scenarios
-
-```csharp
-// Read a specific sheet by name
-var source = new ExcelSourceNode<Order>(
-    StorageUri.FromFilePath("workbook.xlsx"),
-    configuration: new ExcelConfiguration { SheetName = "Q4 Orders" });
-
-// Write to a named sheet
-var sink = new ExcelSinkNode<Summary>(
-    StorageUri.FromFilePath("report.xlsx"),
-    configuration: new ExcelConfiguration { SheetName = "Summary" });
-```
-
-When `SheetName` is `null`, the source reads the first sheet and the sink writes to "Sheet1".
-
 ## Limitations
 
-- **Read-only streaming**: Excel files are fully loaded into memory (ExcelDataReader reads the entire stream)
-- **No formula evaluation**: Formulas are not evaluated - only cached values are read
-- **No cell formatting**: Styles, colors, and formatting are not preserved through the sink
-- **Type detection**: Based on cell value sampling - mixed-type columns may produce unexpected results
+- One sheet per source and per sink.
+- Formulas are not evaluated; the source reads the values Excel cached when it saved the file.
+- The sink writes values, not formulas, and no per-column widths or formats beyond the date formats above.
 
-## Best Practices
+## Next Steps
 
-1. **Use XLSX** format - XLS is legacy and has row limits (65,536)
-2. **Set `AnalyzeInitialRowCount`** appropriately for mixed-type columns
-3. **Specify `SheetName`** explicitly in multi-sheet workbooks
-4. **Configure `Encoding`** for legacy XLS files with non-UTF-8 text
-5. **Prefer CSV or Parquet** for large datasets - Excel has a 1,048,576 row limit
+- [File Connectors: Shared Behaviour](file-connectors.md): globs, atomic writes, row errors, metrics
+- [CSV Connector](csv.md): streaming alternative for tabular data
+- [Parquet Connector](parquet.md): columnar format for large datasets
+- [Storage Providers](../storage-providers/index.md): read workbooks from cloud storage

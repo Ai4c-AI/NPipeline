@@ -39,7 +39,7 @@ public class HttpSinkNodeIntegrationTests(WireMockFixture fixture)
             .RespondWith(Response.Create().WithStatusCode(201));
 
         using var httpClient = new HttpClient();
-        var config = new HttpSinkConfiguration { Uri = new Uri($"{fixture.BaseUrl}/orders") };
+        var config = new HttpSinkOptions<Order> { Uri = new Uri($"{fixture.BaseUrl}/orders") };
         var node = new HttpSinkNode<Order>(config, httpClient);
 
         await using var pipe = PipeOf(new Order(1, "Widget", 9.99m));
@@ -65,7 +65,7 @@ public class HttpSinkNodeIntegrationTests(WireMockFixture fixture)
 
         using var httpClient = new HttpClient();
 
-        var config = new HttpSinkConfiguration
+        var config = new HttpSinkOptions<Order>
         {
             Uri = new Uri($"{fixture.BaseUrl}/orders"),
             BatchSize = 2,
@@ -94,9 +94,9 @@ public class HttpSinkNodeIntegrationTests(WireMockFixture fixture)
 
         using var httpClient = new HttpClient();
 
-        var config = new HttpSinkConfiguration
+        var config = new HttpSinkOptions<Order>
         {
-            UriFactory = item => new Uri($"{fixture.BaseUrl}/orders/{((Order)item).Id}"),
+            UriFactory = item => new Uri($"{fixture.BaseUrl}/orders/{item.Id}"),
             Method = SinkHttpMethod.Put,
         };
 

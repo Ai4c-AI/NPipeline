@@ -227,7 +227,7 @@ public sealed class CsvToParquetPipeline : IPipelineDefinition
     public void Define(PipelineBuilder builder, PipelineContext context)
     {
         var source = builder.AddSource(
-            new CsvSourceNode<Order>(StorageUri.FromFilePath("orders.csv")),
+            CsvConnector.Source<Order>(StorageUri.FromFilePath("orders.csv")),
             "csv-source");
 
         var config = new ParquetConfiguration

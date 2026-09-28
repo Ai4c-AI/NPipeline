@@ -1,12 +1,18 @@
 ---
 title: "CSV Connector"
-description: "Read and write CSV files with attribute-based or lambda-based mapping."
+description: "Read and write CSV and TSV files with strict, culture-invariant mapping."
 order: 2
 ---
 
 # CSV Connector
 
-The `NPipeline.Connectors.Csv` package reads and writes CSV/TSV files using [CsvHelper](https://joshclose.github.io/CsvHelper/). It supports attribute-based mapping, explicit row mappers, custom delimiters, header validation, and per-row error handling.
+The `NPipeline.Connectors.Csv` package reads and writes CSV and TSV files. It parses with
+[CsvHelper](https://joshclose.github.io/CsvHelper/) and maps rows with NPipeline's shared mapping engine: columns bind
+to members by name once per file, and values convert strictly and culture-invariantly, so what the sink writes the
+source reads back unchanged.
+
+Globs, compression, atomic writes, row errors and metrics work the same in every file connector; see
+[File Connectors: Shared Behaviour](file-connectors.md).
 
 ## Installation
 
@@ -14,271 +20,179 @@ The `NPipeline.Connectors.Csv` package reads and writes CSV/TSV files using [Csv
 dotnet add package NPipeline.Connectors.Csv
 ```
 
-**Dependencies:** [CsvHelper](https://www.nuget.org/packages/CsvHelper) 33.x, `NPipeline.Connectors`, `NPipeline.StorageProviders`
+**Dependencies:** [CsvHelper](https://www.nuget.org/packages/CsvHelper) 33.x, `NPipeline.Connectors`,
+`NPipeline.StorageProviders`
 
-## Storage Abstraction
-
-The CSV connector uses NPipeline's storage abstraction layer, so the same code works with local files and cloud storage.
-
-### StorageUri
-
-`StorageUri` represents a normalized storage location:
+## Reading
 
 ```csharp
-// Local files
-var local = StorageUri.FromFilePath("data/input.csv");
+public sealed record Order(int Id, string Customer, decimal Total, DateTimeOffset PlacedAt);
 
-// Cloud storage
-var s3 = StorageUri.Parse("s3://my-bucket/path/to/file.csv");
+var source = CsvConnector.Source<Order>(StorageUri.FromFilePath("orders.csv"));
+builder.AddSource(source, "orders");
 ```
 
-### Storage Resolver
+The header binds to `Order`'s members case-insensitively, so `Id`, `id` and `ID` all map to `Id`. Columns the type does
+not have are ignored. A value that does not convert fails the read with a `RecordMappingException` naming the row and
+column, unless a `RowErrorHandler` skips or dead-letters it.
 
-An `IStorageResolver` finds the right storage provider for a given URI. **You don't need one for local files** - the connector creates a default resolver with file system support automatically.
+To read several files, give a directory or a glob: `StorageUri.Parse("s3://bucket/2026/*.csv")`. Files ending in `.gz`,
+`.br` or `.zz` are decompressed.
 
-Provide an explicit resolver when working with cloud storage:
+### Mapping
+
+| Type shape | How it maps |
+| --- | --- |
+| Class with setters or `init` accessors | Members set by column name |
+| Positional record or primary constructor | Constructor parameters matched to columns by name |
+| `required` members | Must have a column, or the file fails to bind |
+| `[Column("order_id")]` | Sets the column name |
+| `[IgnoreColumn]` | Leaves the member out |
+| `string`, `int`, `DateTime` and other single values | One value per line, no header |
+
+Members must be single values: numbers, `string`, `bool`, `char`, `decimal`, `DateTime`, `DateTimeOffset`, `DateOnly`,
+`TimeOnly`, `TimeSpan`, `Guid`, enums, `byte[]` (base64) and their nullable forms. A member of another type, such as
+`List<string>`, fails when the node is created; mark it `[IgnoreColumn]`.
+
+Conversion rules:
+
+- Numbers use `Culture` (invariant by default) and never accept thousands separators, so `1,5` is an error, not `15`.
+- Dates are ISO 8601 or `Culture`'s format; a value without an offset is UTC.
+- Enums accept names (case-insensitive) or the numbers of defined values.
+- An empty field is `null` for a nullable member and an error for any other value type. A row with fewer fields than
+  the header reads the missing fields as empty.
+
+### Manual mapping
+
+For full control, pass a mapper. `CsvRow.Get<T>` is strict and names the column when it fails; `TryGet<T>` is lenient.
 
 ```csharp
-var resolver = StorageProviderFactory.CreateResolver(
-    new StorageResolverOptions
+var source = CsvConnector.Source(
+    StorageUri.FromFilePath("orders.csv"),
+    row => new Order(
+        row.Get<int>("id"),
+        row.Get<string>("customer"),
+        row.TryGet<decimal>("total", out var total) ? total : 0m,
+        row.Get<DateTimeOffset>(3)));
+```
+
+| `CsvRow` member | Description |
+| --- | --- |
+| `Get<T>(string name)`, `Get<T>(int index)` | Read and convert a field; throws `FieldMappingException` naming the column |
+| `TryGet<T>(string name, out T value)`, `TryGet<T>(int index, out T value)` | Read and convert, returning `false` instead of throwing |
+| `this[string name]`, `this[int index]` | The raw text of a field, or `null` |
+| `HasColumn(string name)` | Whether the header has the column |
+| `Headers`, `FieldCount`, `RawRecord`, `RecordNumber` | The header, this row's field count, its raw text and its position |
+
+The `CsvRow` is reused for every row, so read what you need inside the mapper.
+
+### Read options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `Delimiter` | `,` | The field delimiter; `"\t"` for TSV |
+| `DetectDelimiter` | `false` | Detect the delimiter from the start of each file instead |
+| `Quote` | `"` | The quote character |
+| `HasHeader` | `null` | `null`: a header is expected, except for a single-value type read without a mapper. Without a header, columns map to members in declaration order |
+| `Culture` | invariant | The culture for numbers and non-ISO dates |
+| `Trim` | `None` | CsvHelper's `TrimOptions` for whitespace around fields |
+| `Encoding` | `null` | `null` reads UTF-8, or the encoding a byte order mark names |
+| `Naming` | `AsIs` | How member names become column names, such as `ColumnNamingPolicy.SnakeCaseLower` |
+| `MissingColumns` | `ThrowForRequired` | What a member without a column means; see [column binding](file-connectors.md#column-binding) |
+| `ConfigureCsvHelper` | `null` | Adjusts CsvHelper's configuration after these options are applied |
+
+Plus the [shared source options](file-connectors.md#options-every-file-source-and-sink-has): `Provider`, `Resolver`,
+`Compression`, `BufferSize`, `Recursive`, `RowErrorHandler` and `RawExcerptLength`.
+
+A quote in the wrong place (text after a closing quote, for example) is a row error for the row it is in, so a handler
+can skip it without failing the file.
+
+## Writing
+
+```csharp
+var sink = CsvConnector.Sink<Order>(StorageUri.FromFilePath("orders.csv"));
+builder.AddSink(sink, "orders-out");
+```
+
+The sink writes a header of member names as they are (`PlacedAt`, not `placedat`), then one row per item. Values are
+written so the source reads them back unchanged, whatever the machine's culture:
+
+| Type | Written as |
+| --- | --- |
+| Numbers | Invariant, shortest round-trip form for `double` and `float` |
+| `DateTime`, `DateTimeOffset`, `DateOnly`, `TimeOnly` | ISO 8601 round-trip (`2026-01-02T03:04:05.0000000+10:00`) |
+| `TimeSpan` | `c` format (`1.02:03:04`) |
+| Enums | Names |
+| `bool` | `true` or `false` |
+| `byte[]` | Base64 |
+| `null` | An empty field |
+
+Fields containing the delimiter, a quote, a line break or leading or trailing spaces are quoted. A target ending in `.gz`,
+`.br` or `.zz` is compressed. On the file system, the file is written under a temporary name and moved into place when
+complete.
+
+A `null` item fails the write by default; set `NullItems = NullItemHandling.Skip` to drop them.
+
+### Manual writing
+
+```csharp
+var sink = CsvConnector.Sink<Order>(
+    StorageUri.FromFilePath("orders.csv"),
+    ["id", "customer", "total"],
+    (row, order) =>
     {
-        IncludeFileSystem = true,
-        AdditionalProviders = new[] { new S3StorageProvider() }
+        row.Write(order.Id);
+        row.WriteText(order.Customer.Trim());
+        row.Write(order.Total);
     });
-
-var source = new CsvSourceNode<User>(
-    StorageUri.Parse("s3://my-bucket/users.csv"),
-    resolver: resolver);
 ```
 
-You can also pass an `IStorageProvider` directly to bypass resolution:
+`Write<T>` formats a value as the table above describes; `WriteText` writes text as it is.
+
+### Write options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `Delimiter` | `,` | The field delimiter |
+| `Quote` | `"` | The quote character |
+| `HasHeader` | `null` | `null`: records get a header and single-value types do not |
+| `Culture` | invariant | The culture for numbers; dates are always ISO 8601 |
+| `Encoding` | `null` | `null` writes UTF-8 without a byte order mark |
+| `NewLine` | `\n` | The line terminator |
+| `Naming` | `AsIs` | How member names become column names |
+| `ConfigureCsvHelper` | `null` | Adjusts CsvHelper's configuration after these options are applied |
+
+Plus the [shared sink options](file-connectors.md#options-every-file-source-and-sink-has): `Provider`, `Resolver`,
+`Compression`, `BufferSize`, `AtomicWrite`, `NullItems` and `DeletePartialOnFailure`.
+
+## Examples
+
+### TSV with a European number format
 
 ```csharp
-var provider = new FileSystemStorageProvider();
-var source = new CsvSourceNode<User>(provider, StorageUri.FromFilePath("users.csv"));
+var source = CsvConnector.Source<Reading>(
+    StorageUri.FromFilePath("readings.tsv"),
+    o => o with { Delimiter = "\t", Culture = CultureInfo.GetCultureInfo("de-DE") });
 ```
 
-## Column Mapping
-
-### Attribute-Based Mapping
-
-Use `[Column]` and `[IgnoreColumn]` from `NPipeline.Connectors.Attributes` to control how properties map to CSV columns:
+### Skip bad rows and send them to the dead-letter sink
 
 ```csharp
-using NPipeline.Connectors.Attributes;
-
-public class Customer
-{
-    [Column("customer_id")]
-    public int Id { get; set; }
-
-    [Column("first_name")]
-    public string FirstName { get; set; } = string.Empty;
-
-    [Column("last_name")]
-    public string LastName { get; set; } = string.Empty;
-
-    [IgnoreColumn]
-    public string FullName => $"{FirstName} {LastName}";
-}
+var source = CsvConnector.Source<Order>(uri, o => o with { RowErrorHandler = _ => RowErrorAction.DeadLetter });
+builder.AddSource(source, "orders");
+builder.AddDeadLetterSink(new MyDeadLetterSink()); // receives ConnectorRecordFailure items
 ```
 
-When no `[Column]` attribute is present, the mapper falls back to convention matching: the sink writes the property name in lowercase, and the source matches headers case-insensitively, so `FirstName`, `firstname` and `FIRSTNAME` headers all map to a `FirstName` property. If a header appears more than once, the first occurrence is used.
-
-### Lambda-Based Mapping
-
-For explicit control, provide a `Func<CsvRow, T>` mapper:
+### CSV to CSV
 
 ```csharp
-var source = new CsvSourceNode<User>(
-    StorageUri.FromFilePath("users.csv"),
-    row => new User(
-        row.Get<int>("Id") ?? 0,
-        row.Get<string>("Name") ?? string.Empty,
-        row.Get<string>("Email") ?? string.Empty));
-```
-
-`CsvRow` provides these methods:
-
-| Method | Description |
-|--------|-------------|
-| `Get<T>(string name, T defaultValue)` | Read a field by header name, return converted value or default |
-| `GetByIndex<T>(int index, T defaultValue)` | Read a field by column index (for headerless files) |
-| `TryGet<T>(string name, out T value, T defaultValue)` | Try to read and convert; returns `false` if missing or unconvertible |
-| `HasColumn(string name)` | Check whether a column exists in the row |
-
-## Source Node - `CsvSourceNode<T>`
-
-Reads a CSV file and emits each row as an item of type `T`.
-
-### Constructors
-
-```csharp
-// Attribute-based mapping with optional resolver (default: file system)
-public CsvSourceNode(
-    StorageUri uri,
-    IStorageResolver? resolver = null,
-    CsvConfiguration? configuration = null,
-    Encoding? encoding = null)
-
-// Attribute-based mapping with explicit provider
-public CsvSourceNode(
-    IStorageProvider provider,
-    StorageUri uri,
-    CsvConfiguration? configuration = null,
-    Encoding? encoding = null)
-
-// Lambda-based mapping with optional resolver
-public CsvSourceNode(
-    StorageUri uri,
-    Func<CsvRow, T> rowMapper,
-    IStorageResolver? resolver = null,
-    CsvConfiguration? configuration = null,
-    Encoding? encoding = null)
-
-// Lambda-based mapping with explicit provider
-public CsvSourceNode(
-    IStorageProvider provider,
-    StorageUri uri,
-    Func<CsvRow, T> rowMapper,
-    CsvConfiguration? configuration = null,
-    Encoding? encoding = null)
-```
-
-### Example: Reading a CSV File
-
-```csharp
-public sealed record User(int Id, string Name, string Email);
-
-public sealed class CsvReaderPipeline : IPipelineDefinition
-{
-    public void Define(PipelineBuilder builder, PipelineContext context)
-    {
-        var source = builder.AddSource(
-            new CsvSourceNode<User>(
-                StorageUri.FromFilePath("users.csv"),
-                row => new User(
-                    row.Get<int>("Id") ?? 0,
-                    row.Get<string>("Name") ?? string.Empty,
-                    row.Get<string>("Email") ?? string.Empty)),
-            "csv-source");
-
-        var sink = builder.AddSink<ConsoleSinkNode, User>("console-sink");
-        builder.Connect(source, sink);
-    }
-}
-```
-
-## Sink Node - `CsvSinkNode<T>`
-
-Writes items from the pipeline to a CSV file. Uses attribute-based mapping by default (via `CsvWriterMapperBuilder`).
-
-### Constructors
-
-```csharp
-// Attribute-based mapping with optional resolver (default: file system)
-public CsvSinkNode(
-    StorageUri uri,
-    IStorageResolver? resolver = null,
-    CsvConfiguration? configuration = null,
-    Encoding? encoding = null)
-
-// Attribute-based mapping with explicit provider
-public CsvSinkNode(
-    IStorageProvider provider,
-    StorageUri uri,
-    CsvConfiguration? configuration = null,
-    Encoding? encoding = null)
-```
-
-### Example: Writing to a CSV File
-
-```csharp
-public sealed class CsvWriterPipeline : IPipelineDefinition
-{
-    public void Define(PipelineBuilder builder, PipelineContext context)
-    {
-        var source = builder.AddSource<InMemorySourceNode<ProcessedUser>, ProcessedUser>("source");
-        var sink = builder.AddSink(
-            new CsvSinkNode<ProcessedUser>(StorageUri.FromFilePath("output.csv")),
-            "csv-sink");
-        builder.Connect(source, sink);
-    }
-}
-```
-
-## Configuration
-
-Both source and sink accept an optional `CsvConfiguration`:
-
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `BufferSize` | `int` | `4096` | I/O buffer size in bytes. Increase for large files. |
-| `HasHeaderRecord` | `bool` | `true` | First row contains column names |
-| `HeaderValidated` | `HeaderValidated?` | `null` | Custom header validation callback |
-| `HelperConfiguration` | `CsvHelper.Configuration.CsvConfiguration` | (auto) | Pass-through to CsvHelper for full control (delimiter, culture, quoting, etc.) |
-| `RowErrorHandler` | `Func<Exception, CsvRow, bool>?` | `null` | Per-row error handler. Return `true` to skip the row, `false` to throw. |
-
-### Custom Delimiter (TSV)
-
-```csharp
-var config = new CsvConfiguration(CultureInfo.InvariantCulture) { HasHeaderRecord = false };
-config.HelperConfiguration.Delimiter = "\t";
-
-var source = new CsvSourceNode<User>(
-    StorageUri.FromFilePath("users.tsv"),
-    row => new User(
-        row.GetByIndex<int>(0) ?? 0,
-        row.GetByIndex<string>(1) ?? string.Empty,
-        row.GetByIndex<string>(2) ?? string.Empty),
-    configuration: config);
-```
-
-### Per-Row Error Handling
-
-```csharp
-var config = new CsvConfiguration
-{
-    RowErrorHandler = (ex, row) =>
-    {
-        Console.WriteLine($"Skipping bad row: {ex.Message}");
-        return true; // skip this row and continue
-    }
-};
-```
-
-## Example: Transform Pipeline (CSV → CSV)
-
-```csharp
-public sealed record UserSummary(string Name, string Domain);
-
-public sealed class Summarizer : TransformNode<User, UserSummary>
-{
-    public override ValueTask<UserSummary> TransformAsync(
-        User item, PipelineContext context, CancellationToken cancellationToken)
-    {
-        var domain = item.Email.Split('@')[1];
-        return ValueTask.FromResult(new UserSummary(item.Name, domain));
-    }
-}
-
 public sealed class CsvTransformPipeline : IPipelineDefinition
 {
     public void Define(PipelineBuilder builder, PipelineContext context)
     {
-        var source = builder.AddSource(
-            new CsvSourceNode<User>(
-                StorageUri.FromFilePath("users.csv"),
-                row => new User(
-                    row.Get<int>("Id") ?? 0,
-                    row.Get<string>("Name") ?? string.Empty,
-                    row.Get<string>("Email") ?? string.Empty)),
-            "csv-source");
-
-        var transform = builder.AddTransform<Summarizer, User, UserSummary>("summarizer");
-        var sink = builder.AddSink(
-            new CsvSinkNode<UserSummary>(StorageUri.FromFilePath("summaries.csv")),
-            "csv-sink");
+        var source = builder.AddSource(CsvConnector.Source<User>(StorageUri.FromFilePath("users.csv")), "users");
+        var transform = builder.AddTransform<Summarizer, User, UserSummary>("summarize");
+        var sink = builder.AddSink(CsvConnector.Sink<UserSummary>(StorageUri.FromFilePath("summaries.csv.gz")), "summaries");
 
         builder.Connect(source, transform);
         builder.Connect(transform, sink);
@@ -286,55 +200,17 @@ public sealed class CsvTransformPipeline : IPipelineDefinition
 }
 ```
 
+### Reading from S3
+
+```csharp
+var source = CsvConnector.Source<Order>(
+    StorageUri.Parse("s3://my-bucket/orders/2026/**/*.csv"),
+    o => o with { Provider = new AwsS3StorageProvider(s3Options) });
+```
+
 ## Next Steps
 
-- [JSON Connector](json.md) - alternative format for structured data
-- [Parquet Connector](parquet.md) - columnar format for large datasets
-- [Storage Providers](../storage-providers/index.md) - read CSV from S3, Azure Blob, or GCS
-
-## Storage Abstraction
-
-All file connectors use `StorageUri` + `IStorageResolver` for pluggable storage:
-
-```csharp
-// Local file
-var source = new CsvSourceNode<User>(StorageUri.FromFilePath("data/users.csv"), ...);
-
-// Cloud storage via IStorageResolver
-var source = new CsvSourceNode<User>(
-    StorageUri.Parse("s3://my-bucket/data/users.csv"),
-    resolver: myStorageResolver, ...);
-
-// Azure Blob
-var source = new CsvSourceNode<User>(
-    StorageUri.Parse("az://container/data/users.csv"),
-    resolver: myStorageResolver, ...);
-```
-
-See [Storage Providers](../storage-providers/index.md) for configuring S3, Azure Blob, GCS, SFTP, and ADLS Gen2.
-
-## Attribute Mapping
-
-The CSV connector supports `[Column]` and `[IgnoreColumn]` attributes for automatic mapping (when not using a custom row mapper):
-
-```csharp
-public class User
-{
-    [Column("user_id")]
-    public int Id { get; set; }
-
-    [Column("full_name")]
-    public string Name { get; set; } = "";
-
-    [IgnoreColumn]
-    public string DisplayName => Name.ToUpper();
-}
-```
-
-## Best Practices
-
-1. **Use custom row mappers** for complex mappings or when header names don't match properties
-2. **Increase `BufferSize`** (e.g., 65536) for large files - reduces I/O calls
-3. **Use `RowErrorHandler`** to skip bad rows instead of failing the pipeline
-4. **Use `StorageUri`** with `IStorageResolver` for cloud storage portability
-5. **Set culture via `HelperConfiguration`** when parsing locale-sensitive numbers/dates
+- [File Connectors: Shared Behaviour](file-connectors.md): globs, compression, atomic writes, row errors, metrics
+- [JSON Connector](json.md): structured and nested data
+- [Parquet Connector](parquet.md): columnar format for large datasets
+- [Storage Providers](../storage-providers/index.md): read CSV from S3, Azure Blob, GCS or SFTP

@@ -21,7 +21,7 @@ public class HttpSourceNodeTests
 
         using var httpClient = CreateClient(handler);
 
-        var config = new HttpSourceConfiguration { BaseUri = new Uri("https://api.example.com/items") };
+        var config = new HttpSourceOptions<Item> { BaseUri = new Uri("https://api.example.com/items") };
         var node = new HttpSourceNode<Item>(config, httpClient);
 
         var pipe = node.OpenStream(new PipelineContext(), CancellationToken.None);
@@ -45,7 +45,7 @@ public class HttpSourceNodeTests
 
         using var httpClient = CreateClient(handler);
 
-        var config = new HttpSourceConfiguration
+        var config = new HttpSourceOptions<Item>
         {
             BaseUri = new Uri("https://api.example.com/items"),
             ItemsJsonPath = "data",
@@ -73,7 +73,7 @@ public class HttpSourceNodeTests
 
         using var httpClient = CreateClient(handler);
 
-        var config = new HttpSourceConfiguration
+        var config = new HttpSourceOptions<Item>
         {
             BaseUri = new Uri("https://api.example.com/items"),
             ItemsJsonPath = "$.data",
@@ -102,10 +102,10 @@ public class HttpSourceNodeTests
 
         using var httpClient = CreateClient(handler);
 
-        var config = new HttpSourceConfiguration
+        var config = new HttpSourceOptions<Item>
         {
             BaseUri = new Uri("https://api.example.com/items"),
-            Pagination = new OffsetPaginationStrategy(new OffsetPaginationOptions { PageSize = 2 }),
+            Pagination = HttpPagination.PageNumber(new PageNumberPaginationOptions { PageSize = 2 }),
         };
 
         var node = new HttpSourceNode<Item>(config, httpClient);
@@ -141,10 +141,10 @@ public class HttpSourceNodeTests
 
         using var httpClient = CreateClient(handler);
 
-        var config = new HttpSourceConfiguration
+        var config = new HttpSourceOptions<Item>
         {
             BaseUri = new Uri("https://api.example.com/items"),
-            Pagination = new LinkHeaderPaginationStrategy(),
+            Pagination = HttpPagination.LinkHeader,
         };
 
         var node = new HttpSourceNode<Item>(config, httpClient);
@@ -188,10 +188,10 @@ public class HttpSourceNodeTests
 
         using var httpClient = CreateClient(handler);
 
-        var config = new HttpSourceConfiguration
+        var config = new HttpSourceOptions<Item>
         {
             BaseUri = new Uri("https://api.example.com/items"),
-            Pagination = new LinkHeaderPaginationStrategy(),
+            Pagination = HttpPagination.LinkHeader,
             MaxPages = 1,
         };
 
@@ -217,7 +217,7 @@ public class HttpSourceNodeTests
 
         using var httpClient = CreateClient(handler);
 
-        var config = new HttpSourceConfiguration
+        var config = new HttpSourceOptions<Item>
         {
             BaseUri = new Uri("https://api.example.com/items"),
             Resilience = Resilience.None,
@@ -245,7 +245,7 @@ public class HttpSourceNodeTests
 
         using var httpClient = CreateClient(handler);
 
-        var config = new HttpSourceConfiguration { BaseUri = new Uri("https://api.example.com/items") };
+        var config = new HttpSourceOptions<Item> { BaseUri = new Uri("https://api.example.com/items") };
         var node = new HttpSourceNode<Item>(config, httpClient);
 
         cts.Cancel();
@@ -265,7 +265,7 @@ public class HttpSourceNodeTests
     {
         using var httpClient = new HttpClient(new DelayedResponseHandler(TimeSpan.FromMilliseconds(250)));
 
-        var config = new HttpSourceConfiguration
+        var config = new HttpSourceOptions<Item>
         {
             BaseUri = new Uri("https://api.example.com/items"),
             Resilience = Resilience.None with { AttemptTimeout = TimeSpan.FromMilliseconds(50) },
@@ -293,7 +293,7 @@ public class HttpSourceNodeTests
 
         using var httpClient = CreateClient(handler);
 
-        var config = new HttpSourceConfiguration
+        var config = new HttpSourceOptions<Item>
         {
             BaseUri = new Uri("https://api.example.com/items"),
             RequestCustomizer = (req, _) =>

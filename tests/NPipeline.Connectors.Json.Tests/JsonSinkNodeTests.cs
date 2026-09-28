@@ -1,377 +1,127 @@
+using System.IO.Compression;
+using System.Text;
 using System.Text.Json;
-using NPipeline.DataFlow.DataStreams;
-using NPipeline.Pipeline;
-using NPipeline.StorageProviders;
-using NPipeline.StorageProviders.Abstractions;
-using NPipeline.StorageProviders.Models;
+using AwesomeAssertions;
+using NPipeline.Connectors.Files;
 
 namespace NPipeline.Connectors.Json.Tests;
 
-/// <summary>
-///     Comprehensive unit tests for JsonSinkNode.
-///     Tests writing JSON arrays, NDJSON files, indented output, naming policies, null values,
-///     cancellation, storage providers, data types, large datasets, buffer sizes, and file overwrite.
-/// </summary>
-public class JsonSinkNodeTests : IDisposable
+public sealed class JsonSinkNodeTests : JsonTestBase
 {
-    private readonly PipelineContext _context;
-    private readonly IStorageProvider _provider;
-    private readonly string _tempDirectory;
-
-    public JsonSinkNodeTests()
+    [Fact]
+    public async Task Writes_an_array_in_camel_case_with_enums_as_names_and_nested_values()
     {
-        _tempDirectory = Path.Combine(Path.GetTempPath(), $"NPipeline.Json.Tests_{Guid.NewGuid():N}");
-        Directory.CreateDirectory(_tempDirectory);
-
-        _provider = StorageProviderFactory.GetProviderOrThrow(
-            StorageProviderFactory.CreateResolver(),
-            StorageUri.FromFilePath(_tempDirectory));
-
-        _context = new PipelineContext();
-    }
-
-    public void Dispose()
-    {
-        try
+        var customer = new Customer
         {
-            if (Directory.Exists(_tempDirectory))
-                Directory.Delete(_tempDirectory, true);
-        }
-        catch
-        {
-            // Ignore cleanup errors
-        }
+            Id = 1, FirstName = "Ada", Balance = 12.5m, Tier = Tier.Pro, Joined = new DateOnly(2026, 1, 2), Tags = ["a"],
+            Address = new Address("London", "UK"),
+        };
 
-        GC.SuppressFinalize(this);
+        await WriteAsync(Sink<Customer>(), customer);
+
+        Text().Should().Be("""[{"id":1,"firstName":"Ada","balance":12.5,"tier":"Pro","joined":"2026-01-02","tags":["a"],"address":{"city":"London","country":"UK"}}]""");
+        (await ReadAsync(Source<Customer>())).Single().Should().BeEquivalentTo(customer);
     }
 
     [Fact]
-    public async Task ExecuteAsync_WithJsonArray_WritesCorrectData()
+    public async Task Writes_ndjson_for_ndjson_and_jsonl_files()
     {
-        // Arrange
-        var jsonFile = Path.Combine(_tempDirectory, "test.json");
-        var configuration = new JsonConfiguration { Format = JsonFormat.Array };
-        var uri = StorageUri.FromFilePath(jsonFile);
-        var node = new JsonSinkNode<Customer>(_provider, uri, configuration);
+        await WriteAsync(Sink<Point>(path: "points.ndjson"), new Point(1, 2), new Point(3, 4));
+        await WriteAsync(Sink<Point>(path: "points.jsonl"), new Point(5, 6));
 
-        var items = new List<Customer>
-        {
-            new() { Id = 1, Name = "Alice" },
-            new() { Id = 2, Name = "Bob" },
-        };
-
-        var dataStream = new InMemoryDataStream<Customer>(items);
-
-        // Act
-        await node.ConsumeAsync(dataStream, _context, CancellationToken.None);
-
-        // Assert
-        var content = await File.ReadAllTextAsync(jsonFile);
-        var jsonDoc = JsonDocument.Parse(content);
-        var array = jsonDoc.RootElement.EnumerateArray().ToArray();
-        Assert.Equal(2, array.Length);
-        Assert.Equal(1, array[0].GetProperty("id").GetInt32());
-        Assert.Equal("Alice", array[0].GetProperty("name").GetString());
-        Assert.Equal(2, array[1].GetProperty("id").GetInt32());
-        Assert.Equal("Bob", array[1].GetProperty("name").GetString());
+        Text("points.ndjson").Should().Be("{\"x\":1,\"y\":2}\n{\"x\":3,\"y\":4}\n");
+        Text("points.jsonl").Should().Be("{\"x\":5,\"y\":6}\n");
     }
 
     [Fact]
-    public async Task ExecuteAsync_WithNdjson_WritesCorrectData()
+    public async Task The_format_can_be_forced()
     {
-        // Arrange
-        var jsonFile = Path.Combine(_tempDirectory, "test.ndjson");
-        var configuration = new JsonConfiguration { Format = JsonFormat.NewlineDelimited };
-        var uri = StorageUri.FromFilePath(jsonFile);
-        var node = new JsonSinkNode<Customer>(_provider, uri, configuration);
+        await WriteAsync(Sink<Point>(o => o with { Format = JsonFormat.NewlineDelimited }), new Point(1, 2));
+        await WriteAsync(Sink<Point>(o => o with { Format = JsonFormat.Array }, "points.ndjson"), new Point(1, 2));
 
-        var items = new List<Customer>
-        {
-            new() { Id = 1, Name = "Alice" },
-            new() { Id = 2, Name = "Bob" },
-        };
-
-        var dataStream = new InMemoryDataStream<Customer>(items);
-
-        // Act
-        await node.ConsumeAsync(dataStream, _context, CancellationToken.None);
-
-        // Assert
-        var lines = await File.ReadAllLinesAsync(jsonFile);
-        Assert.Equal(2, lines.Length);
-        var jsonDoc1 = JsonDocument.Parse(lines[0]);
-        var jsonDoc2 = JsonDocument.Parse(lines[1]);
-        Assert.Equal(1, jsonDoc1.RootElement.GetProperty("id").GetInt32());
-        Assert.Equal("Alice", jsonDoc1.RootElement.GetProperty("name").GetString());
-        Assert.Equal(2, jsonDoc2.RootElement.GetProperty("id").GetInt32());
-        Assert.Equal("Bob", jsonDoc2.RootElement.GetProperty("name").GetString());
+        Text().Should().Be("{\"x\":1,\"y\":2}\n");
+        Text("points.ndjson").Should().Be("""[{"x":1,"y":2}]""");
     }
 
     [Fact]
-    public async Task ExecuteAsync_WithIndentedOutput_WritesFormattedJson()
+    public async Task Indents_arrays_but_never_ndjson()
     {
-        // Arrange
-        var jsonFile = Path.Combine(_tempDirectory, "test.json");
+        await WriteAsync(Sink<Point>(o => o with { WriteIndented = true }), new Point(1, 2));
+        await WriteAsync(Sink<Point>(o => o with { WriteIndented = true }, "points.ndjson"), new Point(1, 2));
 
-        var configuration = new JsonConfiguration
-        {
-            Format = JsonFormat.Array,
-            WriteIndented = true,
-        };
-
-        var uri = StorageUri.FromFilePath(jsonFile);
-        var node = new JsonSinkNode<Customer>(_provider, uri, configuration);
-
-        var items = new List<Customer>
-        {
-            new() { Id = 1, Name = "Alice" },
-        };
-
-        var dataStream = new InMemoryDataStream<Customer>(items);
-
-        // Act
-        await node.ConsumeAsync(dataStream, _context, CancellationToken.None);
-
-        // Assert
-        var content = await File.ReadAllTextAsync(jsonFile);
-        Assert.Contains("  \"id\": 1", content);
-        Assert.Contains("  \"name\": \"Alice\"", content);
+        Text().ReplaceLineEndings("\n").Should().Be("[\n  {\n    \"x\": 1,\n    \"y\": 2\n  }\n]");
+        Text("points.ndjson").Should().Be("{\"x\":1,\"y\":2}\n");
     }
 
     [Fact]
-    public async Task ExecuteAsync_WithSnakeCaseNamingPolicy_WritesSnakeCaseProperties()
+    public async Task An_empty_input_is_an_empty_array()
     {
-        // Arrange
-        var jsonFile = Path.Combine(_tempDirectory, "test.json");
+        await WriteAsync(Sink<Point>());
 
-        var configuration = new JsonConfiguration
-        {
-            Format = JsonFormat.Array,
-            PropertyNamingPolicy = JsonPropertyNamingPolicy.SnakeCase,
-        };
-
-        var uri = StorageUri.FromFilePath(jsonFile);
-        var node = new JsonSinkNode<Customer>(_provider, uri, configuration);
-
-        var items = new List<Customer>
-        {
-            new() { Id = 1, Name = "Alice" },
-        };
-
-        var dataStream = new InMemoryDataStream<Customer>(items);
-
-        // Act
-        await node.ConsumeAsync(dataStream, _context, CancellationToken.None);
-
-        // Assert
-        var content = await File.ReadAllTextAsync(jsonFile);
-        Assert.Contains("\"id\"", content);
-        Assert.Contains("\"name\"", content);
+        Text().Should().Be("[]");
     }
 
     [Fact]
-    public async Task ExecuteAsync_WithNullValues_WritesNullValues()
+    public async Task Null_items_fail_by_default_and_can_be_written_or_skipped()
     {
-        // Arrange
-        var jsonFile = Path.Combine(_tempDirectory, "test.json");
-        var configuration = new JsonConfiguration { Format = JsonFormat.Array };
-        var uri = StorageUri.FromFilePath(jsonFile);
-        var node = new JsonSinkNode<Customer>(_provider, uri, configuration);
+        var fail = () => WriteAsync(Sink<Point?>(), new Point(1, 1), null);
 
-        var items = new List<Customer>
-        {
-            new() { Id = 1, Name = null },
-        };
+        await fail.Should().ThrowAsync<InvalidOperationException>();
+        await WriteAsync(Sink<Point?>(o => o with { NullItems = NullItemHandling.Write }), new Point(1, 1), null);
+        await WriteAsync(Sink<Point?>(o => o with { NullItems = NullItemHandling.Skip }, "skipped.json"), null, new Point(2, 2));
 
-        var dataStream = new InMemoryDataStream<Customer>(items);
-
-        // Act
-        await node.ConsumeAsync(dataStream, _context, CancellationToken.None);
-
-        // Assert
-        var content = await File.ReadAllTextAsync(jsonFile);
-        Assert.Contains("\"name\":null", content);
+        Text().Should().Be("""[{"x":1,"y":1},null]""");
+        Text("skipped.json").Should().Be("""[{"x":2,"y":2}]""");
     }
 
     [Fact]
-    public async Task ExecuteAsync_WithCancellation_CancelsOperation()
+    public async Task Honours_column_and_ignore_attributes()
     {
-        // Arrange
-        var jsonFile = Path.Combine(_tempDirectory, "test.json");
-        var configuration = new JsonConfiguration { Format = JsonFormat.Array };
-        var uri = StorageUri.FromFilePath(jsonFile);
-        var node = new JsonSinkNode<Customer>(_provider, uri, configuration);
+        await WriteAsync(Sink<Attributed>(), new Attributed { Id = 7, Name = "Ada" });
 
-        var items = new List<Customer>
-        {
-            new() { Id = 1, Name = "Alice" },
-            new() { Id = 2, Name = "Bob" },
-        };
-
-        var dataStream = new InMemoryDataStream<Customer>(items);
-
-        var cts = new CancellationTokenSource();
-        cts.Cancel();
-
-        // Act & Assert
-        await Assert.ThrowsAsync<OperationCanceledException>(() =>
-            node.ConsumeAsync(dataStream, _context, cts.Token));
+        Text().Should().Be("""[{"customer_id":7,"display":"Ada"}]""");
     }
 
     [Fact]
-    public async Task ExecuteAsync_WithStorageProvider_WritesCorrectData()
+    public async Task Uses_caller_serializer_options()
     {
-        // Arrange
-        var jsonFile = Path.Combine(_tempDirectory, "test.json");
-        var configuration = new JsonConfiguration { Format = JsonFormat.Array };
-        var uri = StorageUri.FromFilePath(jsonFile);
-        var node = new JsonSinkNode<Customer>(_provider, uri, configuration);
+        var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.KebabCaseLower };
 
-        var items = new List<Customer>
-        {
-            new() { Id = 1, Name = "Alice" },
-        };
+        await WriteAsync(Sink<Customer>(o => o with { SerializerOptions = options }), new Customer { Id = 1, FirstName = "Ada" });
 
-        var dataStream = new InMemoryDataStream<Customer>(items);
-
-        // Act
-        await node.ConsumeAsync(dataStream, _context, CancellationToken.None);
-
-        // Assert
-        var content = await File.ReadAllTextAsync(jsonFile);
-        Assert.Contains("\"id\":1", content);
-        Assert.Contains("\"name\":\"Alice\"", content);
+        Text().Should().StartWith("""[{"id":1,"first-name":"Ada",""");
     }
 
     [Fact]
-    public async Task ExecuteAsync_WithDifferentTypes_WritesCorrectData()
+    public async Task Writes_with_source_generated_metadata()
     {
-        // Arrange
-        var jsonFile = Path.Combine(_tempDirectory, "test.json");
-        var configuration = new JsonConfiguration { Format = JsonFormat.Array };
-        var uri = StorageUri.FromFilePath(jsonFile);
-        var node = new JsonSinkNode<ComplexCustomer>(_provider, uri, configuration);
+        var sink = JsonConnector.Sink(Uri(), TestJsonContext.Default.Point, o => o with { Provider = Provider });
 
-        var items = new List<ComplexCustomer>
-        {
-            new()
-            {
-                Id = 1,
-                Age = 30,
-                Balance = 100.50m,
-                IsActive = true,
-            },
-        };
+        await WriteAsync(sink, new Point(1, 2));
 
-        var dataStream = new InMemoryDataStream<ComplexCustomer>(items);
-
-        // Act
-        await node.ConsumeAsync(dataStream, _context, CancellationToken.None);
-
-        // Assert
-        var content = await File.ReadAllTextAsync(jsonFile);
-        Assert.Contains("\"id\":1", content);
-        Assert.Contains("\"age\":30", content);
-        Assert.Contains("\"balance\":100.50", content);
-        Assert.Contains("\"isactive\":true", content);
+        Text().Should().Be("""[{"x":1,"y":2}]""");
     }
 
     [Fact]
-    public async Task ExecuteAsync_WithLargeDataset_WritesAllData()
+    public async Task Compresses_by_suffix_and_picks_the_format_underneath()
     {
-        // Arrange
-        var jsonFile = Path.Combine(_tempDirectory, "test.json");
-        var configuration = new JsonConfiguration { Format = JsonFormat.Array };
-        var uri = StorageUri.FromFilePath(jsonFile);
-        var node = new JsonSinkNode<Customer>(_provider, uri, configuration);
+        await WriteAsync(Sink<Point>(path: "points.ndjson.gz"), new Point(1, 2));
 
-        var items = new List<Customer>();
-
-        for (var i = 0; i < 1000; i++)
-        {
-            items.Add(new Customer { Id = i, Name = $"Customer{i}" });
-        }
-
-        var dataStream = new InMemoryDataStream<Customer>(items);
-
-        // Act
-        await node.ConsumeAsync(dataStream, _context, CancellationToken.None);
-
-        // Assert
-        var content = await File.ReadAllTextAsync(jsonFile);
-        var jsonDoc = JsonDocument.Parse(content);
-        var array = jsonDoc.RootElement.EnumerateArray().ToArray();
-        Assert.Equal(1000, array.Length);
+        await using var zip = new GZipStream(new MemoryStream(Provider.Get(Uri("points.ndjson.gz"))), CompressionMode.Decompress);
+        using var reader = new StreamReader(zip, Encoding.UTF8);
+        (await reader.ReadToEndAsync()).Should().Be("{\"x\":1,\"y\":2}\n");
+        (await ReadAsync(Source<Point>(path: "points.ndjson.gz"))).Should().Equal(new Point(1, 2));
     }
 
     [Fact]
-    public async Task ExecuteAsync_WithBufferSize_WritesCorrectData()
+    public async Task Writes_large_outputs_in_chunks_that_read_back_whole()
     {
-        // Arrange
-        var jsonFile = Path.Combine(_tempDirectory, "test.json");
+        var points = Enumerable.Range(0, 50_000).Select(i => new Point(i, -i)).ToArray();
 
-        var configuration = new JsonConfiguration
-        {
-            Format = JsonFormat.Array,
-            BufferSize = 8192,
-        };
+        await WriteAsync(Sink<Point>(), points);
+        await WriteAsync(Sink<Point>(path: "points.ndjson"), points);
 
-        var uri = StorageUri.FromFilePath(jsonFile);
-        var node = new JsonSinkNode<Customer>(_provider, uri, configuration);
-
-        var items = new List<Customer>
-        {
-            new() { Id = 1, Name = "Alice" },
-        };
-
-        var dataStream = new InMemoryDataStream<Customer>(items);
-
-        // Act
-        await node.ConsumeAsync(dataStream, _context, CancellationToken.None);
-
-        // Assert
-        var content = await File.ReadAllTextAsync(jsonFile);
-        Assert.Contains("\"id\":1", content);
-    }
-
-    [Fact]
-    public async Task ExecuteAsync_WithFileOverwrite_OverwritesExistingFile()
-    {
-        // Arrange
-        var jsonFile = Path.Combine(_tempDirectory, "test.json");
-        await File.WriteAllTextAsync(jsonFile, "[{\"id\":0,\"name\":\"Old\"}]");
-
-        var configuration = new JsonConfiguration { Format = JsonFormat.Array };
-        var uri = StorageUri.FromFilePath(jsonFile);
-        var node = new JsonSinkNode<Customer>(_provider, uri, configuration);
-
-        var items = new List<Customer>
-        {
-            new() { Id = 1, Name = "New" },
-        };
-
-        var dataStream = new InMemoryDataStream<Customer>(items);
-
-        // Act
-        await node.ConsumeAsync(dataStream, _context, CancellationToken.None);
-
-        // Assert
-        var content = await File.ReadAllTextAsync(jsonFile);
-        Assert.DoesNotContain("\"id\":0", content);
-        Assert.Contains("\"id\":1", content);
-    }
-
-    public class Customer
-    {
-        public int Id { get; set; }
-        public string? Name { get; set; }
-    }
-
-    public class ComplexCustomer
-    {
-        public int Id { get; set; }
-        public int Age { get; set; }
-        public decimal Balance { get; set; }
-        public bool IsActive { get; set; }
+        (await ReadAsync(Source<Point>())).Should().Equal(points);
+        (await ReadAsync(Source<Point>(path: "points.ndjson"))).Should().Equal(points);
     }
 }

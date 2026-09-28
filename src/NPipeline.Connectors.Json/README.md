@@ -1,7 +1,8 @@
 # NPipeline JSON Connector
 
-NPipeline JSON Connector provides source and sink nodes for reading and writing JSON files using System.Text.Json. This package enables seamless integration of
-JSON data processing into your NPipeline workflows with configurable parsing options and type-safe operations.
+Source and sink nodes for reading and writing JSON files in NPipeline pipelines, built on System.Text.Json. Records
+are deserialized straight from UTF-8, one at a time, so files of any size stream with constant memory, and a record
+that fails to convert can be skipped without stopping the read.
 
 ## About NPipeline
 
@@ -15,73 +16,54 @@ resilience patterns and error handling.
 dotnet add package NPipeline.Connectors.Json
 ```
 
-## Requirements
-
-- **.NET 8.0, 9.0, or 10.0**
-- **System.Text.Json 9.0.0+** (automatically included as a dependency)
-- **NPipeline.Connectors** (automatically included as a dependency)
+Targets .NET 8.0, 9.0 and 10.0.
 
 ## Features
 
-- **JSON Source Node**: Read JSON files and deserialize to strongly-typed objects
-- **JSON Sink Node**: Serialize objects to JSON format and write to files
-- **System.Text.Json Integration**: Leverages modern System.Text.Json library for reliable JSON processing
-- **Multiple JSON Formats**: Support for both JSON array and newline-delimited JSON (NDJSON) formats
-- **Configurable Options**: Customize naming policies, case sensitivity, and indentation
-- **Type-Safe Operations**: Compile-time safety with generic type parameters
-- **Storage Abstraction**: Works with pluggable storage providers for flexible file access
-- **Streaming Processing**: Memory-efficient streaming for large JSON files
-- **Row-Level Error Handling**: Opt-in handler to decide whether to skip or fail on mapping errors
+- **Every common shape**: root arrays, NDJSON and JSON Lines (records may span lines), single objects, and arrays nested
+  in a wrapper object (`ItemsPath = "data.items"`), detected per file.
+- **Full System.Text.Json support**: nested objects, lists, enums, records, custom converters, your own
+  `JsonSerializerOptions`, and source-generated `JsonTypeInfo<T>` for trimming and Native AOT.
+- **Shared attributes**: `[Column]` and `[IgnoreColumn]` work as in the CSV and Excel connectors.
+- **Row errors**: a record that does not convert names its position and JSON path, and can fail the read, be skipped
+  or go to the pipeline's dead-letter sink. A malformed NDJSON line is skipped the same way.
+- **Streaming writes**: arrays and NDJSON (chosen by file name) are flushed every 64 KB.
+- **Many files and compression**: directories, globs, and `.gz`, `.br` or `.zz` files, through any storage provider.
+- **Metrics and traces**: rows, bytes, files and row errors through `System.Diagnostics.Metrics` (`NPipeline.Connectors`).
 
-## Configuration Options
+## Usage
 
-### JsonConfiguration
+```csharp
+using NPipeline.Connectors.Json;
+using NPipeline.StorageProviders.Models;
 
-The [`JsonConfiguration`](JsonConfiguration.cs:18) class provides configuration options for JSON operations:
+public sealed record Order(int Id, string Customer, decimal Total, List<string> Tags);
 
-| Property                      | Type                              | Default     | Description                                          |
-|-------------------------------|-----------------------------------|-------------|------------------------------------------------------|
-| `BufferSize`                  | `int`                             | `4096`      | Buffer size for stream operations                    |
-| `Format`                      | `JsonFormat`                      | `Array`     | JSON format (Array or NewlineDelimited)              |
-| `WriteIndented`               | `bool`                            | `false`     | Whether to format JSON output with indentation       |
-| `PropertyNameCaseInsensitive` | `bool`                            | `true`      | Whether property name comparison is case-insensitive |
-| `PropertyNamingPolicy`        | `JsonPropertyNamingPolicy`        | `LowerCase` | Naming policy for JSON property names                |
-| `RowErrorHandler`             | `Func<Exception, JsonRow, bool>?` | `null`      | Handler for row mapping errors                       |
+public sealed class OrdersPipeline : IPipelineDefinition
+{
+    public void Define(PipelineBuilder builder, PipelineContext context)
+    {
+        var source = builder.AddSource(JsonConnector.Source<Order>(StorageUri.FromFilePath("orders.json")), "orders");
+        var sink = builder.AddSink(JsonConnector.Sink<Order>(StorageUri.FromFilePath("orders.ndjson.gz")), "copy");
 
-### JsonFormat
+        builder.Connect(source, sink);
+    }
+}
+```
 
-The [`JsonFormat`](JsonFormat.cs:11) enum specifies the format of JSON data:
+Read an array inside an API export, skipping records that do not convert:
 
-- **Array**: JSON data is structured as a JSON array containing JSON objects (default)
-- **NewlineDelimited**: JSON data is structured as newline-delimited JSON (NDJSON)
+```csharp
+var source = JsonConnector.Source<Order>(uri, o => o with
+{
+    ItemsPath = "data.orders",
+    RowErrorHandler = _ => RowErrorAction.Skip,
+});
+```
 
-### JsonPropertyNamingPolicy
-
-The [`JsonPropertyNamingPolicy`](JsonPropertyNamingPolicy.cs:11) enum specifies the naming policy for JSON property names:
-
-- **LowerCase**: Property names are converted to lowercase (default)
-- **CamelCase**: Property names are converted to camelCase
-- **SnakeCase**: Property names are converted to snake_case
-- **PascalCase**: Property names are converted to PascalCase
-- **AsIs**: Property names are used as-is without transformation
-
-## JsonRow
-
-The [`JsonRow`](JsonRow.cs:11) readonly struct provides efficient, read-only access to JSON object properties:
-
-- `TryGet<T>(string name, out T? value, T? defaultValue = default)`: Try to read a property by name
-- `Get<T>(string name, T? defaultValue = default)`: Read a property by name
-- `HasProperty(string name)`: Check if a property exists
-- `GetNested<T>(string path, T? defaultValue = default)`: Read a nested property using dot notation
-
-## JsonMappingException
-
-The [`JsonMappingException`](JsonMappingException.cs:11) is thrown when a JSON mapping error occurs, such as:
-
-- A required property is missing from the JSON object
-- A property value cannot be converted to the target type
-- A nested property path is invalid or does not exist
-- The JSON structure does not match the expected schema
+See the [JSON connector documentation](https://docs.npipeline.net/connectors/json) for every option, and
+[File Connectors: Shared Behaviour](https://docs.npipeline.net/connectors/file-connectors) for globs, compression,
+atomic writes, row errors and metrics.
 
 ## Related Packages
 

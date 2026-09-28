@@ -48,9 +48,8 @@ var storage = new AwsS3StorageProvider(new AwsS3StorageProviderOptions
     DefaultRegion = RegionEndpoint.USEast1
 });
 
-var config = new CsvConfiguration { HasHeaderRecord = true };
-var uri = new StorageUri("s3://my-bucket/data/orders.csv");
-var source = new CsvSourceNode<Order>(config, storage, uri);
+var uri = StorageUri.Parse("s3://my-bucket/data/orders.csv");
+var source = CsvConnector.Source<Order>(uri, o => o with { Provider = storage });
 ```
 
 Switch storage without changing pipeline logic:
@@ -58,11 +57,11 @@ Switch storage without changing pipeline logic:
 ```csharp
 // Local development
 var storage = new FileSystemStorageProvider();
-var uri = new StorageUri("file:///data/orders.csv");
+var uri = StorageUri.Parse("file:///data/orders.csv");
 
 // Production (same connector, different storage)
 var storage = new AwsS3StorageProvider(s3Options);
-var uri = new StorageUri("s3://prod-bucket/data/orders.csv");
+var uri = StorageUri.Parse("s3://prod-bucket/data/orders.csv");
 ```
 
 ## DI Registration

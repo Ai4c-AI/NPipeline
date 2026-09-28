@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using NPipeline.Connectors.Errors;
 using NPipeline.Connectors.Excel;
 using NPipeline.Pipeline;
 using NPipeline.StorageProviders.Models;
@@ -13,7 +14,7 @@ namespace Sample_ExcelConnector;
 /// <remarks>
 ///     This pipeline implements a complete Excel processing workflow:
 ///     1. ExcelSourceNode reads customer data from a source Excel file
-///     2. ValidationTransform validates customer records and filters invalid ones
+///     2. ValidationTransform validates customer records and logs the invalid ones
 ///     3. DataTransform enriches and normalizes customer data
 ///     4. ExcelSinkNode writes the processed data to a target Excel file
 /// </remarks>
@@ -27,8 +28,7 @@ public class ExcelConnectorPipeline : IPipelineDefinition
     ///     ExcelSourceNode -> ValidationTransform -> DataTransform -> ExcelSinkNode
     ///     The pipeline reads customer data from the input Excel file, validates and transforms it,
     ///     then writes the processed records to an output Excel file.
-    ///     Note: The resolver parameter is optional for local files - the ExcelSourceNode and ExcelSinkNode
-    ///     automatically create a default file system resolver if none is provided.
+    ///     Local files need no storage configuration: the nodes resolve the file system provider from the URI.
     /// </remarks>
     public void Define(PipelineBuilder builder, PipelineContext context)
     {
@@ -36,35 +36,31 @@ public class ExcelConnectorPipeline : IPipelineDefinition
         var sourcePath = GetSourcePath();
         var targetPath = GetTargetPath();
 
-        // Create the Excel source node - reads customer data from the input file
-        // Resolver is optional; defaults to file system provider for local files
-        var sourceNode = new ExcelSourceNode<Customer>(
+        // Columns bind to Customer's members by header, case-insensitively; cells convert strictly, so a text value in
+        // a number column is an error rather than a silent zero. Rows that fail are logged and skipped.
+        var sourceNode = ExcelConnector.Source<Customer>(
             StorageUri.FromFilePath(sourcePath),
-            row => new Customer
+            options => options with
             {
-                Id = row.Get("Id", 0),
-                FirstName = row.Get("FirstName", string.Empty) ?? string.Empty,
-                LastName = row.Get("LastName", string.Empty) ?? string.Empty,
-                Email = row.Get("Email", string.Empty) ?? string.Empty,
-                Age = row.Get("Age", 0),
-                RegistrationDate = row.Get("RegistrationDate", default(DateTime)),
-                Country = row.Get("Country", string.Empty) ?? string.Empty,
-                AccountBalance = row.Get("AccountBalance", 0m),
-                IsPremiumMember = row.Get("IsPremiumMember", false),
-                DiscountPercentage = row.Get("DiscountPercentage", 0d),
-                LoyaltyPoints = row.Get("LoyaltyPoints", 0L),
+                RowErrorHandler = error =>
+                {
+                    Console.WriteLine($"Skipping row {error.RecordNumber}: {error.Exception.Message}");
+                    return RowErrorAction.Skip;
+                },
             });
 
         var source = builder.AddSource(sourceNode, "excel-source");
 
-        // Add validation transform to filter invalid records
+        // Add validation transform to log invalid records (the sample data has some on purpose)
         var validation = builder.AddTransform<ValidationTransform, Customer, Customer>("validation-transform");
 
         // Add data transform to enrich and normalize records
         var transform = builder.AddTransform<DataTransform, Customer, Customer>("data-transform");
 
-        // Create the Excel sink node - writes processed customer data to the output file
-        var sinkNode = new ExcelSinkNode<Customer>(StorageUri.FromFilePath(targetPath));
+        // The sink streams the workbook: a bold, frozen header with filter buttons, and dates formatted as dates.
+        var sinkNode = ExcelConnector.Sink<Customer>(
+            StorageUri.FromFilePath(targetPath),
+            options => options with { FreezeHeader = true, AutoFilter = true });
         var sink = builder.AddSink(sinkNode, "excel-sink");
 
         // Connect nodes in sequence: source -> validation -> transform -> sink
@@ -124,27 +120,28 @@ This sample demonstrates Excel data processing with NPipeline:
 
 WHAT IT DOES:
 - Reads customer records from an Excel file (customers.xlsx)
-- Validates each record and filters out invalid ones
+- Validates each record and logs a warning for invalid ones
 - Transforms and enriches the valid records
 - Writes the processed records to a new Excel file (processed_customers.xlsx)
 
 PIPELINE FLOW:
 ExcelSourceNode (read)
-  → ValidationTransform (filter invalid records)
+  → ValidationTransform (log invalid records)
     → DataTransform (enrich/normalize)
       → ExcelSinkNode (write)
 
 KEY FEATURES:
 - Simple file-based Excel processing using StorageUri
-- Data validation with filtering
+- Data validation with warnings
 - Data transformation and enrichment
 - Built-in error handling and logging
 - No complex configuration needed - just specify the file paths
 
 GETTING STARTED:
 The pipeline is straightforward - create node instances with file paths,
-add them to the builder, and connect them. The ExcelSourceNode and
-ExcelSinkNode automatically handle the file system interactions.
+add them to the builder, and connect them. Create the nodes with
+ExcelConnector.Source and ExcelConnector.Sink; options are records
+adjusted with 'with' (sheet name, header row, frozen header, filters).
 
 This is one of the simplest ways to process Excel files in NPipeline!";
 }

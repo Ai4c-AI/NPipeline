@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using AwesomeAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using NPipeline.Connectors.DependencyInjection;
@@ -206,7 +207,7 @@ public class ServiceCollectionExtensionsTests
 
         public Task<bool> ExistsAsync(StorageUri uri, CancellationToken cancellationToken = default) => Task.FromResult(false);
 
-        public async IAsyncEnumerable<StorageItem> ListAsync(StorageUri prefix, bool recursive = false, CancellationToken cancellationToken = default)
+        public async IAsyncEnumerable<StorageItem> ListAsync(StorageUri prefix, bool recursive = false, [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
             await Task.CompletedTask;
             yield break;

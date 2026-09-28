@@ -1,4 +1,6 @@
 using NPipeline.DataFlow;
+using NPipeline.ErrorHandling;
+using NPipeline.Execution;
 using NPipeline.Pipeline;
 
 namespace NPipeline.Nodes;
@@ -93,4 +95,19 @@ public abstract class SinkNode<TIn> : ISinkNode<TIn>, INodeTypeMetadata
 
     /// <inheritdoc />
     public abstract Task ConsumeAsync(IDataStream<TIn> input, PipelineContext context, CancellationToken cancellationToken);
+
+    /// <summary>
+    ///     Opens a channel for dead-lettering what this sink could not write, attributed to this node. Call it at the start
+    ///     of <see cref="ConsumeAsync" />, where the runtime makes the node's id available.
+    /// </summary>
+    /// <param name="context">The context passed to <see cref="ConsumeAsync" />.</param>
+    /// <returns>
+    ///     A channel attributed to this node's id. Outside a pipeline run, or when another node (a tap) drives this sink,
+    ///     the id is the node's type name.
+    /// </returns>
+    protected DeadLetterChannel OpenDeadLetterChannel(PipelineContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return new DeadLetterChannel(context, NodeScope.CurrentNodeId ?? GetType().Name);
+    }
 }

@@ -1,8 +1,4 @@
-using System.Globalization;
-using System.Text;
 using BenchmarkDotNet.Attributes;
-using CsvHelper;
-using NPipeline.Connectors.Mapping;
 using NPipeline.Connectors.Csv;
 using NPipeline.Connectors.Excel;
 using NPipeline.Connectors.Json;
@@ -67,37 +63,9 @@ public class CsvBenchmarks() : FileConnectorBenchmark(".csv")
 {
     protected override int Rows => 100_000;
 
-    /// <summary>
-    ///     A preview of the phase 3 CSV source: CsvHelper's parser for the fields, and the shared mapping engine
-    ///     (<see cref="RecordBinder" /> and <see cref="ScalarParser" />) bound once to the header, for the records.
-    /// </summary>
-    [Benchmark]
-    public async Task<int> ReadWithMappingEngine()
-    {
-        var stream = await Provider.OpenReadAsync(ReadUri);
-        await using var streamScope = stream;
-        using var reader = new StreamReader(stream, Encoding.UTF8, false, 64 * 1024);
-        using var parser = new CsvParser(reader, CultureInfo.InvariantCulture);
+    protected override Task WriteAsync(StorageUri uri) => NodeRunner.WriteAsync(CsvConnector.Sink<WideRecord>(uri, o => o with { Provider = Provider }), Records);
 
-        if (!await parser.ReadAsync())
-            return 0;
-
-        var map = RecordBinder.Bind<WideRecord, ParserFieldReader>(parser.Record!);
-        var fields = new ParserFieldReader(parser);
-        var count = 0;
-
-        while (await parser.ReadAsync())
-        {
-            _ = map(fields);
-            count++;
-        }
-
-        return count;
-    }
-
-    protected override Task WriteAsync(StorageUri uri) => NodeRunner.WriteAsync(new CsvSinkNode<WideRecord>(Provider, uri), Records);
-
-    protected override Task<int> ReadAsync(StorageUri uri) => NodeRunner.ReadAsync(new CsvSourceNode<WideRecord>(Provider, uri));
+    protected override Task<int> ReadAsync(StorageUri uri) => NodeRunner.ReadAsync(CsvConnector.Source<WideRecord>(uri, o => o with { Provider = Provider }));
 }
 
 public class JsonBenchmarks() : FileConnectorBenchmark(".json")
@@ -108,10 +76,10 @@ public class JsonBenchmarks() : FileConnectorBenchmark(".json")
     public JsonFormat Format { get; set; }
 
     protected override Task WriteAsync(StorageUri uri) =>
-        NodeRunner.WriteAsync(new JsonSinkNode<WideRecord>(Provider, uri, new JsonConfiguration { Format = Format }), Records);
+        NodeRunner.WriteAsync(JsonConnector.Sink<WideRecord>(uri, o => o with { Provider = Provider, Format = Format }), Records);
 
     protected override Task<int> ReadAsync(StorageUri uri) =>
-        NodeRunner.ReadAsync(new JsonSourceNode<WideRecord>(Provider, uri, new JsonConfiguration { Format = Format }));
+        NodeRunner.ReadAsync(JsonConnector.Source<WideRecord>(uri, o => o with { Provider = Provider, Format = Format }));
 }
 
 public class ExcelBenchmarks() : FileConnectorBenchmark(".xlsx")
@@ -119,9 +87,9 @@ public class ExcelBenchmarks() : FileConnectorBenchmark(".xlsx")
     /// <summary>Fewer rows than the other formats: the current OpenXML writer takes seconds per 100,000 rows.</summary>
     protected override int Rows => 25_000;
 
-    protected override Task WriteAsync(StorageUri uri) => NodeRunner.WriteAsync(new ExcelSinkNode<WideRecord>(Provider, uri), Records);
+    protected override Task WriteAsync(StorageUri uri) => NodeRunner.WriteAsync(ExcelConnector.Sink<WideRecord>(uri, o => o with { Provider = Provider }), Records);
 
-    protected override Task<int> ReadAsync(StorageUri uri) => NodeRunner.ReadAsync(new ExcelSourceNode<WideRecord>(Provider, uri));
+    protected override Task<int> ReadAsync(StorageUri uri) => NodeRunner.ReadAsync(ExcelConnector.Source<WideRecord>(uri, o => o with { Provider = Provider }));
 }
 
 public class ParquetBenchmarks() : FileConnectorBenchmark(".parquet")
@@ -148,10 +116,4 @@ public class ParquetBenchmarks() : FileConnectorBenchmark(".parquet")
     protected override Task WriteAsync(StorageUri uri) => NodeRunner.WriteAsync(new ParquetSinkNode<WideRecord>(Provider, uri, Configuration), Records);
 
     protected override Task<int> ReadAsync(StorageUri uri) => NodeRunner.ReadAsync(new ParquetSourceNode<WideRecord>(Provider, uri, Configuration));
-}
-
-/// <summary>Exposes the parser's current record to the mapping engine.</summary>
-internal sealed class ParserFieldReader(CsvParser parser) : IFieldReader
-{
-    public TValue GetValue<TValue>(int ordinal) => ScalarParser.Parse<TValue>(parser[ordinal]);
 }

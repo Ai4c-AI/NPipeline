@@ -8,27 +8,29 @@ namespace NPipeline.Connectors.RoundTrip.Tests.Harnesses;
 
 public sealed class CsvHarness() : FileConnectorHarness(".csv")
 {
-    public Func<CsvConfiguration> Configuration { get; init; } = () => new CsvConfiguration();
+    public Func<CsvReadOptions, CsvReadOptions> ReadOptions { get; init; } = o => o;
 
-    protected override SinkNode<T> CreateSink<T>() => new CsvSinkNode<T>(Provider, Uri, Configuration());
+    public Func<CsvWriteOptions, CsvWriteOptions> WriteOptions { get; init; } = o => o;
 
-    protected override SourceNode<T> CreateSource<T>() => new CsvSourceNode<T>(Provider, Uri, Configuration());
+    protected override SinkNode<T> CreateSink<T>() => CsvConnector.Sink<T>(Uri, o => WriteOptions(o with { Provider = Provider }));
+
+    protected override SourceNode<T> CreateSource<T>() => CsvConnector.Source<T>(Uri, o => ReadOptions(o with { Provider = Provider }));
 }
 
 public sealed class JsonHarness(JsonFormat format) : FileConnectorHarness(format == JsonFormat.Array ? ".json" : ".ndjson")
 {
     public JsonFormat Format { get; } = format;
 
-    protected override SinkNode<T> CreateSink<T>() => new JsonSinkNode<T>(Provider, Uri, new JsonConfiguration { Format = Format });
+    protected override SinkNode<T> CreateSink<T>() => JsonConnector.Sink<T>(Uri, o => o with { Provider = Provider, Format = Format });
 
-    protected override SourceNode<T> CreateSource<T>() => new JsonSourceNode<T>(Provider, Uri, new JsonConfiguration { Format = Format });
+    protected override SourceNode<T> CreateSource<T>() => JsonConnector.Source<T>(Uri, o => o with { Provider = Provider, Format = Format });
 }
 
 public sealed class ExcelHarness() : FileConnectorHarness(".xlsx")
 {
-    protected override SinkNode<T> CreateSink<T>() => new ExcelSinkNode<T>(Provider, Uri, new ExcelConfiguration());
+    protected override SinkNode<T> CreateSink<T>() => ExcelConnector.Sink<T>(Uri, o => o with { Provider = Provider });
 
-    protected override SourceNode<T> CreateSource<T>() => new ExcelSourceNode<T>(Provider, Uri, new ExcelConfiguration());
+    protected override SourceNode<T> CreateSource<T>() => ExcelConnector.Source<T>(Uri, o => o with { Provider = Provider });
 }
 
 public sealed class ParquetHarness() : FileConnectorHarness(".parquet")

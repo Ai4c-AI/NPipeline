@@ -22,9 +22,9 @@ public class OrderPipeline : IPipelineDefinition
 {
     public void Define(PipelineBuilder builder, PipelineContext context)
     {
-        var source = builder.AddSource(new CsvSourceNode<RawOrder>(uri), "source");
+        var source = builder.AddSource(CsvConnector.Source<RawOrder>(uri), "source");
         var enrich = builder.AddComposite<RawOrder, EnrichedOrder, EnrichmentPipeline>("enrich");
-        var sink = builder.AddSink(new CsvSinkNode<EnrichedOrder>(outUri), "sink");
+        var sink = builder.AddSink(CsvConnector.Sink<EnrichedOrder>(outUri), "sink");
 
         builder.Connect(source, enrich);
         builder.Connect(enrich, sink);

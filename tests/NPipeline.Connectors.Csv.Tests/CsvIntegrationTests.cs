@@ -1,118 +1,97 @@
 using AwesomeAssertions;
-using NPipeline.Connectors.Csv;
+using NPipeline.Connectors.Errors;
 using NPipeline.DataFlow;
-using NPipeline.DataFlow.DataStreams;
+using NPipeline.ErrorHandling;
 using NPipeline.Execution;
+using NPipeline.Extensions.Testing;
 using NPipeline.Nodes;
 using NPipeline.Pipeline;
-using NPipeline.StorageProviders;
 using NPipeline.StorageProviders.Models;
 
 namespace NPipeline.Connectors.Csv.Tests;
 
-public sealed class CsvIntegrationTests
+public sealed class CsvIntegrationTests : CsvTestBase
 {
     [Fact]
-    public async Task CsvTap_WritesHeaderAndEveryRow_WithOneConsumeCall()
+    public async Task A_tap_writes_the_header_and_every_row_on_the_file_system()
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"np_{Guid.NewGuid():N}.csv");
+        var directory = Directory.CreateTempSubdirectory("np-csv-");
 
         try
         {
-            var uri = StorageUri.FromFilePath(tempFile);
-            var resolver = StorageProviderFactory.CreateResolver();
-            var csvSink = new CsvSinkNode<Row>(uri, resolver);
+            var path = Path.Combine(directory.FullName, "rows.csv");
+            var sink = CsvConnector.Sink<Row>(StorageUri.FromFilePath(path));
 
-            await using var context = new PipelineContext();
+            await PipelineRunner.Create().RunAsync(new TapPipeline(sink), new PipelineContext());
 
-            await PipelineRunner.Create().RunAsync(new CsvTapPipeline(csvSink), context, CancellationToken.None);
+            (await File.ReadAllLinesAsync(path)).Should().Equal("Id,Name", "1,alpha", "2,beta", "3,gamma");
 
-            var lines = await File.ReadAllLinesAsync(tempFile);
-
-            lines.Should().HaveCount(4);
-            lines[0].Should().Be("id,name");
-            lines.Skip(1).Should().Equal("1,alpha", "2,beta", "3,gamma");
+            // Written through a temporary file that was moved into place.
+            directory.GetFiles().Select(f => f.Name).Should().Equal("rows.csv");
         }
         finally
         {
-            if (File.Exists(tempFile))
-                File.Delete(tempFile);
+            directory.Delete(true);
         }
     }
 
     [Fact]
-    public async Task Csv_RoundTrip_WithFileSystemProvider_WritesAndReads()
+    public async Task Dead_lettered_rows_reach_the_pipeline_dead_letter_sink()
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"np_{Guid.NewGuid():N}.csv");
+        Put("Id,FirstName,Amount\n1,Ada,1\n2,Grace,oops\n3,Joan,3\n");
+        var deadLetters = new CapturingDeadLetterSink();
+        var context = new PipelineContext();
+        var source = Source<Person>(o => o with { RowErrorHandler = _ => RowErrorAction.DeadLetter });
 
-        try
-        {
-            var uri = StorageUri.FromFilePath(tempFile);
+        await PipelineRunner.Create().RunAsync(new DeadLetterPipeline(source, deadLetters), context);
 
-            // No headers for simple scalar round-trip
-            var cfg = new CsvConfiguration
-            {
-                BufferSize = 1024,
-            };
-
-            cfg.HelperConfiguration.HasHeaderRecord = false;
-
-            // Write: CsvSinkNode<int>
-            var resolver = StorageProviderFactory.CreateResolver();
-            var sink = new CsvSinkNode<int>(uri, resolver, cfg);
-            IDataStream<int> input = new DataStream<int>(Enumerable.Range(1, 5).ToAsyncEnumerable());
-            await sink.ConsumeAsync(input, PipelineContext.CreateDefault(), CancellationToken.None);
-
-            // Read: CsvSourceNode<int>
-            var src = new CsvSourceNode<int>(uri, MapIntRow, resolver, cfg);
-            var outPipe = src.OpenStream(PipelineContext.CreateDefault(), CancellationToken.None);
-
-            var result = new List<int>();
-
-            await foreach (var i in outPipe.WithCancellation(CancellationToken.None))
-            {
-                result.Add(i);
-            }
-
-            // Assert
-            result.Should().Equal(1, 2, 3, 4, 5);
-        }
-        finally
-        {
-            if (File.Exists(tempFile))
-                File.Delete(tempFile);
-        }
+        var envelope = deadLetters.Captured.Should().ContainSingle().Subject;
+        envelope.Item.Should().Be(new ConnectorRecordFailure("mem://test/data.csv", 2, "Amount", "2,Grace,oops\n"));
+        envelope.Attribution.DecisionNodeId.Should().Be("people");
+        context.GetSink<InMemorySinkNode<Person>>().Items.Select(p => p.Id).Should().BeEquivalentTo([1, 3]);
     }
-
-    private static int MapIntRow(CsvRow row) => row.GetByIndex(0, 0);
 
     private sealed record Row(int Id, string Name);
 
-    private sealed class CsvTapPipeline(CsvSinkNode<Row> csvSink) : IPipelineDefinition
+    private sealed class TapPipeline(CsvSinkNode<Row> csvSink) : IPipelineDefinition
     {
         public void Define(PipelineBuilder builder, PipelineContext context)
         {
-            var source = builder.AddSource(() => new[]
-            {
-                new Row(1, "alpha"),
-                new Row(2, "beta"),
-                new Row(3, "gamma"),
-            }, "source");
-
+            var source = builder.AddSource(() => new[] { new Row(1, "alpha"), new Row(2, "beta"), new Row(3, "gamma") }, "source");
             var tap = builder.AddTap<Row>(csvSink, "tap");
             var sink = builder.AddSink<CountingSink, Row>("sink");
             _ = builder.AddPreconfiguredNodeInstance(sink.Id, new CountingSink()).Connect(source, tap).Connect(tap, sink);
         }
     }
 
+    private sealed class DeadLetterPipeline(CsvSourceNode<Person> source, IDeadLetterSink deadLetters) : IPipelineDefinition
+    {
+        public void Define(PipelineBuilder builder, PipelineContext context)
+        {
+            var handle = builder.AddSource(source, "people");
+            builder.Connect(handle, builder.AddInMemorySink<Person>(context));
+            builder.AddDeadLetterSink(deadLetters);
+        }
+    }
+
     private sealed class CountingSink : SinkNode<Row>
     {
-        public int Count { get; private set; }
-
         public override async Task ConsumeAsync(IDataStream<Row> input, PipelineContext context, CancellationToken cancellationToken)
         {
             await foreach (var _ in input.WithCancellation(cancellationToken))
-                Count++;
+            {
+            }
+        }
+    }
+
+    private sealed class CapturingDeadLetterSink : IDeadLetterSink
+    {
+        public List<DeadLetterEnvelope> Captured { get; } = [];
+
+        public Task HandleAsync(DeadLetterEnvelope envelope, PipelineContext context, CancellationToken cancellationToken)
+        {
+            Captured.Add(envelope);
+            return Task.CompletedTask;
         }
     }
 }

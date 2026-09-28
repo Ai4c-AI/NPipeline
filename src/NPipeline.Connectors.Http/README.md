@@ -1,20 +1,23 @@
 # NPipeline.Connectors.Http
 
-HTTP/REST connector for NPipeline. Provides source and sink nodes for consuming paginated REST APIs and writing to HTTP endpoints with support for multiple
-pagination strategies, authentication schemes, rate limiting, retry, and OpenTelemetry observability.
+REST API source and sink nodes for NPipeline. The source follows pagination and reads each page's body once; the sink
+posts items singly or in batches. Both retry through NResilience, take a rate-limiter lease for every attempt, and keep
+query values (which can hold API keys) out of metrics, traces, logs and errors.
 
 ## Features
 
-- **Source & Sink Nodes**: Read from paginated REST APIs and write to HTTP endpoints via POST, PUT, or PATCH
-- **Multiple Pagination Strategies**: Offset/page, cursor-based, RFC 5988 Link headers, or custom
-- **Authentication Providers**: Bearer token, API key, Basic auth, or custom schemes
-- **Batching & Idempotency**: Buffer items before flush and prevent duplicate requests with idempotency keys
-- **Resilience**: NResilience retries with exponential backoff, `Retry-After` support, per-host circuit breakers, and
-  no retries of POST or PATCH without an idempotency key
-- **Token-Bucket Rate Limiting**: Builtin rate limiter for request throttling
-- **Request Customization**: Hooks for dynamic headers, correlation IDs, and query parameters
-- **OpenTelemetry Integration**: Activity source for distributed tracing and monitoring
-- **IHttpClientFactory Integration**: Named clients for connection pooling and resource reuse
+- **Pagination**: page numbers, offsets, cursors (string or number), RFC 8288 `Link` headers, next-page URLs in the
+  body, or a delegate. Each run pages independently, so one options instance can be shared.
+- **Strict reading**: a wrong `ItemsJsonPath`, a non-array response or a non-JSON body fails with what the response
+  holds, instead of returning no items. Items that do not convert are row errors: fail, skip or dead-letter.
+- **Bounded memory**: `MaxResponseBytes` is enforced while the body is read, before anything buffers it.
+- **Writing**: POST, PUT or PATCH; batches, wrapper keys, per-item endpoints, idempotency keys, and failed requests
+  failed, skipped or sent to the dead-letter sink with their items.
+- **Resilience**: retries with exponential backoff, `Retry-After`, per-host circuit breakers, and no retries of POST or
+  PATCH without an idempotency key.
+- **Rate limiting**: any `System.Threading.RateLimiting.RateLimiter`, applied to retries too.
+- **Telemetry**: OpenTelemetry client spans with redacted `url.full`; metrics labelled by endpoint without the query.
+- **Source generation**: pass a `JsonTypeInfo<T>` for trimming and Native AOT.
 
 ## Installation
 
@@ -22,107 +25,44 @@ pagination strategies, authentication schemes, rate limiting, retry, and OpenTel
 dotnet add package NPipeline.Connectors.Http
 ```
 
-## Quick Start
-
-### Reading from a Paginated REST API
+## Quick start
 
 ```csharp
+using NPipeline.Connectors.Http;
 using NPipeline.Connectors.Http.Auth;
-using NPipeline.Connectors.Http.Configuration;
-using NPipeline.Connectors.Http.Nodes;
 using NPipeline.Connectors.Http.Pagination;
 
-public record GithubRelease(string TagName, string Name, DateTime PublishedAt);
+public sealed record GithubRelease(string TagName, string Name, DateTime PublishedAt);
+public sealed record SlackMessage(string Text);
 
-var sourceConfig = new HttpSourceConfiguration
+using var httpClient = new HttpClient();
+
+var releases = HttpConnector.Source<GithubRelease>(new Uri("https://api.github.com/repos/dotnet/runtime/releases"), httpClient, o => o with
 {
-    BaseUri = new Uri("https://api.github.com/repos/dotnet/runtime/releases"),
-    Headers = { ["User-Agent"] = "MyApp/1.0", ["Accept"] = "application/vnd.github+json" },
+    Headers = new Dictionary<string, string> { ["User-Agent"] = "MyApp/1.0" },
     Auth = new BearerTokenAuthProvider(Environment.GetEnvironmentVariable("GITHUB_TOKEN")!),
-    Pagination = new LinkHeaderPaginationStrategy(),
+    Pagination = HttpPagination.LinkHeader,
     MaxPages = 5,
-};
+});
 
-using var httpClient = new HttpClient();
-var source = new HttpSourceNode<GithubRelease>(sourceConfig, httpClient);
-
-var pipeline = new PipelineBuilder()
-    .AddSource(source, "github_source")
-    .AddSink<ConsoleSinkNode<GithubRelease>, GithubRelease>("console_sink")
-    .Build();
-
-await runner.RunAsync<MyPipelineDefinition>();
+var slack = HttpConnector.Sink<SlackMessage>(new Uri("https://hooks.slack.com/services/YOUR/WEBHOOK/URL"), httpClient);
 ```
 
-### Writing to a REST Endpoint
+A wrapped response with a cursor:
 
 ```csharp
-using NPipeline.Connectors.Http.Configuration;
-using NPipeline.Connectors.Http.Nodes;
-
-public record SlackMessage(string Text, string Channel);
-
-var sinkConfig = new HttpSinkConfiguration
+var orders = HttpConnector.Source<Order>(new Uri("https://api.example.com/orders"), httpClient, o => o with
 {
-    Uri = new Uri("https://hooks.slack.com/services/YOUR/WEBHOOK/URL"),
-    Method = SinkHttpMethod.Post,
-    BatchSize = 10,
-};
-
-using var httpClient = new HttpClient();
-var sink = new HttpSinkNode<SlackMessage>(sinkConfig, httpClient);
-
-var pipeline = new PipelineBuilder()
-    .AddSource(sourceOfMessages, "message_source")
-    .AddSink(sink, "slack_sink")
-    .Build();
-
-await runner.RunAsync<MyPipelineDefinition>();
+    ItemsJsonPath = "data",
+    Pagination = HttpPagination.Cursor(new CursorPaginationOptions { CursorJsonPath = "meta.next_cursor" }),
+    RowErrorHandler = _ => RowErrorAction.Skip,
+});
 ```
-
-### Using with Dependency Injection
-
-```csharp
-using Microsoft.Extensions.DependencyInjection;
-using NPipeline.Connectors.Http.DependencyInjection;
-using NPipeline.Extensions.DependencyInjection;
-
-var services = new ServiceCollection()
-    .AddHttpClient()
-    .AddHttpConnector()
-    .AddNPipeline(Assembly.GetExecutingAssembly())
-    .BuildServiceProvider();
-
-var source = services.GetRequiredService<HttpSourceNode<GithubRelease>>();
-var sink = services.GetRequiredService<HttpSinkNode<SlackMessage>>();
-```
-
-## Authentication Providers
-
-- **`BearerTokenAuthProvider`**: OAuth2 bearer tokens or API tokens (static or async factory)
-- **`ApiKeyAuthProvider`**: API key in a named header or query-string parameter
-- **`BasicAuthProvider`**: RFC 7617 Basic auth (username/password)
-- **`NullAuthProvider`**: No authentication
-
-Implement `IHttpAuthProvider` for custom schemes (OAuth2 PKCE, mTLS, AWS Signature V4, etc.).
-
-## Pagination Strategies
-
-- **`NoPaginationStrategy`**: Single request, no pagination
-- **`OffsetPaginationStrategy`**: Manages `page`/`pageSize` query parameters
-- **`CursorPaginationStrategy`**: Cursor-based pagination with JSON path token extraction
-- **`LinkHeaderPaginationStrategy`**: RFC 5988 `Link` header pagination (GitHub-compatible)
-
-Implement `IPaginationStrategy` for custom pagination schemes.
 
 ## Documentation
 
-For detailed configuration reference, examples, and advanced usage, see the [HTTP Connector documentation](../../docs/connectors/http.md).
-
-## Sample Application
-
-See [`samples/Sample_HttpConnector`](../../samples/Sample_HttpConnector) for a complete example that fetches GitHub releases and posts summaries to a Slack
-webhook.
+See the [HTTP connector documentation](https://docs.npipeline.net/connectors/http) for every option, and the
+[`samples/Sample_HttpConnector`](../../samples/Sample_HttpConnector) project for a GitHub-to-Slack pipeline:
 
 ```bash
 GITHUB_TOKEN=ghp_... SLACK_WEBHOOK=https://hooks.slack.com/... \

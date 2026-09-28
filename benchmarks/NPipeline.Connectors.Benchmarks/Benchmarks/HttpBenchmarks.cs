@@ -2,8 +2,7 @@ using System.Net;
 using System.Text.Json;
 using System.Web;
 using BenchmarkDotNet.Attributes;
-using NPipeline.Connectors.Http.Configuration;
-using NPipeline.Connectors.Http.Nodes;
+using NPipeline.Connectors.Http;
 using NPipeline.Connectors.Http.Pagination;
 
 namespace NPipeline.Connectors.Benchmarks.Benchmarks;
@@ -19,6 +18,8 @@ public class HttpBenchmarks : IDisposable
     private static readonly Uri BaseUri = new("https://api.bench/items");
 
     private PagedHandler _source = null!;
+
+    private PagedHandler _wrappedSource = null!;
 
     private WideRecord[] _records = [];
 
@@ -39,38 +40,54 @@ public class HttpBenchmarks : IDisposable
 
         _source = new PagedHandler(pages);
 
-        var read = SourcePaged().GetAwaiter().GetResult();
+        // The common API shape: items under a property, with metadata around them.
+        _wrappedSource = new PagedHandler(_records.Chunk(PageSize)
+            .Select(page => JsonSerializer.SerializeToUtf8Bytes(new { meta = new { total = Rows }, data = page }, options))
+            .ToArray());
 
-        if (read != Rows)
-            throw new InvalidOperationException($"{nameof(HttpBenchmarks)} read {read} of {Rows} rows during setup.");
+        foreach (var read in new[] { SourcePaged().GetAwaiter().GetResult(), SourcePagedWrapped().GetAwaiter().GetResult() })
+        {
+            if (read != Rows)
+                throw new InvalidOperationException($"{nameof(HttpBenchmarks)} read {read} of {Rows} rows during setup.");
+        }
     }
 
-    /// <summary>
-    ///     Offset pagination over root-array pages. Pages are root arrays because HTTP-1 stops the source after the
-    ///     first page of any wrapped (<c>{"data": [...]}</c>) response; switch to a wrapped shape once it is fixed.
-    /// </summary>
     public void Dispose()
     {
         _source.Dispose();
+        _wrappedSource.Dispose();
         GC.SuppressFinalize(this);
     }
 
+    /// <summary>Page-number pagination over root-array pages.</summary>
     [Benchmark]
     public Task<int> SourcePaged()
     {
-        var configuration = new HttpSourceConfiguration
+        var source = HttpConnector.Source<WideRecord>(BaseUri, new HttpClient(_source, false), o => o with
         {
-            BaseUri = BaseUri,
-            Pagination = new OffsetPaginationStrategy(new OffsetPaginationOptions { PageSize = PageSize }),
-        };
+            Pagination = HttpPagination.PageNumber(new PageNumberPaginationOptions { PageSize = PageSize }),
+        });
 
-        return NodeRunner.ReadAsync(new HttpSourceNode<WideRecord>(configuration, new HttpClient(_source, false)));
+        return NodeRunner.ReadAsync(source);
+    }
+
+    /// <summary>Page-number pagination over <c>{"meta":{"total":N},"data":[…]}</c> pages, stopping at the total.</summary>
+    [Benchmark]
+    public Task<int> SourcePagedWrapped()
+    {
+        var source = HttpConnector.Source<WideRecord>(BaseUri, new HttpClient(_wrappedSource, false), o => o with
+        {
+            ItemsJsonPath = "data",
+            Pagination = HttpPagination.PageNumber(new PageNumberPaginationOptions { PageSize = PageSize, TotalItemsJsonPath = "meta.total" }),
+        });
+
+        return NodeRunner.ReadAsync(source);
     }
 
     [Benchmark]
     public Task SinkBatched() =>
         NodeRunner.WriteAsync(
-            new HttpSinkNode<WideRecord>(new HttpSinkConfiguration { Uri = BaseUri, BatchSize = 100 }, new HttpClient(new AcceptingHandler(), true)),
+            HttpConnector.Sink<WideRecord>(BaseUri, new HttpClient(new AcceptingHandler(), true), o => o with { BatchSize = 100 }),
             _records);
 
     private sealed class PagedHandler(byte[][] pages) : HttpMessageHandler

@@ -86,9 +86,9 @@ public abstract class SourceNode<TOut> : ISourceNode<TOut>, INodeTypeMetadata
     ///     A channel attributed to this node's id. Outside a pipeline run (a test calling <see cref="OpenStream" />
     ///     directly), the id is the node's type name.
     /// </returns>
-    protected SourceDeadLetterChannel OpenDeadLetterChannel(PipelineContext context)
+    protected DeadLetterChannel OpenDeadLetterChannel(PipelineContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return new SourceDeadLetterChannel(context, SourceNodeScope.CurrentNodeId ?? GetType().Name);
+        return new DeadLetterChannel(context, NodeScope.CurrentNodeId ?? GetType().Name);
     }
 }

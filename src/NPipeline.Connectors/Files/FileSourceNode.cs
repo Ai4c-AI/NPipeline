@@ -15,10 +15,10 @@ namespace NPipeline.Connectors.Files;
 public sealed class FileReadContext
 {
     private readonly string _connector;
-    private readonly SourceDeadLetterChannel _deadLetters;
+    private readonly DeadLetterChannel _deadLetters;
     private readonly FileSourceOptions _options;
 
-    internal FileReadContext(StorageUri uri, FileSourceOptions options, string connector, SourceDeadLetterChannel deadLetters)
+    internal FileReadContext(StorageUri uri, FileSourceOptions options, string connector, DeadLetterChannel deadLetters)
     {
         Uri = uri;
         Source = FileNodeSupport.Describe(uri);
@@ -127,7 +127,7 @@ public abstract class FileSourceNode<T> : SourceNode<T>
 
     private async IAsyncEnumerable<T> ReadFilesAsync(
         IStorageProvider provider,
-        SourceDeadLetterChannel deadLetters,
+        DeadLetterChannel deadLetters,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         var files = await FileNodeSupport.ExpandAsync(provider, Options.Uri, Options.Recursive, DirectoryFileExtensions, cancellationToken)
@@ -145,7 +145,7 @@ public abstract class FileSourceNode<T> : SourceNode<T>
     private async IAsyncEnumerable<T> ReadFileAsync(
         IStorageProvider provider,
         StorageUri file,
-        SourceDeadLetterChannel deadLetters,
+        DeadLetterChannel deadLetters,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         var compression = FileNodeSupport.ResolveCompression(Options.Compression, file.Path, SupportsCompression, ConnectorName);

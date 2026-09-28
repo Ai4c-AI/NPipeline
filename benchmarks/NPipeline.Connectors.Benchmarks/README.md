@@ -10,12 +10,13 @@ serialisation, not disk or network I/O.
 
 | Benchmark | Rows | What it measures |
 | --- | --- | --- |
-| `CsvBenchmarks.Write` / `Read` | 100,000 | Attribute-mapped CSV sink and source |
+| `CsvBenchmarks.Write` / `Read` | 100,000 | CSV sink and source, binding columns to members |
 | `JsonBenchmarks.Write` / `Read` | 100,000 | JSON sink and source, for both `Array` and `NewlineDelimited` |
-| `ExcelBenchmarks.Write` / `Read` | 25,000 | XLSX sink and source (fewer rows because the current writer is slow) |
+| `ExcelBenchmarks.Write` / `Read` | 25,000 | XLSX sink and source (fewer rows, kept from the baseline, when the writer was slow) |
 | `ParquetBenchmarks.Write` / `Read` | 100,000 | Parquet sink and source with default row groups |
 | `ParquetBenchmarks.ReadThreeColumns` | 100,000 | Reading 3 of 20 columns with `ProjectedColumns` and a row mapper |
-| `HttpBenchmarks.SourcePaged` | 100,000 | Offset pagination over 100 root-array pages of 1,000 items |
+| `HttpBenchmarks.SourcePaged` | 100,000 | Page-number pagination over 100 root-array pages of 1,000 items |
+| `HttpBenchmarks.SourcePagedWrapped` | 100,000 | The same over `{"meta":{"total":N},"data":[…]}` pages, with `ItemsJsonPath` and a total |
 | `HttpBenchmarks.SinkBatched` | 100,000 | POSTs in batches of 100 |
 
 ## Run

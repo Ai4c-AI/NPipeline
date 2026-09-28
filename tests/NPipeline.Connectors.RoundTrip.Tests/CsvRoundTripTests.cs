@@ -1,5 +1,6 @@
 using System.Text;
 using NPipeline.Connectors.Csv;
+using NPipeline.Connectors.Errors;
 using NPipeline.Connectors.RoundTrip.Tests.Harnesses;
 using NPipeline.Connectors.RoundTrip.Tests.Infrastructure;
 using NPipeline.Connectors.RoundTrip.Tests.Models;
@@ -36,7 +37,7 @@ public sealed class CsvRoundTripTests
 
     // No Binary round trip: CSV cannot tell a null byte[] from an empty one.
 
-    [KnownBugFact("X-1")]
+    [Fact]
     public Task PositionalRecords() => RoundTripScenarios.PositionalRecords(_harness);
 
     [Fact]
@@ -55,31 +56,29 @@ public sealed class CsvRoundTripTests
         rows.Should().ContainSingle().Which.Should().BeEquivalentTo(new { Id = 1, Name = "Ada", Amount = 12.5m });
     }
 
-    [KnownBugFact("CSV-2")]
+    [Fact]
     public async Task Source_rejects_unparseable_values_instead_of_defaulting()
     {
         _harness.Provider.Put(_harness.Uri, Encoding.UTF8.GetBytes("id,amount\n1,not-a-number\n"));
 
         var read = () => _harness.ReadAsync<ScalarRecord>();
 
-        await read.Should().ThrowAsync<Exception>();
+        (await read.Should().ThrowAsync<RecordMappingException>())
+            .Which.Should().BeEquivalentTo(new { RecordNumber = 1, Field = "amount", RawExcerpt = "1,not-a-number\n" });
     }
 
-    [KnownBugFact("CSV-3")]
-    public async Task Source_honours_explicit_delimiter_without_mutating_configuration()
+    [Fact]
+    public async Task Source_honours_explicit_delimiter()
     {
-        var configuration = new CsvConfiguration();
-        configuration.HelperConfiguration.Delimiter = ";";
-        var harness = new CsvHarness { Configuration = () => configuration };
+        var harness = new CsvHarness { ReadOptions = o => o with { Delimiter = ";" } };
         harness.Provider.Put(harness.Uri, Encoding.UTF8.GetBytes("id;name\n1;a,b\n"));
 
         var rows = await harness.ReadAsync<ScalarRecord>();
 
         rows.Should().ContainSingle().Which.Name.Should().Be("a,b");
-        configuration.HelperConfiguration.DetectDelimiter.Should().BeFalse();
     }
 
-    [KnownBugFact("CSV-4")]
+    [Fact]
     public async Task Sink_writes_scalar_struct_items_as_a_single_column()
     {
         DateTime[] items = [new(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc)];

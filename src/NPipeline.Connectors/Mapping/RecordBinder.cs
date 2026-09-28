@@ -106,7 +106,8 @@ public static class RecordBinder
 
         Expression ReadMember(RecordMember member, int ordinal)
         {
-            described.Add((member.Name, member.ColumnName));
+            // The column as the file spells it, which may differ in case from the member's column name.
+            described.Add((member.Name, columns[ordinal]));
             var read = Expression.Call(reader, getValue.MakeGenericMethod(member.Type), Expression.Constant(ordinal));
             return Expression.Block(Expression.Assign(field, Expression.Constant(described.Count - 1)), read);
         }

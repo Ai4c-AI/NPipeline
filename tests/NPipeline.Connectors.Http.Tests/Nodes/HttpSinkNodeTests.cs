@@ -37,7 +37,7 @@ public class HttpSinkNodeTests
         var handler = new MockHttpMessageHandler().Respond(HttpStatusCode.Created);
         using var httpClient = CreateClient(handler);
 
-        var config = new HttpSinkConfiguration { Uri = new Uri("https://api.example.com/items") };
+        var config = new HttpSinkOptions<Item> { Uri = new Uri("https://api.example.com/items") };
         var node = new HttpSinkNode<Item>(config, httpClient);
 
         await using var pipe = PipeOf(new Item(1, "Apple"));
@@ -60,7 +60,7 @@ public class HttpSinkNodeTests
         var handler = new MockHttpMessageHandler().Respond(HttpStatusCode.OK);
         using var httpClient = CreateClient(handler);
 
-        var config = new HttpSinkConfiguration
+        var config = new HttpSinkOptions<Item>
         {
             Uri = new Uri("https://api.example.com/items/1"),
             Method = SinkHttpMethod.Put,
@@ -80,7 +80,7 @@ public class HttpSinkNodeTests
         var handler = new MockHttpMessageHandler().Respond(HttpStatusCode.OK);
         using var httpClient = CreateClient(handler);
 
-        var config = new HttpSinkConfiguration
+        var config = new HttpSinkOptions<Item>
         {
             Uri = new Uri("https://api.example.com/items/1"),
             Method = SinkHttpMethod.Patch,
@@ -103,9 +103,9 @@ public class HttpSinkNodeTests
 
         using var httpClient = CreateClient(handler);
 
-        var config = new HttpSinkConfiguration
+        var config = new HttpSinkOptions<Item>
         {
-            UriFactory = item => new Uri($"https://api.example.com/items/{((Item)item).Id}"),
+            UriFactory = item => new Uri($"https://api.example.com/items/{item.Id}"),
         };
 
         var node = new HttpSinkNode<Item>(config, httpClient);
@@ -118,21 +118,19 @@ public class HttpSinkNodeTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_WithTypedUriFactoryConstructor_UsesTypedFactory()
+    public async Task ExecuteAsync_WithUriFactoryAndHttpClientFactory_UriFactoryTakesPrecedenceOverUri()
     {
         var handler = new MockHttpMessageHandler().Respond(HttpStatusCode.OK);
         using var httpClient = CreateClient(handler);
         var httpClientFactory = new MockHttpClientFactory(httpClient);
 
-        var config = new HttpSinkConfiguration
+        var config = new HttpSinkOptions<Item>
         {
             Uri = new Uri("https://api.example.com/fallback"),
+            UriFactory = item => new Uri($"https://api.example.com/items/{item.Id}"),
         };
 
-        var node = new HttpSinkNode<Item>(
-            config,
-            item => new Uri($"https://api.example.com/items/{item.Id}"),
-            httpClientFactory);
+        var node = new HttpSinkNode<Item>(config, httpClientFactory);
 
         await using var pipe = PipeOf(new Item(42, "Answer"));
         await node.ConsumeAsync(pipe, new PipelineContext(), CancellationToken.None);
@@ -150,7 +148,7 @@ public class HttpSinkNodeTests
 
         using var httpClient = CreateClient(handler);
 
-        var config = new HttpSinkConfiguration
+        var config = new HttpSinkOptions<Item>
         {
             Uri = new Uri("https://api.example.com/items"),
             BatchSize = 3,
@@ -180,7 +178,7 @@ public class HttpSinkNodeTests
         var handler = new MockHttpMessageHandler();
         using var httpClient = CreateClient(handler);
 
-        var config = new HttpSinkConfiguration { Uri = new Uri("https://api.example.com/items") };
+        var config = new HttpSinkOptions<Item> { Uri = new Uri("https://api.example.com/items") };
         var node = new HttpSinkNode<Item>(config, httpClient);
 
         await using var pipe = PipeOf<Item>();
@@ -195,7 +193,7 @@ public class HttpSinkNodeTests
         var handler = new MockHttpMessageHandler().Respond(HttpStatusCode.BadRequest, "\"invalid request\"");
         using var httpClient = CreateClient(handler);
 
-        var config = new HttpSinkConfiguration
+        var config = new HttpSinkOptions<Item>
         {
             Uri = new Uri("https://api.example.com/items"),
             Resilience = Resilience.None,
@@ -210,15 +208,15 @@ public class HttpSinkNodeTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_WithCaptureErrorResponses_DoesNotThrow()
+    public async Task ExecuteAsync_WithFailedRequestsSkip_DoesNotThrow()
     {
         var handler = new MockHttpMessageHandler().Respond(HttpStatusCode.BadRequest, "\"error\"");
         using var httpClient = CreateClient(handler);
 
-        var config = new HttpSinkConfiguration
+        var config = new HttpSinkOptions<Item>
         {
             Uri = new Uri("https://api.example.com/items"),
-            CaptureErrorResponses = true,
+            FailedRequests = HttpFailedRequestAction.Skip,
             Resilience = Resilience.None,
         };
 
@@ -236,7 +234,7 @@ public class HttpSinkNodeTests
         var handler = new MockHttpMessageHandler().Respond(HttpStatusCode.OK);
         using var httpClient = CreateClient(handler);
 
-        var config = new HttpSinkConfiguration
+        var config = new HttpSinkOptions<Item>
         {
             Uri = new Uri("https://api.example.com/items"),
             BatchSize = 2,
@@ -259,7 +257,7 @@ public class HttpSinkNodeTests
     {
         using var httpClient = new HttpClient(new DelayedResponseHandler(TimeSpan.FromMilliseconds(250)));
 
-        var config = new HttpSinkConfiguration
+        var config = new HttpSinkOptions<Item>
         {
             Uri = new Uri("https://api.example.com/items"),
             Resilience = Resilience.None with { AttemptTimeout = TimeSpan.FromMilliseconds(50) },

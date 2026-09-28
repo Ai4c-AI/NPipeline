@@ -1,12 +1,19 @@
 ---
 title: "JSON Connector"
-description: "Read and write JSON files with attribute-based or lambda-based mapping, supporting JSON arrays and NDJSON."
+description: "Read and write JSON arrays, NDJSON and nested API exports with System.Text.Json."
 order: 3
 ---
 
 # JSON Connector
 
-The `NPipeline.Connectors.Json` package reads and writes JSON files using `System.Text.Json`. It supports JSON arrays and newline-delimited JSON (NDJSON), attribute-based mapping, explicit row mappers, configurable naming policies, and per-row error handling.
+The `NPipeline.Connectors.Json` package reads and writes JSON files with `System.Text.Json`. A source reads the
+elements of a root array, an array nested inside a root object, or a sequence of top-level values (NDJSON). Each
+record is deserialized straight from UTF-8, so anything the serializer supports works: nested objects, lists, enums,
+records and source-generated metadata. A record that fails to deserialize is a row error, and the read can skip it
+and go on.
+
+Globs, compression, atomic writes, row errors and metrics work the same in every file connector; see
+[File Connectors: Shared Behaviour](file-connectors.md).
 
 ## Installation
 
@@ -16,283 +23,172 @@ dotnet add package NPipeline.Connectors.Json
 
 **Dependencies:** `System.Text.Json`, `NPipeline.Connectors`, `NPipeline.StorageProviders`
 
-## Storage Abstraction
-
-The JSON connector uses NPipeline's storage abstraction layer. See the [CSV Connector - Storage Abstraction](csv.md#storage-abstraction) section for full details on `StorageUri`, `IStorageResolver`, and when you need an explicit resolver.
-
-**Short version:** omit the resolver for local files; provide one for cloud storage.
+## Reading
 
 ```csharp
-// Local file (no resolver needed)
-var source = new JsonSourceNode<Order>(StorageUri.FromFilePath("orders.json"));
+public sealed record Order(int Id, string Customer, decimal Total, OrderStatus Status, List<OrderLine> Lines);
 
-// Cloud storage (explicit resolver)
-var source = new JsonSourceNode<Order>(
-    StorageUri.Parse("s3://bucket/orders.json"),
-    resolver: myResolver);
-
-// Explicit provider (bypass resolution)
-var source = new JsonSourceNode<Order>(myProvider, StorageUri.FromFilePath("orders.json"));
+var source = JsonConnector.Source<Order>(StorageUri.FromFilePath("orders.json"));
+builder.AddSource(source, "orders");
 ```
 
-## Column Mapping
+### What a file can hold
 
-### Attribute-Based Mapping
+| File content | How it is read | Options |
+| --- | --- | --- |
+| `[{…}, {…}]` | Each element is a record | Default |
+| `{…}\n{…}\n` (NDJSON, JSON Lines) | Each top-level value is a record; a record may span lines | Default |
+| `{…}` | One record | Default |
+| `{"data": {"items": [{…}, {…}]}, "total": 2}` | Each element of the nested array is a record | `ItemsPath = "data.items"` |
 
-Properties map to JSON fields using these attributes (checked in priority order):
+`Format = JsonFormat.Auto` (the default) looks at each file's first character: `[` is an array, anything else is a
+sequence of top-level values. Set `Format` to `Array` or `NewlineDelimited` to require one.
 
-1. `[Column("name")]` from `NPipeline.Connectors.Attributes` (highest priority)
-2. `[JsonPropertyName("name")]` from `System.Text.Json.Serialization`
-3. The `PropertyNamingPolicy` applied to the property name (default: lowercase)
+`ItemsPath` names properties separated by dots, matched case-insensitively; a leading `$.` is allowed. The source
+streams past everything before the array, however large, and fails with the properties it found when the path does
+not exist.
 
-Properties are excluded with `[IgnoreColumn]`, `[Column(Ignore = true)]`, or `[JsonIgnore]`.
+### Serialization
+
+By default the source and sink use System.Text.Json's web defaults, with enums as names:
+
+- Property names are camelCase when writing and match case-insensitively when reading.
+- Numbers may also be read from strings (`"12"`).
+- Enums are written as names and read from names or numbers.
+- Dates are ISO 8601.
+- `[Column("name")]` and `[IgnoreColumn]` from `NPipeline.Connectors.Attributes` work as they do in the other
+  connectors; `[JsonPropertyName]` wins over `[Column]`.
+
+To change anything, pass your own options. The connector copies them and adds the column attributes, so your instance
+is not modified:
 
 ```csharp
-using NPipeline.Connectors.Attributes;
+var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
+options.Converters.Add(new JsonStringEnumConverter());
 
-public class Order
+var source = JsonConnector.Source<Order>(uri, o => o with { SerializerOptions = options });
+```
+
+For trimming and Native AOT, pass source-generated metadata:
+
+```csharp
+[JsonSerializable(typeof(Order))]
+public sealed partial class AppJsonContext : JsonSerializerContext;
+
+var source = JsonConnector.Source(uri, AppJsonContext.Default.Order);
+var sink = JsonConnector.Sink(outUri, AppJsonContext.Default.Order);
+```
+
+### Errors
+
+A record that does not deserialize (a string where a number belongs, for example) fails the read with a
+`RecordMappingException`. The exception carries the file, the record's position, the JSON path of the bad value
+(`$.total`) and the start of the record. With a `RowErrorHandler`, the record can be skipped or dead-lettered instead,
+and the rest of the file is still read, including the rest of an array.
+
+In NDJSON, a malformed line (invalid JSON) is also a row error, and reading goes on from the next line. In an array,
+invalid JSON fails the file, because there is no reliable place to resume.
+
+### Manual mapping
+
+A mapper receives a `JsonRow` for each record:
+
+```csharp
+var source = JsonConnector.Source(uri, row => new OrderSummary(
+    row.Get<int>("id"),
+    row.Get<string>("customer.name"),
+    row.TryGet<decimal>("total", out var total) ? total : 0m));
+```
+
+| `JsonRow` member | Description |
+| --- | --- |
+| `Get<T>(string name)` | Reads and converts a property; a dotted name reads a nested one. Throws `FieldMappingException` naming it |
+| `TryGet<T>(string name, out T value)` | The lenient form |
+| `HasProperty(string name)` | Whether the property exists |
+| `As<T>()` | The whole record as `T` |
+| `Element`, `RecordNumber` | The record as a `JsonElement` (valid during the call), and its position |
+
+### Read options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `Format` | `Auto` | `Auto`, `Array` or `NewlineDelimited` |
+| `ItemsPath` | `null` | The path to an array inside a root object |
+| `SerializerOptions` | `null` | System.Text.Json options; `null` uses the defaults above |
+
+Plus the [shared source options](file-connectors.md#options-every-file-source-and-sink-has): `Provider`, `Resolver`,
+`Compression`, `BufferSize`, `Recursive`, `RowErrorHandler` and `RawExcerptLength`. A directory reads its `.json`,
+`.ndjson` and `.jsonl` files.
+
+## Writing
+
+```csharp
+var sink = JsonConnector.Sink<Order>(StorageUri.FromFilePath("orders.json"));
+builder.AddSink(sink, "orders-out");
+```
+
+The sink writes an array, or NDJSON when the file ends in `.ndjson` or `.jsonl` (before any `.gz`, `.br` or `.zz`
+suffix, which compresses the output). Set `Format` to choose explicitly. Output is written to storage every 64 KB, so
+memory usage remains constant regardless of the number of records written.
+
+A `null` item fails the write by default. Set `NullItems = NullItemHandling.Write` to write JSON `null`, or `Skip` to
+drop it.
+
+### Write options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `Format` | `Auto` | `Auto` (by file name), `Array` or `NewlineDelimited` |
+| `WriteIndented` | `false` | Indent array output; NDJSON is never indented |
+| `SerializerOptions` | `null` | System.Text.Json options; `null` uses the defaults above |
+
+Plus the [shared sink options](file-connectors.md#options-every-file-source-and-sink-has): `Provider`, `Resolver`,
+`Compression`, `BufferSize`, `AtomicWrite`, `NullItems` and `DeletePartialOnFailure`.
+
+## Examples
+
+### An API export with a wrapper object
+
+```csharp
+// {"meta": {...}, "data": {"orders": [ ... ]}}
+var source = JsonConnector.Source<Order>(StorageUri.Parse("s3://exports/2026-09-28.json"), o => o with
 {
-    [Column("order_id")]
-    public int Id { get; set; }
-
-    public string CustomerName { get; set; } = string.Empty; // maps to "customername" (lowercase policy)
-
-    [IgnoreColumn]
-    public string InternalNote { get; set; } = string.Empty;
-}
+    ItemsPath = "data.orders",
+    Provider = s3,
+});
 ```
 
-### Lambda-Based Mapping
-
-Provide a `Func<JsonRow, T>` for explicit control:
+### NDJSON logs, skipping bad lines
 
 ```csharp
-var source = new JsonSourceNode<Order>(
-    StorageUri.FromFilePath("orders.json"),
-    row => new Order
-    {
-        Id = row.Get<int>("order_id") ?? 0,
-        CustomerName = row.Get<string>("customer_name") ?? string.Empty
-    });
-```
-
-`JsonRow` methods:
-
-| Method | Description |
-|--------|-------------|
-| `Get<T>(string name, T? defaultValue)` | Read a field by name, return converted value or default |
-| `TryGet<T>(string name, out T? value, T? defaultValue)` | Try to read and convert; returns `false` if missing |
-| `HasProperty(string name)` | Check whether a property exists |
-| `GetElement(string name)` | Get the raw `JsonElement` for complex/nested access |
-
-## Source Node - `JsonSourceNode<T>`
-
-Reads a JSON file and emits each object as an item of type `T`.
-
-### Constructors
-
-```csharp
-// Attribute-based mapping with optional resolver
-public JsonSourceNode(
-    StorageUri uri,
-    IStorageResolver? resolver = null,
-    JsonConfiguration? configuration = null)
-
-// Attribute-based mapping with explicit provider
-public JsonSourceNode(
-    IStorageProvider provider,
-    StorageUri uri,
-    JsonConfiguration? configuration = null)
-
-// Lambda-based mapping with optional resolver
-public JsonSourceNode(
-    StorageUri uri,
-    Func<JsonRow, T> rowMapper,
-    IStorageResolver? resolver = null,
-    JsonConfiguration? configuration = null)
-
-// Lambda-based mapping with explicit provider
-public JsonSourceNode(
-    IStorageProvider provider,
-    StorageUri uri,
-    Func<JsonRow, T> rowMapper,
-    JsonConfiguration? configuration = null)
-```
-
-### Example
-
-```csharp
-// JSON array: [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
-var source = new JsonSourceNode<User>(StorageUri.FromFilePath("users.json"));
-
-// NDJSON: {"id": 1, "name": "Alice"}\n{"id": 2, "name": "Bob"}
-var config = new JsonConfiguration { Format = JsonFormat.NewlineDelimited };
-var source = new JsonSourceNode<User>(
-    StorageUri.FromFilePath("users.ndjson"),
-    configuration: config);
-```
-
-## Sink Node - `JsonSinkNode<T>`
-
-Writes items to a JSON file using attribute-based mapping.
-
-### Constructors
-
-```csharp
-// Attribute-based mapping with optional resolver
-public JsonSinkNode(
-    StorageUri uri,
-    IStorageResolver? resolver = null,
-    JsonConfiguration? configuration = null)
-
-// Attribute-based mapping with explicit provider
-public JsonSinkNode(
-    IStorageProvider provider,
-    StorageUri uri,
-    JsonConfiguration? configuration = null)
-```
-
-### Example
-
-```csharp
-var config = new JsonConfiguration { WriteIndented = true };
-var sink = new JsonSinkNode<UserSummary>(
-    StorageUri.FromFilePath("output.json"),
-    configuration: config);
-```
-
-## Configuration
-
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `BufferSize` | `int` | `4096` | Stream buffer size in bytes |
-| `Format` | `JsonFormat` | `Array` | `Array` for `[...]` or `NewlineDelimited` for NDJSON |
-| `WriteIndented` | `bool` | `false` | Pretty-print JSON output |
-| `PropertyNameCaseInsensitive` | `bool` | `true` | Case-insensitive property matching when reading |
-| `PropertyNamingPolicy` | `JsonPropertyNamingPolicy` | `LowerCase` | Naming convention for serialization |
-| `RowErrorHandler` | `Func<Exception, JsonRow, bool>?` | `null` | Per-row error handler. Return `true` to skip, `false` to throw. |
-
-### Naming Policies
-
-| Policy | Example: `FirstName` → |
-|--------|----------------------|
-| `LowerCase` (default) | `firstname` |
-| `CamelCase` | `firstName` |
-| `SnakeCase` | `first_name` |
-| `PascalCase` | `FirstName` |
-| `AsIs` | `FirstName` (no transformation) |
-
-### Per-Row Error Handling
-
-```csharp
-var config = new JsonConfiguration
+var source = JsonConnector.Source<LogEvent>(StorageUri.Parse("file:///var/log/app/*.jsonl.gz"), o => o with
 {
-    RowErrorHandler = (ex, row) =>
+    RowErrorHandler = error =>
     {
-        Console.WriteLine($"Skipping bad row: {ex.Message}");
-        return true; // skip and continue
-    }
-};
+        logger.LogWarning("Skipping line {Line} of {File}", error.RecordNumber, error.Source);
+        return RowErrorAction.Skip;
+    },
+});
 ```
 
-## Example: Transform Pipeline (JSON → JSON)
+### JSON to NDJSON
 
 ```csharp
-public sealed class JsonTransformPipeline : IPipelineDefinition
+public sealed class ConvertPipeline : IPipelineDefinition
 {
     public void Define(PipelineBuilder builder, PipelineContext context)
     {
-        var source = builder.AddSource(
-            new JsonSourceNode<Order>(StorageUri.FromFilePath("orders.json")),
-            "json-source");
+        var source = builder.AddSource(JsonConnector.Source<Order>(StorageUri.FromFilePath("orders.json")), "orders");
+        var sink = builder.AddSink(JsonConnector.Sink<Order>(StorageUri.FromFilePath("orders.ndjson.gz")), "ndjson");
 
-        var transform = builder.AddTransform<EnrichOrder, Order, EnrichedOrder>("enrich");
-
-        var config = new JsonConfiguration
-        {
-            WriteIndented = true,
-            PropertyNamingPolicy = JsonPropertyNamingPolicy.CamelCase
-        };
-        var sink = builder.AddSink(
-            new JsonSinkNode<EnrichedOrder>(
-                StorageUri.FromFilePath("enriched-orders.json"),
-                configuration: config),
-            "json-sink");
-
-        builder.Connect(source, transform);
-        builder.Connect(transform, sink);
+        builder.Connect(source, sink);
     }
 }
 ```
 
 ## Next Steps
 
-- [CSV Connector](csv.md) - similar file-based connector for tabular data
-- [Parquet Connector](parquet.md) - columnar format for large datasets
-- [Storage Providers](../storage-providers/index.md) - read JSON from S3, Azure Blob, or GCS
-
-## Storage Abstraction
-
-All file connectors use `StorageUri` + `IStorageResolver` for pluggable storage:
-
-```csharp
-// Local file
-var source = new JsonSourceNode<Order>(StorageUri.FromFilePath("orders.json"));
-
-// Cloud storage
-var source = new JsonSourceNode<Order>(
-    StorageUri.Parse("s3://my-bucket/data/orders.json"),
-    resolver: myStorageResolver);
-```
-
-See [Storage Providers](../storage-providers/index.md) for configuring S3, Azure Blob, GCS, and ADLS Gen2.
-
-## JSON Formats
-
-### Array Format (default)
-
-Standard JSON array - entire file is `[{...}, {...}, ...]`:
-
-```json
-[
-  { "id": 1, "name": "Alice" },
-  { "id": 2, "name": "Bob" }
-]
-```
-
-### Newline-Delimited JSON (NDJSON)
-
-One JSON object per line - ideal for streaming and append-only:
-
-```json
-{"id": 1, "name": "Alice"}
-{"id": 2, "name": "Bob"}
-```
-
-```csharp
-var source = new JsonSourceNode<Order>(
-    StorageUri.FromFilePath("events.ndjson"),
-    configuration: new JsonConfiguration { Format = JsonFormat.NewlineDelimited });
-```
-
-NDJSON is more memory-efficient for large files since each line is parsed independently.
-
-## Nested Properties
-
-Use `ItemsJsonPath` (dot-separated) to extract items from a nested JSON structure:
-
-```csharp
-// JSON: { "response": { "data": { "orders": [...] } } }
-var source = new JsonSourceNode<Order>(
-    StorageUri.FromFilePath("response.json"),
-    configuration: new JsonConfiguration { ItemsJsonPath = "response.data.orders" });
-```
-
-## Best Practices
-
-1. **Use NDJSON** for large files and streaming - lower memory footprint
-2. **Use `ItemsJsonPath`** to extract nested arrays without pre-processing
-3. **Increase `BufferSize`** for large files (default 4096)
-4. **Use `RowErrorHandler`** to skip malformed records
-5. **Set `PropertyNamingPolicy`** to match the source API convention
-6. **Use `StorageUri`** with `IStorageResolver` for cloud storage portability
+- [File Connectors: Shared Behaviour](file-connectors.md): globs, compression, atomic writes, row errors, metrics
+- [CSV Connector](csv.md): tabular data
+- [HTTP Connector](http.md): read JSON straight from REST APIs
+- [Storage Providers](../storage-providers/index.md): read JSON from S3, Azure Blob, GCS or SFTP

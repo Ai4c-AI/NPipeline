@@ -1,12 +1,16 @@
-using System.Diagnostics;
+using System.Buffers;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using NPipeline.Connectors.Diagnostics;
 using NPipeline.Connectors.Http.Configuration;
 using NPipeline.Connectors.Http.Metrics;
+using NPipeline.Connectors.Http.Models;
 using NPipeline.Connectors.Http.Reliability;
 using NPipeline.DataFlow;
+using NPipeline.ErrorHandling;
 using NPipeline.Nodes;
 using NPipeline.Pipeline;
 using NResilience;
@@ -14,100 +18,78 @@ using NResilience;
 namespace NPipeline.Connectors.Http.Nodes;
 
 /// <summary>
-///     A sink node that writes items to a REST API via POST, PUT, or PATCH.
-///     Supports batching, auth, retry, rate limiting, idempotency keys and observability.
+///     A sink that writes items to a REST API with POST, PUT or PATCH, one at a time or in batches. Requests are retried as
+///     the options' resilience allows; one that still fails is failed, skipped or dead-lettered as
+///     <see cref="HttpSinkOptions{T}.FailedRequests" /> says.
 /// </summary>
-/// <typeparam name="T">The item type to serialise and send.</typeparam>
+/// <typeparam name="T">The item type.</typeparam>
 public sealed partial class HttpSinkNode<T> : SinkNode<T>, IAsyncDisposable
 {
-    private readonly HttpSinkConfiguration _configuration;
+    private const int ResponseExcerptLength = 512;
+
+    private static readonly MediaTypeHeaderValue JsonContentType = new("application/json") { CharSet = "utf-8" };
+
     private readonly HttpClient _httpClient;
     private readonly HttpMethod _httpMethod;
     private readonly ILogger<HttpSinkNode<T>> _logger;
     private readonly IHttpConnectorMetrics _metrics;
+    private readonly HttpSinkOptions<T> _options;
     private readonly bool _ownsClient;
     private readonly ResilientHttpSender _sender;
+    private readonly JsonTypeInfo<T> _typeInfo;
+    private readonly JsonWriterOptions _writerOptions;
 
     // The node sends one request at a time, so the retry listener reads the request in flight from here.
-    private Uri? _currentUri;
+    private string? _currentEndpoint;
 
-    /// <summary>Creates a new instance sourcing an <see cref="HttpClient" /> from the provided factory.</summary>
-    public HttpSinkNode(HttpSinkConfiguration configuration, IHttpClientFactory httpClientFactory)
-        : this(configuration, httpClientFactory, NullHttpConnectorMetrics.Instance)
-    {
-    }
-
-    /// <summary>Creates a new instance with full dependency injection.</summary>
+    /// <summary>Creates a sink that uses a client from <paramref name="httpClientFactory" /> (<see cref="HttpSinkOptions{T}.HttpClientName" />).</summary>
     public HttpSinkNode(
-        HttpSinkConfiguration configuration,
+        HttpSinkOptions<T> options,
         IHttpClientFactory httpClientFactory,
         IHttpConnectorMetrics? metrics = null,
         ILogger<HttpSinkNode<T>>? logger = null)
-        : this(
-            configuration,
-            CreateClient(configuration, httpClientFactory),
-            metrics ?? NullHttpConnectorMetrics.Instance,
-            logger,
-            true)
+        : this(options, CreateClient(options, httpClientFactory), metrics, logger, true)
     {
     }
 
-    /// <summary>
-    ///     Creates a new instance with a strongly-typed URI factory for per-item routing.
-    /// </summary>
+    /// <summary>Creates a sink that uses <paramref name="httpClient" />, which the caller keeps ownership of.</summary>
     public HttpSinkNode(
-        HttpSinkConfiguration configuration,
-        Func<T, Uri> uriFactory,
-        IHttpClientFactory httpClientFactory,
-        IHttpConnectorMetrics? metrics = null,
-        ILogger<HttpSinkNode<T>>? logger = null)
-        : this(
-            CloneWithTypedUriFactory(configuration, uriFactory),
-            CreateClient(configuration, httpClientFactory),
-            metrics ?? NullHttpConnectorMetrics.Instance,
-            logger,
-            true)
-    {
-        ArgumentNullException.ThrowIfNull(uriFactory);
-    }
-
-    /// <summary>
-    ///     Creates a new instance with a raw <see cref="HttpClient" />.
-    ///     Useful in tests and minimal-host scenarios that do not use <see cref="IHttpClientFactory" />.
-    /// </summary>
-    public HttpSinkNode(
-        HttpSinkConfiguration configuration,
+        HttpSinkOptions<T> options,
         HttpClient httpClient,
         IHttpConnectorMetrics? metrics = null,
         ILogger<HttpSinkNode<T>>? logger = null)
-        : this(configuration, httpClient, metrics ?? NullHttpConnectorMetrics.Instance, logger, false)
+        : this(options, httpClient, metrics, logger, false)
     {
     }
 
     private HttpSinkNode(
-        HttpSinkConfiguration configuration,
+        HttpSinkOptions<T> options,
         HttpClient httpClient,
-        IHttpConnectorMetrics metrics,
+        IHttpConnectorMetrics? metrics,
         ILogger<HttpSinkNode<T>>? logger,
         bool ownsClient)
     {
-        _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
-        _configuration.Validate();
+        ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
 
+        _options = options;
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
-        _metrics = metrics;
+        _metrics = metrics ?? NullHttpConnectorMetrics.Instance;
         _logger = logger ?? NullLogger<HttpSinkNode<T>>.Instance;
         _ownsClient = ownsClient;
 
-        _httpMethod = _configuration.Method switch
+        _typeInfo = options.TypeInfo ?? HttpJsonDefaults.TypeInfo<T>(options.JsonOptions);
+        var serializerOptions = _typeInfo.Options;
+        _writerOptions = new JsonWriterOptions { Encoder = serializerOptions.Encoder, Indented = serializerOptions.WriteIndented, SkipValidation = true };
+
+        _httpMethod = options.Method switch
         {
-            SinkHttpMethod.Post => HttpMethod.Post,
             SinkHttpMethod.Put => HttpMethod.Put,
             SinkHttpMethod.Patch => HttpMethod.Patch,
             _ => HttpMethod.Post,
         };
 
-        _sender = new ResilientHttpSender(_httpClient, _configuration.Resilience, false, _metrics, OnResilienceEvent);
+        _sender = new ResilientHttpSender(_httpClient, options.Resilience, false, _metrics, OnResilienceEvent, options.RateLimiter);
     }
 
     /// <inheritdoc />
@@ -122,23 +104,24 @@ public sealed partial class HttpSinkNode<T> : SinkNode<T>, IAsyncDisposable
     }
 
     /// <inheritdoc />
-    public override async Task ConsumeAsync(
-        IDataStream<T> input,
-        PipelineContext context,
-        CancellationToken cancellationToken)
+    public override async Task ConsumeAsync(IDataStream<T> input, PipelineContext context, CancellationToken cancellationToken)
     {
-        var batch = new List<T>(_configuration.BatchSize);
+        ArgumentNullException.ThrowIfNull(input);
+
+        var deadLetters = OpenDeadLetterChannel(context);
+        var batch = new List<T>(_options.BatchSize);
+        var body = new ArrayBufferWriter<byte>(16 * 1024);
         Uri? batchUri = null;
 
         await foreach (var item in input.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
-            var uri = ResolveUri(item);
+            var uri = _options.UriFactory is { } factory ? factory(item) : _options.Uri!;
 
             // A request carries items for one URI only, so a change of URI ends the batch. Items stay in input order
             // and at most BatchSize items are buffered, however many distinct URIs the factory produces.
-            if (batch.Count > 0 && (batch.Count >= _configuration.BatchSize || uri != batchUri))
+            if (batch.Count > 0 && (batch.Count >= _options.BatchSize || uri != batchUri))
             {
-                await FlushBatchAsync(batch, batchUri!, cancellationToken).ConfigureAwait(false);
+                await SendBatchAsync(batch, batchUri!, body, deadLetters, cancellationToken).ConfigureAwait(false);
                 batch.Clear();
             }
 
@@ -147,172 +130,137 @@ public sealed partial class HttpSinkNode<T> : SinkNode<T>, IAsyncDisposable
         }
 
         if (batch.Count > 0)
-            await FlushBatchAsync(batch, batchUri!, cancellationToken).ConfigureAwait(false);
+            await SendBatchAsync(batch, batchUri!, body, deadLetters, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task FlushBatchAsync(List<T> items, Uri uri, CancellationToken cancellationToken)
+    private async Task SendBatchAsync(List<T> items, Uri uri, ArrayBufferWriter<byte> body, DeadLetterChannel deadLetters, CancellationToken cancellationToken)
     {
-        var waitStart = Stopwatch.GetTimestamp();
-        await _configuration.RateLimiter.WaitAsync(cancellationToken).ConfigureAwait(false);
-
-        _metrics.RecordRateLimitWait(
-            uri.ToString(),
-            Stopwatch.GetElapsedTime(waitStart));
+        var endpoint = HttpRedaction.Endpoint(uri);
+        var described = HttpRedaction.Full(uri);
 
         try
         {
-            await SendAsync(uri, items, cancellationToken).ConfigureAwait(false);
+            Serialize(items, body);
+
+            // The pooled buffer is reused for the next batch, so the request is finished before it is overwritten.
+            using var request = new HttpRequestMessage(_httpMethod, uri) { Content = new ReadOnlyMemoryContent(body.WrittenMemory) };
+            request.Content.Headers.ContentType = JsonContentType;
+
+            foreach (var (key, value) in _options.Headers)
+            {
+                _ = request.Headers.TryAddWithoutValidation(key, value);
+            }
+
+            // An idempotency key makes a POST or PATCH safe to retry. Without one, the resilience handler sends those
+            // methods once, because a retried write the server already applied is a duplicate.
+            if (_options.IdempotencyKeyFactory is { } keyFactory)
+                _ = request.MarkRepeatable(keyFactory(items), _options.IdempotencyHeaderName);
+
+            await _options.Auth.ApplyAsync(request, cancellationToken).ConfigureAwait(false);
+
+            if (_options.RequestCustomizer is { } customize)
+                await customize(request, cancellationToken).ConfigureAwait(false);
+
+            LogSendingRequest(_logger, typeof(T).Name, _httpMethod.Method, described, items.Count);
+            _currentEndpoint = endpoint;
+
+            using var response = await _sender.SendAsync(request, cancellationToken).ConfigureAwait(false);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _metrics.RecordSinkWritten(endpoint, _httpMethod.Method, (int)response.StatusCode);
+                ConnectorDiagnostics.RecordRowsWritten("http", uri.Scheme, items.Count);
+                return;
+            }
+
+            // Judged only after the resilience handler has spent its retries, so a transient 503 is retried first.
+            var text = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            var excerpt = text.Length == 0 ? null : text.Length <= ResponseExcerptLength ? text : string.Concat(text.AsSpan(0, ResponseExcerptLength), "…");
+
+            var failure = new HttpRequestException(
+                $"HttpSinkNode<{typeof(T).Name}>: {_httpMethod.Method} {described} with {items.Count} item(s) failed with " +
+                $"{(int)response.StatusCode} {response.ReasonPhrase}. Body: {excerpt}",
+                null,
+                response.StatusCode);
+
+            switch (_options.FailedRequests)
+            {
+                case HttpFailedRequestAction.Skip:
+                    LogSkippedFailure(_logger, typeof(T).Name, (int)response.StatusCode, described, items.Count);
+                    return;
+                case HttpFailedRequestAction.DeadLetter:
+                    await deadLetters.SendAsync(
+                        new HttpRequestFailure<T>(described, _httpMethod.Method, response.StatusCode, excerpt, [.. items]), failure, cancellationToken)
+                        .ConfigureAwait(false);
+
+                    return;
+                default:
+                    throw failure;
+            }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException and not DeadLetterSinkNotConfiguredException)
         {
-            _metrics.RecordError(uri.ToString(), _httpMethod.Method, ex);
+            _metrics.RecordError(endpoint, _httpMethod.Method, ex);
             throw;
         }
     }
 
-    private async Task SendAsync(Uri uri, List<T> items, CancellationToken cancellationToken)
+    private void Serialize(List<T> items, ArrayBufferWriter<byte> body)
     {
-        var jsonOptions = _configuration.JsonOptions ?? HttpJsonDefaults.Options;
+        body.ResetWrittenCount();
+        using var writer = new Utf8JsonWriter(body, _writerOptions);
 
-        using var content = BuildContent(items, jsonOptions);
-        using var request = new HttpRequestMessage(_httpMethod, uri) { Content = content };
-
-        foreach (var (key, value) in _configuration.Headers)
+        if (_options.BatchSize == 1)
+            JsonSerializer.Serialize(writer, items[0], _typeInfo);
+        else
         {
-            request.Headers.TryAddWithoutValidation(key, value);
+            if (_options.BatchWrapperKey is { } key)
+            {
+                writer.WriteStartObject();
+                writer.WritePropertyName(key);
+            }
+
+            writer.WriteStartArray();
+
+            foreach (var item in items)
+            {
+                JsonSerializer.Serialize(writer, item, _typeInfo);
+            }
+
+            writer.WriteEndArray();
+
+            if (_options.BatchWrapperKey is not null)
+                writer.WriteEndObject();
         }
 
-        // An idempotency key makes a POST or PATCH safe to retry. Without one, the resilience handler sends those
-        // methods once, because a retried write the server already applied is a duplicate.
-        if (_configuration.IdempotencyKeyFactory != null)
-            _ = request.MarkRepeatable(_configuration.IdempotencyKeyFactory(items[0]!), _configuration.IdempotencyHeaderName);
-
-        await _configuration.Auth.ApplyAsync(request, cancellationToken).ConfigureAwait(false);
-
-        if (_configuration.RequestCustomizer != null)
-            await _configuration.RequestCustomizer(request, cancellationToken).ConfigureAwait(false);
-
-        LogSendingRequest(_logger, typeof(T).Name, _httpMethod.Method, uri, items.Count);
-        _currentUri = uri;
-
-        using var response = await _sender.SendAsync(request, cancellationToken).ConfigureAwait(false);
-
-        if (response.IsSuccessStatusCode)
-        {
-            _metrics.RecordSinkWritten(uri.ToString(), _httpMethod.Method, (int)response.StatusCode);
-            return;
-        }
-
-        // Judged only after the resilience handler has spent its retries, so a transient 503 is retried rather than
-        // captured on its first appearance.
-        if (_configuration.CaptureErrorResponses)
-        {
-            LogCapturedError(_logger, typeof(T).Name, (int)response.StatusCode, uri);
-            return;
-        }
-
-        var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-
-        throw new HttpRequestException(
-            $"HttpSinkNode<{typeof(T).Name}>: request to {uri} failed with " +
-            $"{(int)response.StatusCode} {response.ReasonPhrase}. Body: {Truncate(body, 512)}",
-            null,
-            response.StatusCode);
+        writer.Flush();
     }
 
     private void OnResilienceEvent(CallEvent callEvent)
     {
-        if (callEvent.Kind != CallEventKind.Retrying || _currentUri is not { } uri)
+        if (callEvent.Kind != CallEventKind.Retrying || _currentEndpoint is not { } endpoint)
             return;
 
-        _metrics.RecordRetry(uri.ToString(), _httpMethod.Method, callEvent.AttemptNumber);
-        LogRetrying(_logger, typeof(T).Name, callEvent.AttemptNumber, uri);
+        _metrics.RecordRetry(endpoint, _httpMethod.Method, callEvent.AttemptNumber);
+        LogRetrying(_logger, typeof(T).Name, callEvent.AttemptNumber, endpoint);
     }
 
-    private Uri ResolveUri(T item)
+    private static HttpClient CreateClient(HttpSinkOptions<T> options, IHttpClientFactory httpClientFactory)
     {
-        if (_configuration.UriFactory != null)
-            return _configuration.UriFactory(item!);
-
-        return _configuration.Uri!;
-    }
-
-    private HttpContent BuildContent(List<T> items, JsonSerializerOptions options)
-    {
-        var stream = new MemoryStream();
-
-        if (items.Count == 1 && _configuration.BatchSize == 1)
-            JsonSerializer.Serialize(stream, items[0], options);
-        else if (_configuration.BatchWrapperKey != null)
-        {
-            using var writer = new Utf8JsonWriter(stream);
-            writer.WriteStartObject();
-            writer.WritePropertyName(_configuration.BatchWrapperKey);
-            JsonSerializer.Serialize(writer, items, options);
-            writer.WriteEndObject();
-        }
-        else
-            JsonSerializer.Serialize(stream, items, options);
-
-        stream.Position = 0;
-        var content = new StreamContent(stream);
-
-        content.Headers.ContentType = new MediaTypeHeaderValue("application/json")
-        {
-            CharSet = "utf-8",
-        };
-
-        return content;
-    }
-
-    private static string Truncate(string value, int maxLength) =>
-        value.Length <= maxLength
-            ? value
-            : string.Concat(value.AsSpan(0, maxLength), "…");
-
-    private static HttpClient CreateClient(HttpSinkConfiguration configuration, IHttpClientFactory httpClientFactory)
-    {
-        ArgumentNullException.ThrowIfNull(configuration);
+        ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(httpClientFactory);
 
-        return configuration.HttpClientName != null
-            ? httpClientFactory.CreateClient(configuration.HttpClientName)
+        return options.HttpClientName is { } name
+            ? httpClientFactory.CreateClient(name)
             : httpClientFactory.CreateClient();
     }
 
-    private static HttpSinkConfiguration CloneWithTypedUriFactory(
-        HttpSinkConfiguration configuration,
-        Func<T, Uri> uriFactory)
-    {
-        ArgumentNullException.ThrowIfNull(configuration);
-        ArgumentNullException.ThrowIfNull(uriFactory);
-
-        return new HttpSinkConfiguration
-        {
-            Uri = configuration.Uri,
-            UriFactory = item => uriFactory((T)item),
-            Method = configuration.Method,
-            Headers = new Dictionary<string, string>(configuration.Headers, StringComparer.Ordinal),
-            HttpClientName = configuration.HttpClientName,
-            BatchSize = configuration.BatchSize,
-            BatchWrapperKey = configuration.BatchWrapperKey,
-            JsonOptions = configuration.JsonOptions,
-            CaptureErrorResponses = configuration.CaptureErrorResponses,
-            Auth = configuration.Auth,
-            RateLimiter = configuration.RateLimiter,
-            Resilience = configuration.Resilience,
-            RequestCustomizer = configuration.RequestCustomizer,
-            IdempotencyKeyFactory = configuration.IdempotencyKeyFactory,
-            IdempotencyHeaderName = configuration.IdempotencyHeaderName,
-        };
-    }
-
     [LoggerMessage(Level = LogLevel.Debug, Message = "HttpSinkNode<{TypeName}>: sending {Method} {Uri} with {Count} item(s).")]
-    private static partial void LogSendingRequest(ILogger logger, string typeName, string method, Uri uri, int count);
+    private static partial void LogSendingRequest(ILogger logger, string typeName, string method, string uri, int count);
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "HttpSinkNode<{TypeName}>: received {Status} from {Uri}; CaptureErrorResponses is enabled.")]
-    private static partial void LogCapturedError(ILogger logger, string typeName, int status, Uri uri);
+    [LoggerMessage(Level = LogLevel.Warning, Message = "HttpSinkNode<{TypeName}>: {Status} from {Uri}; skipping {Count} item(s) as FailedRequests is Skip.")]
+    private static partial void LogSkippedFailure(ILogger logger, string typeName, int status, string uri, int count);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "HttpSinkNode<{TypeName}>: attempt {Attempt} failed for {Uri}, retrying.")]
-    private static partial void LogRetrying(ILogger logger, string typeName, int attempt, Uri uri);
+    private static partial void LogRetrying(ILogger logger, string typeName, int attempt, string uri);
 }

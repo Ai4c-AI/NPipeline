@@ -1,370 +1,126 @@
-using System.Globalization;
-using DocumentFormat.OpenXml;
-using DocumentFormat.OpenXml.Packaging;
-using DocumentFormat.OpenXml.Spreadsheet;
-using NPipeline.Connectors.Excel.Mapping;
-using NPipeline.DataFlow;
-using NPipeline.Nodes;
-using NPipeline.Pipeline;
-using NPipeline.StorageProviders;
-using NPipeline.StorageProviders.Abstractions;
-using NPipeline.StorageProviders.Exceptions;
-using NPipeline.StorageProviders.Models;
+using System.IO.Compression;
+using System.Xml;
+using NPipeline.Connectors.Excel.Xlsx;
+using NPipeline.Connectors.Files;
+using NPipeline.Connectors.Mapping;
 
 namespace NPipeline.Connectors.Excel;
 
 /// <summary>
-///     Sink node that writes items to Excel files using a pluggable <see cref="IStorageProvider" />.
+///     Writes records to one sheet of an XLSX workbook. The workbook is streamed: rows go to storage as they are written,
+///     so memory stays constant however many rows there are, and non-seekable streams (S3, Azure) need no buffer.
 /// </summary>
-/// <typeparam name="T">Record type to serialize for each Excel row.</typeparam>
+/// <typeparam name="T">The record type, or a scalar type for a single-column sheet.</typeparam>
 /// <remarks>
-///     <para>
-///         This sink node writes data to Excel files in XLSX (Open XML) format. It provides configurable options
-///         for sheet selection, header writing, and type conversion.
-///     </para>
-///     <para>
-///         The node supports multiple constructor patterns:
-///         <list type="bullet">
-///             <item>
-///                 <description>Using default <see cref="IStorageResolver" /> (recommended for simplicity)</description>
-///             </item>
-///             <item>
-///                 <description>Using a custom <see cref="IStorageResolver" /> for resolver-based provider resolution at execution time</description>
-///             </item>
-///             <item>
-///                 <description>Using a specific <see cref="IStorageProvider" /> instance for direct provider injection</description>
-///             </item>
-///         </list>
-///     </para>
-///     <para>
-///         Data mapping is performed using compiled delegates to map properties of type <typeparamref name="T" /> to Excel columns.
-///         When <see cref="ExcelConfiguration.FirstRowIsHeader" /> is <c>true</c>, column names are written as header row.
-///     </para>
-///     <para>
-///         <note type="important">
-///             This sink node only supports writing XLSX (Open XML) format. Legacy XLS (binary) format is not supported for writing.
-///         </note>
-///     </para>
+///     Each readable member becomes a column. Numbers, booleans and dates are typed cells, and dates carry a date format
+///     so Excel shows them as dates; see <see cref="ExcelRowWriter" /> for how each type is written. A sheet holds at
+///     most 1,048,576 rows and 16,384 columns, and a cell at most 32,767 characters; the write fails beyond them.
 /// </remarks>
-public sealed class ExcelSinkNode<T> : SinkNode<T>
+public sealed class ExcelSinkNode<T> : FileSinkNode<T>
 {
-    private static readonly Lazy<IStorageResolver> DefaultResolver =
-        new(() => StorageProviderFactory.CreateResolver());
+    private const int DrainThresholdBytes = 64 * 1024;
 
-    private readonly ExcelConfiguration _configuration;
-    private readonly IStorageProvider? _provider;
-    private readonly IStorageResolver? _resolver;
-    private readonly StorageUri _uri;
+    private readonly IReadOnlyList<string> _columns;
+    private readonly bool _hasHeader;
+    private readonly ExcelWriteOptions _options;
+    private readonly Action<ExcelRowWriter, T> _write;
 
-    private ExcelSinkNode(
-        StorageUri uri,
-        ExcelConfiguration? configuration)
+    /// <summary>Creates a sink that writes <typeparamref name="T" />'s readable members as columns.</summary>
+    /// <exception cref="NotSupportedException">A member's type cannot be written to a cell.</exception>
+    public ExcelSinkNode(ExcelWriteOptions options)
+        : base(options)
     {
-        ArgumentNullException.ThrowIfNull(uri);
-        _uri = uri;
-        _configuration = configuration ?? new ExcelConfiguration();
+        var shapeOptions = new RecordShapeOptions { Naming = options.Naming };
+        RecordShape.For<T>(shapeOptions).ThrowIfNotFlat("Excel");
+
+        var plan = RecordWriterPlan.Create<T, ExcelRowWriter>(shapeOptions);
+        _options = options;
+        _columns = CheckColumns(plan.ColumnNames);
+        _write = plan.Write;
+        _hasHeader = options.HasHeader ?? !plan.IsScalar;
     }
 
-    /// <summary>
-    ///     Construct an Excel sink node that resolves a storage provider from a resolver at execution time.
-    ///     Uses attribute-based mapping for automatic property-to-column mapping.
-    /// </summary>
-    /// <param name="uri">The URI of Excel file to write to.</param>
-    /// <param name="resolver">The storage resolver used to obtain storage provider. If <c>null</c>, a default resolver is used.</param>
-    /// <param name="configuration">Optional configuration for Excel writing. If <c>null</c>, default configuration is used.</param>
-    /// <exception cref="ArgumentNullException">Thrown if <paramref name="uri" /> is <c>null</c>.</exception>
-    public ExcelSinkNode(
-        StorageUri uri,
-        IStorageResolver? resolver = null,
-        ExcelConfiguration? configuration = null)
-        : this(uri, configuration)
+    /// <summary>Creates a sink that writes each record with <paramref name="write" />.</summary>
+    /// <param name="options">The sink's options.</param>
+    /// <param name="columns">The header, written when the options call for one.</param>
+    /// <param name="write">Writes one record's cells, in <paramref name="columns" /> order.</param>
+    public ExcelSinkNode(ExcelWriteOptions options, IReadOnlyList<string> columns, Action<ExcelRowWriter, T> write)
+        : base(options)
     {
-        _resolver = resolver ?? DefaultResolver.Value;
-    }
-
-    /// <summary>
-    ///     Construct an Excel sink node that uses a specific storage provider instance.
-    ///     Uses attribute-based mapping for automatic property-to-column mapping.
-    /// </summary>
-    /// <param name="provider">The storage provider to use for writing Excel file.</param>
-    /// <param name="uri">The URI of Excel file to write to.</param>
-    /// <param name="configuration">Optional configuration for Excel writing. If <c>null</c>, default configuration is used.</param>
-    /// <exception cref="ArgumentNullException">Thrown if <paramref name="provider" /> or <paramref name="uri" /> is <c>null</c>.</exception>
-    public ExcelSinkNode(
-        IStorageProvider provider,
-        StorageUri uri,
-        ExcelConfiguration? configuration = null)
-        : this(uri, configuration)
-    {
-        ArgumentNullException.ThrowIfNull(provider);
-        _provider = provider;
+        ArgumentNullException.ThrowIfNull(columns);
+        ArgumentNullException.ThrowIfNull(write);
+        _options = options;
+        _columns = CheckColumns(columns);
+        _write = write;
+        _hasHeader = options.HasHeader ?? true;
     }
 
     /// <inheritdoc />
-    public override async Task ConsumeAsync(IDataStream<T> input, PipelineContext context, CancellationToken cancellationToken)
+    protected override string ConnectorName => "excel";
+
+    /// <inheritdoc />
+    protected override bool SupportsCompression => false;
+
+    /// <inheritdoc />
+    protected override async Task WriteAsync(Stream stream, IAsyncEnumerable<T> items, FileWriteContext context, CancellationToken cancellationToken)
     {
-        var provider = _provider ?? StorageProviderFactory.GetProviderOrThrow(
-            _resolver ?? throw new InvalidOperationException("No storage resolver configured for ExcelSinkNode."),
-            _uri);
+        var output = new ChunkedWriteStream();
 
-        if (provider is IStorageProviderMetadataProvider metaProvider)
+        await using (output.ConfigureAwait(false))
         {
-            var meta = metaProvider.GetMetadata();
+            string? filterRange = null;
 
-            if (!meta.SupportsWrite)
-                throw new UnsupportedStorageCapabilityException(_uri, "write", meta.Name);
-        }
-
-        var stream = await provider.OpenWriteAsync(_uri, cancellationToken).ConfigureAwait(false);
-        await using var streamScope = stream.ConfigureAwait(false);
-        await WriteToExcelStream(stream, input, _configuration, cancellationToken).ConfigureAwait(false);
-    }
-
-    private static async Task WriteToExcelStream(
-        Stream stream,
-        IDataStream<T> source,
-        ExcelConfiguration config,
-        CancellationToken cancellationToken)
-    {
-        var targetStream = stream;
-        var requiresCopyBack = !stream.CanRead || !stream.CanSeek;
-
-        // OpenXML packaging requires a readable, seekable stream. If provider only supplies a write-only stream,
-        // fall back to a temporary buffer and copy the result back to the original stream once complete.
-        if (requiresCopyBack)
-            targetStream = new MemoryStream();
-
-        using (var spreadsheetDocument = SpreadsheetDocument.Create(targetStream, SpreadsheetDocumentType.Workbook))
-        {
-            var workbookPart = spreadsheetDocument.AddWorkbookPart();
-            workbookPart.Workbook = new Workbook();
-
-            var worksheetPart = workbookPart.AddNewPart<WorksheetPart>();
-
-            using (var writer = OpenXmlWriter.Create(worksheetPart))
+            using (var archive = new ZipArchive(output, ZipArchiveMode.Create, true))
             {
-                writer.WriteStartElement(new Worksheet());
-                writer.WriteStartElement(new SheetData());
+                XlsxPackage.WriteLeadingParts(archive);
 
-                var type = typeof(T);
-                var isComplexType = type.IsClass && type != typeof(string);
+                var entry = archive.CreateEntry(XlsxPackage.SheetPath, CompressionLevel.Fastest);
 
-                var valueGetters = isComplexType
-                    ? ExcelWriterMapperBuilder.GetValueGetters<T>()
-                    : Array.Empty<Func<T, object?>>();
-
-                var columnNames = isComplexType
-                    ? ExcelWriterMapperBuilder.GetColumnNames<T>()
-                    : Array.Empty<string>();
-
-                var useMapper = isComplexType && valueGetters.Length > 0;
-
-                uint rowIndex = 1;
-
-                if (config.FirstRowIsHeader && useMapper)
+                using (var entryStream = entry.Open())
+                using (var xml = XmlWriter.Create(entryStream, XlsxSheetWriter.Settings))
                 {
-                    WriteHeaderRow(writer, columnNames, rowIndex);
-                    rowIndex++;
+                    var sheet = new XlsxSheetWriter(xml, _columns.Count);
+                    var row = new ExcelRowWriter(sheet);
+                    sheet.BeginSheet(_options.FreezeHeader && _hasHeader);
+
+                    if (_hasHeader)
+                    {
+                        sheet.BeginRow();
+
+                        foreach (var column in _columns)
+                        {
+                            sheet.WriteText(column, _options.BoldHeader ? XlsxPackage.HeaderStyle : 0);
+                        }
+
+                        sheet.EndRow();
+                    }
+
+                    await foreach (var item in items.WithCancellation(cancellationToken).ConfigureAwait(false))
+                    {
+                        sheet.BeginRow();
+                        _write(row, item);
+                        sheet.EndRow();
+
+                        if (output.Pending >= DrainThresholdBytes)
+                            await output.DrainAsync(stream, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    if (_options.AutoFilter && _hasHeader)
+                        filterRange = sheet.Range(_columns.Count);
+
+                    sheet.EndSheet(filterRange);
                 }
 
-                await foreach (var item in source.WithCancellation(cancellationToken))
-                {
-                    if (item is null)
-                        continue;
-
-                    WriteDataRow(writer, item, valueGetters, useMapper, rowIndex);
-                    rowIndex++;
-                }
-
-                writer.WriteEndElement(); // SheetData
-                writer.WriteEndElement(); // Worksheet
+                XlsxPackage.WriteWorkbook(archive, _options.SheetName, filterRange);
             }
 
-            var sheets = workbookPart.Workbook.AppendChild(new Sheets());
-
-            sheets.Append(new Sheet
-            {
-                Id = workbookPart.GetIdOfPart(worksheetPart),
-                SheetId = 1,
-                Name = config.SheetName ?? "Sheet1",
-            });
-
-            workbookPart.Workbook.Save();
-        }
-
-        if (requiresCopyBack && targetStream is MemoryStream buffer)
-        {
-            buffer.Position = 0;
-            await buffer.CopyToAsync(stream, cancellationToken).ConfigureAwait(false);
-            await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            // Disposing the archive wrote its central directory.
+            await output.DrainAsync(stream, cancellationToken).ConfigureAwait(false);
         }
     }
 
-    private static void WriteHeaderRow(OpenXmlWriter writer, IReadOnlyList<string> columnNames, uint rowIndex)
-    {
-        writer.WriteStartElement(new Row { RowIndex = rowIndex });
-
-        for (var i = 0; i < columnNames.Count; i++)
-        {
-            WriteInlineStringCell(writer, columnNames[i], rowIndex, (uint)(i + 1));
-        }
-
-        writer.WriteEndElement();
-    }
-
-    private static void WriteDataRow(
-        OpenXmlWriter writer,
-        T item,
-        Func<T, object?>[] valueGetters,
-        bool useMapper,
-        uint rowIndex)
-    {
-        writer.WriteStartElement(new Row { RowIndex = rowIndex });
-
-        if (useMapper)
-        {
-            for (var i = 0; i < valueGetters.Length; i++)
-            {
-                var value = valueGetters[i](item);
-                WriteCell(writer, value, rowIndex, (uint)(i + 1));
-            }
-        }
-        else
-            WriteCell(writer, item, rowIndex, 1);
-
-        writer.WriteEndElement();
-    }
-
-    private static void WriteInlineStringCell(OpenXmlWriter writer, string text, uint rowIndex, uint columnIndex)
-    {
-        var cell = new Cell
-        {
-            CellReference = GetCellReference(rowIndex, columnIndex),
-            DataType = CellValues.InlineString,
-        };
-
-        writer.WriteStartElement(cell);
-        writer.WriteElement(new InlineString(new Text(text)));
-        writer.WriteEndElement();
-    }
-
-    private static void WriteCell(OpenXmlWriter writer, object? value, uint rowIndex, uint columnIndex)
-    {
-        var reference = GetCellReference(rowIndex, columnIndex);
-        var (cell, inlineString) = CreateCellValue(value, reference);
-
-        writer.WriteStartElement(cell);
-
-        if (inlineString is not null)
-            writer.WriteElement(inlineString);
-        else if (cell.CellValue is not null)
-            writer.WriteElement(cell.CellValue);
-
-        writer.WriteEndElement();
-    }
-
-    private static (Cell Cell, InlineString? InlineString) CreateCellValue(object? value, string cellReference)
-    {
-        var cell = new Cell
-        {
-            CellReference = cellReference,
-        };
-
-        if (value is null || value == DBNull.Value)
-            return (cell, null);
-
-        switch (value)
-        {
-            case string s:
-                cell.DataType = CellValues.InlineString;
-                return (cell, new InlineString(new Text(s)));
-
-            case bool b:
-                cell.DataType = CellValues.Boolean;
-
-                cell.CellValue = new CellValue(b
-                    ? "1"
-                    : "0");
-
-                return (cell, null);
-
-            case DateTime dt:
-                cell.DataType = CellValues.Number;
-                cell.CellValue = new CellValue(dt.ToOADate().ToString(CultureInfo.InvariantCulture));
-                return (cell, null);
-
-            case DateTimeOffset dto:
-                cell.DataType = CellValues.Number;
-                cell.CellValue = new CellValue(dto.UtcDateTime.ToOADate().ToString(CultureInfo.InvariantCulture));
-                return (cell, null);
-
-            case int i:
-                cell.DataType = CellValues.Number;
-                cell.CellValue = new CellValue(i.ToString(CultureInfo.InvariantCulture));
-                return (cell, null);
-
-            case long l:
-                cell.DataType = CellValues.Number;
-                cell.CellValue = new CellValue(l.ToString(CultureInfo.InvariantCulture));
-                return (cell, null);
-
-            case short s16:
-                cell.DataType = CellValues.Number;
-                cell.CellValue = new CellValue(s16.ToString(CultureInfo.InvariantCulture));
-                return (cell, null);
-
-            case decimal m:
-                cell.DataType = CellValues.Number;
-                cell.CellValue = new CellValue(m.ToString(CultureInfo.InvariantCulture));
-                return (cell, null);
-
-            case double d:
-                cell.DataType = CellValues.Number;
-                cell.CellValue = new CellValue(d.ToString(CultureInfo.InvariantCulture));
-                return (cell, null);
-
-            case float f:
-                cell.DataType = CellValues.Number;
-                cell.CellValue = new CellValue(f.ToString(CultureInfo.InvariantCulture));
-                return (cell, null);
-
-            case uint ui:
-                cell.DataType = CellValues.Number;
-                cell.CellValue = new CellValue(ui.ToString(CultureInfo.InvariantCulture));
-                return (cell, null);
-
-            case ulong ul:
-                cell.DataType = CellValues.Number;
-                cell.CellValue = new CellValue(ul.ToString(CultureInfo.InvariantCulture));
-                return (cell, null);
-
-            case ushort us:
-                cell.DataType = CellValues.Number;
-                cell.CellValue = new CellValue(us.ToString(CultureInfo.InvariantCulture));
-                return (cell, null);
-
-            case Enum e:
-                cell.DataType = CellValues.InlineString;
-                return (cell, new InlineString(new Text(e.ToString())));
-
-            default:
-                cell.DataType = CellValues.InlineString;
-                return (cell, new InlineString(new Text(value.ToString() ?? string.Empty)));
-        }
-    }
-
-    private static string GetCellReference(uint row, uint column)
-    {
-        var columnName = string.Empty;
-        var temp = column;
-
-        while (temp > 0)
-        {
-            temp--;
-            columnName = Convert.ToChar('A' + temp % 26) + columnName;
-            temp /= 26;
-        }
-
-        return $"{columnName}{row}";
-    }
+    private static IReadOnlyList<string> CheckColumns(IReadOnlyList<string> columns) =>
+        columns.Count <= XlsxSheetWriter.MaxColumns
+            ? columns
+            : throw new NotSupportedException($"An Excel sheet holds at most {XlsxSheetWriter.MaxColumns:N0} columns, but the record has {columns.Count:N0}.");
 }

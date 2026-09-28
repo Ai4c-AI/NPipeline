@@ -68,7 +68,7 @@ public sealed class NodeExecutor(
         IDataStream output;
 
         // OpenStream runs synchronously inside this scope, so a source can capture its id (SourceNode.OpenDeadLetterChannel).
-        using (SourceNodeScope.Enter(plan.NodeId))
+        using (NodeScope.Enter(plan.NodeId))
         {
             output = await plan.ExecuteSource!(instance, context, context.CancellationToken).ConfigureAwait(false);
         }
@@ -329,7 +329,11 @@ public sealed class NodeExecutor(
 
         try
         {
-            await plan.ExecuteSink!(instance, effectiveInput, context, context.CancellationToken).ConfigureAwait(false);
+            // The scope flows into ConsumeAsync, so a sink can capture its id (SinkNode.OpenDeadLetterChannel).
+            using (NodeScope.Enter(plan.NodeId))
+            {
+                await plan.ExecuteSink!(instance, effectiveInput, context, context.CancellationToken).ConfigureAwait(false);
+            }
         }
         finally
         {

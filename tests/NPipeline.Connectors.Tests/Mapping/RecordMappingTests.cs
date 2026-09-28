@@ -28,6 +28,15 @@ public sealed class RecordingWriter : IFieldWriter
 public sealed class RecordShapeTests
 {
     [Fact]
+    public void A_flat_format_rejects_members_that_are_not_single_values()
+    {
+        RecordShape.For<Customer>().ThrowIfNotFlat("CSV");
+
+        FluentActions.Invoking(() => RecordShape.For<WithList>().ThrowIfNotFlat("CSV"))
+            .Should().Throw<NotSupportedException>().WithMessage("CSV columns hold single values, but WithList maps Tags (List`1)*");
+    }
+
+    [Fact]
     public void Column_attribute_wins_over_the_naming_policy()
     {
         var shape = RecordShape.For<Customer>(new RecordShapeOptions { Naming = ColumnNamingPolicy.SnakeCaseLower });
@@ -189,13 +198,13 @@ public sealed class RecordBinderTests
     [Fact]
     public void A_bad_value_reports_the_member_and_column()
     {
-        var map = RecordBinder.Bind<Order, TextRowReader>(["Id", "Amount", "Status"]);
+        var map = RecordBinder.Bind<Order, TextRowReader>(["Id", "AMOUNT", "Status"]);
         _reader.Fields = ["1", "1,5", "Active"];
 
         var failure = FluentActions.Invoking(() => map(_reader)).Should().Throw<FieldMappingException>().Which;
 
         failure.Member.Should().Be(nameof(Order.Amount));
-        failure.Column.Should().Be("Amount");
+        failure.Column.Should().Be("AMOUNT", "the column is reported as the file spells it");
         failure.InnerException.Should().BeOfType<FieldConversionException>();
     }
 
@@ -360,4 +369,11 @@ public class BaseRecord
 public sealed class DerivedRecord : BaseRecord
 {
     public string Extra { get; set; } = string.Empty;
+}
+
+public sealed class WithList
+{
+    public int Id { get; set; }
+
+    public List<string> Tags { get; set; } = [];
 }

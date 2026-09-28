@@ -100,6 +100,24 @@ public sealed class RecordShape
     /// <summary>Why the type cannot be constructed from columns, or <c>null</c> when it can. Only reading needs construction.</summary>
     public string? ConstructionError { get; }
 
+    /// <summary>
+    ///     For formats with one scalar value per column (CSV, Excel): throws when a mapped member is not a scalar, naming
+    ///     every such member, so the mistake surfaces when the node is created rather than on the first row.
+    /// </summary>
+    /// <param name="format">The format's name, for the message.</param>
+    /// <exception cref="NotSupportedException">A mapped member's type is not a scalar.</exception>
+    public void ThrowIfNotFlat(string format)
+    {
+        var complex = Members.Where(m => !TypeClassifier.IsScalar(m.Type)).Select(m => $"{m.Name} ({m.Type.Name})").ToList();
+
+        if (complex.Count > 0)
+        {
+            throw new NotSupportedException(
+                $"{format} columns hold single values, but {Type.Name} maps {string.Join(", ", complex)}. " +
+                "Mark those members [IgnoreColumn], or flatten them into scalar members.");
+        }
+    }
+
     /// <summary>The shape of <typeparamref name="T" />.</summary>
     public static RecordShape For<T>(RecordShapeOptions? options = null) => For(typeof(T), options);
 

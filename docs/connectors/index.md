@@ -81,12 +81,11 @@ public void Define(PipelineBuilder builder, PipelineContext context)
 
 ### Storage Provider Integration
 
-File-based connectors (CSV, JSON, Parquet, Excel) read from and write to `IStorageProvider`. This means the same connector code works with local files, S3, Azure Blob, GCS, or SFTP:
+File-based connectors (CSV, JSON, Parquet, Excel) read from and write to `IStorageProvider`. This means the same connector code works with local files, S3, Azure Blob, GCS, or SFTP. Globs, compression, atomic writes and row errors are described in [File Connectors: Shared Behaviour](file-connectors.md).
 
 ```csharp
-var config = new JsonConfiguration { Format = JsonFormat.NewlineDelimited };
 var storageProvider = new AwsS3StorageProvider(s3Options);
-var source = new JsonSourceNode<Order>(config, storageProvider, new StorageUri("s3://bucket/orders.ndjson"));
+var source = JsonConnector.Source<Order>(StorageUri.Parse("s3://bucket/orders.ndjson"), o => o with { Provider = storageProvider });
 ```
 
 > 🔗 **See also:** [Storage Providers](../storage-providers/index.md) for choosing and configuring storage backends.

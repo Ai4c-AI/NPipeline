@@ -2,8 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using System.Text.Json.Nodes;
-using NPipeline.Connectors.Http.Configuration;
-using NPipeline.Connectors.Http.Nodes;
+using NPipeline.Connectors.Http;
 
 namespace NPipeline.Connectors.RoundTrip.Tests.Harnesses;
 
@@ -79,13 +78,13 @@ public sealed class HttpHarness : ConnectorHarness
 
     public override async Task WriteAsync<T>(IReadOnlyList<T> items, CancellationToken cancellationToken = default)
     {
-        var sink = new HttpSinkNode<T>(new HttpSinkConfiguration { Uri = FakeJsonApi.BaseUri, BatchSize = BatchSize }, CreateClient());
+        var sink = HttpConnector.Sink<T>(FakeJsonApi.BaseUri, CreateClient(), o => o with { BatchSize = BatchSize });
         await NodeRunner.WriteAsync(sink, items, cancellationToken);
     }
 
     public override Task<List<T>> ReadAsync<T>(CancellationToken cancellationToken = default)
     {
-        var source = new HttpSourceNode<T>(new HttpSourceConfiguration { BaseUri = FakeJsonApi.BaseUri }, CreateClient());
+        var source = HttpConnector.Source<T>(FakeJsonApi.BaseUri, CreateClient());
         return NodeRunner.ReadAsync(source, cancellationToken);
     }
 }

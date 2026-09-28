@@ -142,7 +142,7 @@ public sealed class SalesIngestionPipeline : IPipelineDefinition
     public void Define(PipelineBuilder builder, PipelineContext context)
     {
         var source = builder.AddSource(
-            new CsvSourceNode<SalesRecord>(StorageUri.FromFilePath("daily-sales.csv")),
+            CsvConnector.Source<SalesRecord>(StorageUri.FromFilePath("daily-sales.csv")),
             "csv-source");
 
         var partitionSpec = new PartitionSpec<SalesRecord>()

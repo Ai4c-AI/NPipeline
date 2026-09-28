@@ -1,203 +1,146 @@
-using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
 using CsvHelper;
-using NPipeline.Connectors.Csv.Mapping;
-using NPipeline.DataFlow;
-using NPipeline.DataFlow.DataStreams;
-using NPipeline.Nodes;
-using NPipeline.Pipeline;
-using NPipeline.StorageProviders;
-using NPipeline.StorageProviders.Abstractions;
-using NPipeline.StorageProviders.Exceptions;
-using NPipeline.StorageProviders.Models;
+using NPipeline.Connectors.Files;
+using NPipeline.Connectors.Mapping;
 
 namespace NPipeline.Connectors.Csv;
 
 /// <summary>
-///     Source node that reads CSV data using a pluggable <see cref="IStorageProvider" />.
+///     Reads CSV files into records. Columns bind to members by name, case-insensitively, once per file; values convert
+///     strictly, so a value that does not fit its member is a row error rather than a default.
 /// </summary>
-/// <typeparam name="T">Type emitted for each CSV row.</typeparam>
-public sealed class CsvSourceNode<T> : SourceNode<T>
+/// <typeparam name="T">The record type, or a scalar type (<c>string</c>, <c>int</c>, <c>DateTime</c>…) for a single-column file.</typeparam>
+/// <remarks>
+///     The options' <see cref="FileNodeOptions.Uri" /> can name a file, a directory (ending in <c>/</c>, which reads its
+///     <c>.csv</c> files) or a glob. Files ending in <c>.gz</c>, <c>.br</c> or <c>.zz</c> are decompressed.
+/// </remarks>
+public sealed class CsvSourceNode<T> : FileSourceNode<T>
 {
-    private static readonly Lazy<IStorageResolver> DefaultResolver = new(
-        () => StorageProviderFactory.CreateResolver(),
-        LazyThreadSafetyMode.ExecutionAndPublication);
+    private static readonly Encoding DefaultEncoding = new UTF8Encoding(false);
 
-    private readonly CsvConfiguration _csvConfiguration;
-    private readonly Encoding _encoding;
-    private readonly IStorageProvider? _provider;
-    private readonly IStorageResolver? _resolver;
-    private readonly Func<CsvRow, T> _rowMapper;
-    private readonly StorageUri _uri;
+    private readonly RecordBindingOptions _binding;
+    private readonly IReadOnlyList<string> _declaredColumns;
+    private readonly bool _hasHeader;
+    private readonly Func<CsvRow, T>? _map;
+    private readonly CsvReadOptions _options;
 
-    private CsvSourceNode(
-        StorageUri uri,
-        CsvConfiguration? configuration,
-        Encoding? encoding,
-        Func<CsvRow, T> rowMapper)
+    /// <summary>Creates a source that maps columns to <typeparamref name="T" />'s members by name.</summary>
+    /// <exception cref="NotSupportedException">A mapped member's type cannot be read from a CSV field.</exception>
+    public CsvSourceNode(CsvReadOptions options)
+        : this(options, null, true)
     {
-        ArgumentNullException.ThrowIfNull(uri);
-        ArgumentNullException.ThrowIfNull(rowMapper);
-        _uri = uri;
-
-        _csvConfiguration = configuration ?? new CsvConfiguration(CultureInfo.InvariantCulture);
-
-        // Set DetectDelimiter on the underlying CsvHelper configuration
-        _csvConfiguration.HelperConfiguration.DetectDelimiter = true;
-
-        _encoding = encoding ?? new UTF8Encoding(false);
-        _rowMapper = rowMapper;
     }
 
-    /// <summary>
-    ///     Construct a CSV source that uses attribute-based mapping.
-    ///     Properties are mapped using CsvColumnAttribute or convention (PascalCase to lowercase).
-    /// </summary>
-    /// <param name="uri">The URI of the CSV file to read from.</param>
-    /// <param name="resolver">
-    ///     The storage resolver used to obtain the storage provider. If <c>null</c>, a default resolver
-    ///     created by <see cref="StorageProviderFactory.CreateResolver" /> is used.
-    /// </param>
-    /// <param name="configuration">Optional configuration for CSV reading. If <c>null</c>, default configuration is used.</param>
-    /// <param name="encoding">Optional text encoding. If <c>null</c>, UTF-8 without BOM is used.</param>
-    /// <exception cref="ArgumentNullException">Thrown if <paramref name="uri" /> is <c>null</c>.</exception>
-    public CsvSourceNode(
-        StorageUri uri,
-        IStorageResolver? resolver = null,
-        CsvConfiguration? configuration = null,
-        Encoding? encoding = null)
-        : this(uri, configuration, encoding, CsvMapperBuilder.Build<T>())
+    /// <summary>Creates a source that builds each record with <paramref name="map" />.</summary>
+    /// <param name="options">The source's options.</param>
+    /// <param name="map">Builds a record from the current row. An exception it throws is a row error.</param>
+    public CsvSourceNode(CsvReadOptions options, Func<CsvRow, T> map)
+        : this(options, map ?? throw new ArgumentNullException(nameof(map)), false)
     {
-        _resolver = resolver;
     }
 
-    /// <summary>
-    ///     Construct a CSV source that uses a specific storage provider with attribute-based mapping.
-    ///     Properties are mapped using CsvColumnAttribute or convention (PascalCase to lowercase).
-    /// </summary>
-    public CsvSourceNode(
-        IStorageProvider provider,
-        StorageUri uri,
-        CsvConfiguration? configuration = null,
-        Encoding? encoding = null)
-        : this(uri, configuration, encoding, CsvMapperBuilder.Build<T>())
+    private CsvSourceNode(CsvReadOptions options, Func<CsvRow, T>? map, bool bindMembers)
+        : base(options)
     {
-        ArgumentNullException.ThrowIfNull(provider);
-        _provider = provider;
-    }
+        _options = options;
+        _map = map;
+        _binding = new RecordBindingOptions { Shape = new RecordShapeOptions { Naming = options.Naming }, MissingColumns = options.MissingColumns };
 
-    /// <summary>
-    ///     Construct a CSV source that resolves a storage provider from a resolver at execution time.
-    /// </summary>
-    /// <param name="uri">The URI of the CSV file to read from.</param>
-    /// <param name="resolver">
-    ///     The storage resolver used to obtain the storage provider. If <c>null</c>, a default resolver
-    ///     created by <see cref="StorageProviderFactory.CreateResolver" /> is used.
-    /// </param>
-    /// <param name="rowMapper">Row mapper used to construct <typeparamref name="T" /> from a <see cref="CsvRow" />.</param>
-    /// <param name="configuration">Optional configuration for CSV reading. If <c>null</c>, default configuration is used.</param>
-    /// <param name="encoding">Optional text encoding. If <c>null</c>, UTF-8 without BOM is used.</param>
-    /// <exception cref="ArgumentNullException">Thrown if <paramref name="uri" /> is <c>null</c>.</exception>
-    public CsvSourceNode(
-        StorageUri uri,
-        Func<CsvRow, T> rowMapper,
-        IStorageResolver? resolver = null,
-        CsvConfiguration? configuration = null,
-        Encoding? encoding = null)
-        : this(uri, configuration, encoding, rowMapper)
-    {
-        _resolver = resolver;
-    }
+        var shape = RecordShape.For<T>(_binding.Shape);
 
-    /// <summary>
-    ///     Construct a CSV source that uses a specific storage provider.
-    /// </summary>
-    public CsvSourceNode(
-        IStorageProvider provider,
-        StorageUri uri,
-        Func<CsvRow, T> rowMapper,
-        CsvConfiguration? configuration = null,
-        Encoding? encoding = null)
-        : this(uri, configuration, encoding, rowMapper)
-    {
-        ArgumentNullException.ThrowIfNull(provider);
-        _provider = provider;
+        // A manual mapper reads the file however it likes, so only member binding infers "no header" from a scalar T.
+        _hasHeader = options.HasHeader ?? !(bindMembers && shape.IsScalar);
+        _declaredColumns = shape.Members.Select(m => m.ColumnName).ToArray();
+
+        if (bindMembers)
+            shape.ThrowIfNotFlat("CSV");
     }
 
     /// <inheritdoc />
-    public override IDataStream<T> OpenStream(PipelineContext context, CancellationToken cancellationToken)
+    protected override string ConnectorName => "csv";
+
+    /// <inheritdoc />
+    protected override IReadOnlyList<string> DirectoryFileExtensions { get; } = [".csv", ".csv.gz", ".csv.br", ".csv.zz"];
+
+    /// <inheritdoc />
+    protected override async IAsyncEnumerable<T> ReadAsync(Stream stream, FileReadContext context, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var provider = _provider ?? StorageProviderFactory.GetProviderOrThrow(
-            _resolver ?? DefaultResolver.Value,
-            _uri);
+        BadDataFoundArgs? badData = null;
+        var configuration = CreateConfiguration(args => badData ??= args);
 
-        if (provider is IStorageProviderMetadataProvider metaProvider)
+        using var text = new StreamReader(stream, _options.Encoding ?? DefaultEncoding, true, _options.BufferSize, true);
+        using var parser = new CsvParser(text, configuration, true);
+
+        IReadOnlyList<string> columns = _declaredColumns;
+
+        if (_hasHeader)
         {
-            var meta = metaProvider.GetMetadata();
-
-            if (!meta.SupportsRead)
-                throw new UnsupportedStorageCapabilityException(_uri, "read", meta.Name);
-        }
-
-        var stream = Read(provider, _uri, _csvConfiguration, _encoding, cancellationToken);
-        return new DataStream<T>(stream, $"CsvSourceNode<{typeof(T).Name}>");
-    }
-
-    private async IAsyncEnumerable<T> Read(
-        IStorageProvider provider,
-        StorageUri uri,
-        CsvConfiguration cfg,
-        Encoding encoding,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
-    {
-        // Open the stream per-enumeration so disposal is bound to consumer lifetime
-        var stream = await provider.OpenReadAsync(uri, cancellationToken).ConfigureAwait(false);
-        await using var streamScope = stream.ConfigureAwait(false);
-        using var reader = new StreamReader(stream, encoding, true);
-        using var csv = new CsvReader(reader, cfg.HelperConfiguration);
-
-        var hasHeaders = cfg.HelperConfiguration.HasHeaderRecord;
-        var headers = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-
-        if (hasHeaders)
-        {
-            if (!await csv.ReadAsync().ConfigureAwait(false))
+            if (!await parser.ReadAsync().ConfigureAwait(false))
                 yield break;
 
-            _ = csv.ReadHeader();
-            var headerRecord = csv.HeaderRecord ?? [];
-
-            for (var i = 0; i < headerRecord.Length; i++)
-            {
-                var header = headerRecord[i];
-
-                if (!string.IsNullOrWhiteSpace(header))
-                    _ = headers.TryAdd(header, i); // first occurrence wins, as with CsvHelper's name lookup
-            }
+            columns = parser.Record ?? [];
+            badData = null;
         }
 
-        while (await csv.ReadAsync().ConfigureAwait(false))
+        // Bound once per file: files with the same header share one compiled mapper.
+        var mapper = _map is null ? RecordBinder.Bind<T, CsvFieldReader>(columns, _binding) : null;
+        var fields = new CsvFieldReader(parser, _options.Culture);
+        var row = _map is null ? null : new CsvRow(parser, _hasHeader ? columns : [], _options.Culture);
+        long recordNumber = 0;
+
+        while (await parser.ReadAsync().ConfigureAwait(false))
         {
-            T? record;
-            var row = new CsvRow(csv, headers, hasHeaders);
+            cancellationToken.ThrowIfCancellationRequested();
+            recordNumber++;
+            T item = default!;
+            Exception? error = null;
+            badData = null;
 
             try
             {
-                record = _rowMapper(row);
+                if (mapper is not null)
+                    item = mapper(fields);
+                else
+                {
+                    row!.RecordNumber = recordNumber;
+                    item = _map!(row);
+                }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                var handler = cfg.RowErrorHandler;
-
-                if (handler is not null && handler(ex, row))
-                    continue; // handler opted to swallow
-
-                throw;
+                error = ex;
             }
 
-            if (record is not null)
-                yield return record;
+            // CsvHelper parses a field when it is read, so bad quoting surfaces during mapping, and only in fields the
+            // record uses.
+            if (badData is { } bad)
+                error = new BadDataException(bad.Field, bad.RawRecord, bad.Context, $"Field '{bad.Field}' has a quote in an unquoted field or text after a closing quote.");
+
+            if (error is not null)
+            {
+                await context.HandleRowErrorAsync(recordNumber, error, parser.RawRecord, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            yield return item;
         }
+    }
+
+    private CsvHelper.Configuration.CsvConfiguration CreateConfiguration(BadDataFound badDataFound)
+    {
+        var configuration = new CsvHelper.Configuration.CsvConfiguration(_options.Culture)
+        {
+            Delimiter = _options.Delimiter,
+            DetectDelimiter = _options.DetectDelimiter,
+            Quote = _options.Quote,
+            HasHeaderRecord = _hasHeader,
+            TrimOptions = _options.Trim,
+            BufferSize = _options.BufferSize,
+            BadDataFound = badDataFound,
+        };
+
+        _options.ConfigureCsvHelper?.Invoke(configuration);
+        return configuration;
     }
 }

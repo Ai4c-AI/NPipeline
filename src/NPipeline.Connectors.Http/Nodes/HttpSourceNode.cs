@@ -1,14 +1,18 @@
-using System.Diagnostics;
-using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using NPipeline.Connectors.Diagnostics;
+using NPipeline.Connectors.Errors;
 using NPipeline.Connectors.Http.Configuration;
 using NPipeline.Connectors.Http.Metrics;
+using NPipeline.Connectors.Http.Pagination;
 using NPipeline.Connectors.Http.Reliability;
 using NPipeline.DataFlow;
 using NPipeline.DataFlow.DataStreams;
+using NPipeline.ErrorHandling;
 using NPipeline.Nodes;
 using NPipeline.Pipeline;
 using NResilience;
@@ -16,74 +20,80 @@ using NResilience;
 namespace NPipeline.Connectors.Http.Nodes;
 
 /// <summary>
-///     A source node that fetches items from a REST API, following pagination until all pages are exhausted.
-///     Supports auth, retry, rate limiting and observability via pluggable abstractions.
+///     A source that reads items from a REST API, following pagination until the last page. Each page's body is read
+///     once and parsed once; its items are deserialized one by one, so an item that does not convert is a row error.
 /// </summary>
-/// <typeparam name="T">The item type to deserialise from the API response.</typeparam>
+/// <typeparam name="T">The item type.</typeparam>
 public sealed partial class HttpSourceNode<T> : SourceNode<T>, IAsyncDisposable
 {
-    private readonly HttpSourceConfiguration _configuration;
+    private const int BodyExcerptBytes = 512;
+
     private readonly HttpClient _httpClient;
+    private readonly string[]? _itemsPath;
+    private readonly JsonTypeInfo<List<T>>? _listTypeInfo;
     private readonly ILogger<HttpSourceNode<T>> _logger;
     private readonly IHttpConnectorMetrics _metrics;
+    private readonly HttpSourceOptions<T> _options;
     private readonly bool _ownsClient;
     private readonly ResilientHttpSender _sender;
+    private readonly JsonReaderOptions _readerOptions;
+    private readonly JsonTypeInfo<T> _typeInfo;
 
     // The node fetches one page at a time, so the retry listener reads the request in flight from here.
-    private Uri? _currentUri;
+    private string? _currentEndpoint;
 
-    /// <summary>Creates a new instance sourcing an <see cref="HttpClient" /> from the provided factory.</summary>
-    public HttpSourceNode(HttpSourceConfiguration configuration, IHttpClientFactory httpClientFactory)
-        : this(configuration, httpClientFactory, NullHttpConnectorMetrics.Instance)
-    {
-    }
-
-    /// <summary>Creates a new instance with full dependency injection.</summary>
+    /// <summary>Creates a source that uses a client from <paramref name="httpClientFactory" /> (<see cref="HttpSourceOptions{T}.HttpClientName" />).</summary>
     public HttpSourceNode(
-        HttpSourceConfiguration configuration,
+        HttpSourceOptions<T> options,
         IHttpClientFactory httpClientFactory,
-        IHttpConnectorMetrics metrics,
+        IHttpConnectorMetrics? metrics = null,
         ILogger<HttpSourceNode<T>>? logger = null)
-        : this(
-            configuration,
-            CreateClient(configuration, httpClientFactory),
-            metrics,
-            logger,
-            true)
+        : this(options, CreateClient(options, httpClientFactory), metrics, logger, true)
     {
     }
 
-    /// <summary>
-    ///     Creates a new instance with a raw <see cref="HttpClient" />.
-    ///     Useful in tests and minimal-host scenarios that do not use <see cref="IHttpClientFactory" />.
-    /// </summary>
+    /// <summary>Creates a source that uses <paramref name="httpClient" />, which the caller keeps ownership of.</summary>
     public HttpSourceNode(
-        HttpSourceConfiguration configuration,
+        HttpSourceOptions<T> options,
         HttpClient httpClient,
         IHttpConnectorMetrics? metrics = null,
         ILogger<HttpSourceNode<T>>? logger = null)
-        : this(configuration, httpClient, metrics ?? NullHttpConnectorMetrics.Instance, logger, false)
+        : this(options, httpClient, metrics, logger, false)
     {
     }
 
     private HttpSourceNode(
-        HttpSourceConfiguration configuration,
+        HttpSourceOptions<T> options,
         HttpClient httpClient,
-        IHttpConnectorMetrics metrics,
+        IHttpConnectorMetrics? metrics,
         ILogger<HttpSourceNode<T>>? logger,
         bool ownsClient)
     {
-        _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
-        _configuration.Validate();
+        ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
 
+        _options = options;
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
-        _metrics = metrics ?? throw new ArgumentNullException(nameof(metrics));
+        _metrics = metrics ?? NullHttpConnectorMetrics.Instance;
         _logger = logger ?? NullLogger<HttpSourceNode<T>>.Instance;
         _ownsClient = ownsClient;
+        _itemsPath = options.ItemsJsonPath is null ? null : HttpJsonPath.Parse(options.ItemsJsonPath);
+        _typeInfo = options.TypeInfo ?? HttpJsonDefaults.TypeInfo<T>(options.JsonOptions);
+
+        // The serializer's own reading rules (comments, trailing commas) apply to the whole body.
+        _readerOptions = new JsonReaderOptions
+        {
+            AllowTrailingCommas = _typeInfo.Options.AllowTrailingCommas,
+            CommentHandling = _typeInfo.Options.ReadCommentHandling,
+            MaxDepth = _typeInfo.Options.MaxDepth,
+        };
+
+        // Source-generated metadata may not include List<T>; then every page takes the item-by-item path.
+        _listTypeInfo = _typeInfo.Options.TryGetTypeInfo(typeof(List<T>), out var listTypeInfo) ? listTypeInfo as JsonTypeInfo<List<T>> : null;
 
         // The source reads every page whole, so the body is read inside the attempt: a body that breaks off
         // part-way is retried like any other transient failure.
-        _sender = new ResilientHttpSender(_httpClient, _configuration.Resilience, true, _metrics, OnResilienceEvent);
+        _sender = new ResilientHttpSender(_httpClient, options.Resilience, true, _metrics, OnResilienceEvent, options.RateLimiter, options.MaxResponseBytes);
     }
 
     /// <inheritdoc />
@@ -100,129 +110,241 @@ public sealed partial class HttpSourceNode<T> : SourceNode<T>, IAsyncDisposable
     /// <inheritdoc />
     public override IDataStream<T> OpenStream(PipelineContext context, CancellationToken cancellationToken)
     {
-        var stream = FetchAllPagesAsync(cancellationToken);
-        return new DataStream<T>(stream, $"HttpSourceNode<{typeof(T).Name}>");
+        var deadLetters = OpenDeadLetterChannel(context);
+        return new DataStream<T>(FetchAllPagesAsync(deadLetters, cancellationToken), $"HttpSourceNode<{typeof(T).Name}>");
     }
 
-    private async IAsyncEnumerable<T> FetchAllPagesAsync(
-        [EnumeratorCancellation] CancellationToken cancellationToken)
+    private async IAsyncEnumerable<T> FetchAllPagesAsync(DeadLetterChannel deadLetters, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var uri = _configuration.Pagination.BuildFirstPageUri(_configuration.BaseUri);
-        var pageNumber = 0;
+        // Pagination state belongs to this run, so one options instance can serve concurrent runs.
+        var cursor = _options.Pagination.Start(_options.BaseUri);
+        var run = new RunState(deadLetters);
+        Uri? uri = cursor.FirstPageUri;
 
-        var jsonOptions = _configuration.JsonOptions ?? HttpJsonDefaults.Options;
-
-        while (true)
+        while (uri is not null)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (_configuration.MaxPages.HasValue && pageNumber >= _configuration.MaxPages.Value)
+            if (_options.MaxPages is { } maxPages && run.Pages >= maxPages)
             {
-                LogMaxPagesReached(_logger, typeof(T).Name, _configuration.MaxPages.Value);
+                LogMaxPagesReached(_logger, typeof(T).Name, maxPages);
                 yield break;
             }
 
-            var waitStart = Stopwatch.GetTimestamp();
-            await _configuration.RateLimiter.WaitAsync(cancellationToken).ConfigureAwait(false);
+            var (items, next) = await ReadPageAsync(uri, cursor, run, cancellationToken).ConfigureAwait(false);
 
-            _metrics.RecordRateLimitWait(
-                uri.ToString(),
-                Stopwatch.GetElapsedTime(waitStart));
+            foreach (var item in items)
+            {
+                yield return item;
+            }
 
-            HttpResponseMessage response;
+            if (next is not null && next == uri)
+                throw new HttpSourceException($"Pagination returned the page it had just read ({HttpRedaction.Full(uri)}), which would never end.");
+
+            uri = next;
+        }
+    }
+
+    private async Task<(List<T> Items, Uri? Next)> ReadPageAsync(Uri uri, IPaginationCursor cursor, RunState run, CancellationToken cancellationToken)
+    {
+        var endpoint = HttpRedaction.Endpoint(uri);
+        HttpResponseMessage response;
+
+        try
+        {
+            response = await SendAsync(uri, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _metrics.RecordError(endpoint, _options.RequestMethod.Method, ex);
+            throw;
+        }
+
+        using (response)
+        {
+            using var body = new HttpPageBody(await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false), _readerOptions);
+            run.Pages++;
+
+            // The items array is found with a forward-only reader and deserialized from its bytes in one call; the body is
+            // parsed into a document only if the pagination strategy or an error message needs it.
+            FindItems(body, uri, run.Pages, response);
+            var source = HttpRedaction.Full(uri);
+            var (items, count) = await DeserializeAsync(body, run, source, cancellationToken).ConfigureAwait(false);
+            run.Items += count;
+            _metrics.RecordPageFetched(endpoint, items.Count);
+            ConnectorDiagnostics.RecordRowsRead("http", uri.Scheme, items.Count);
+            LogPageFetched(_logger, typeof(T).Name, run.Pages, items.Count, source);
+
+            var next = cursor.GetNextPageUri(new HttpPageContext(uri, run.Pages, response, body, count, run.Items));
+            return (items, next);
+        }
+    }
+
+    /// <summary>Checks that the page has an items array, failing with what the page holds when it does not.</summary>
+    private void FindItems(HttpPageBody body, Uri uri, int page, HttpResponseMessage response)
+    {
+        bool found;
+
+        try
+        {
+            found = body.TryFindArray(_itemsPath, out _);
+        }
+        catch (JsonException ex)
+        {
+            // Typically an HTML error page returned with 200.
+            var excerpt = Encoding.UTF8.GetString(body.Bytes, 0, Math.Min(body.Bytes.Length, BodyExcerptBytes));
+
+            throw new HttpSourceException(
+                $"Page {page} from {HttpRedaction.Full(uri)} is not JSON ({response.Content.Headers.ContentType?.ToString() ?? "no content type"}): {ex.Message} " +
+                $"The body starts: {excerpt}", ex);
+        }
+
+        if (!found)
+            throw DescribeMissingItems(body.Root, uri, page);
+    }
+
+    /// <summary>
+    ///     Deserializes a page's items. The whole array goes in one call, which is much cheaper per item; only when that
+    ///     fails is the page read again item by item, so the bad items become row errors and the good ones are kept.
+    /// </summary>
+    private async ValueTask<(List<T> Items, int Count)> DeserializeAsync(HttpPageBody body, RunState run, string source, CancellationToken cancellationToken)
+    {
+        if (_listTypeInfo is not null && DeserializeAll(body) is { } all)
+        {
+            var count = all.Count;
+            run.Records += count;
+
+            // Null elements are not items, as on the item-by-item path.
+            _ = all.RemoveAll(static item => item is null);
+            return (all, count);
+        }
+
+        _ = body.TryFindArray(_itemsPath, out var reader);
+        var elements = HttpPageBody.FindElements(reader);
+        var items = new List<T>(elements.Count);
+
+        foreach (var element in elements)
+        {
+            run.Records++;
+            T? item = default;
+            JsonException? error = null;
 
             try
             {
-                response = await SendAsync(uri, cancellationToken).ConfigureAwait(false);
+                item = JsonSerializer.Deserialize(body.Bytes.AsSpan(element), _typeInfo);
             }
-            catch (Exception ex)
+            catch (JsonException ex)
             {
-                _metrics.RecordError(uri.ToString(), _configuration.RequestMethod.Method, ex);
-                throw;
+                error = ex;
             }
 
-            using (response)
-            {
-                // Enforce response size limit
-                if (_configuration.MaxResponseBytes.HasValue)
-                {
-                    var contentLength = response.Content.Headers.ContentLength;
-
-                    if (contentLength.HasValue && contentLength.Value > _configuration.MaxResponseBytes.Value)
-                    {
-                        throw new InvalidOperationException(
-                            $"HttpSourceNode<{typeof(T).Name}>: response from {uri} has Content-Length " +
-                            $"{contentLength.Value} bytes which exceeds MaxResponseBytes limit of " +
-                            $"{_configuration.MaxResponseBytes.Value}.");
-                    }
-
-                    await EnsureResponseBodyWithinLimitAsync(
-                        response,
-                        _configuration.MaxResponseBytes.Value,
-                        cancellationToken).ConfigureAwait(false);
-                }
-
-                pageNumber++;
-
-                var items = await DeserializeItemsAsync(response, jsonOptions, cancellationToken)
-                    .ConfigureAwait(false);
-
-                _metrics.RecordPageFetched(uri.ToString(), items.Count);
-                LogPageFetched(_logger, typeof(T).Name, pageNumber, items.Count, uri);
-
-                foreach (var item in items)
-                {
-                    yield return item;
-                }
-
-                var nextUri = await _configuration.Pagination
-                    .GetNextPageUriAsync(uri, response, items.Count, cancellationToken)
-                    .ConfigureAwait(false);
-
-                if (nextUri == null)
-                    yield break;
-
-                uri = nextUri;
-            }
+            if (error is not null)
+                await HandleRowErrorAsync(run, source, error, body.Bytes, element, cancellationToken).ConfigureAwait(false);
+            else if (item is not null)
+                items.Add(item);
         }
+
+        return (items, elements.Count);
+    }
+
+    /// <summary>The page's items in one call, or <c>null</c> when one of them does not convert.</summary>
+    private List<T>? DeserializeAll(HttpPageBody body)
+    {
+        _ = body.TryFindArray(_itemsPath, out var reader);
+
+        try
+        {
+            return JsonSerializer.Deserialize(body.ArrayBytes(reader, _itemsPath is null or { Length: 0 }), _listTypeInfo!);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private HttpSourceException DescribeMissingItems(JsonElement root, Uri uri, int page)
+    {
+        if (_itemsPath is null)
+        {
+            return new HttpSourceException(
+                $"Page {page} from {HttpRedaction.Full(uri)} is {Describe(root.ValueKind)}, not an array. Set ItemsJsonPath to the items array: " +
+                $"{HttpJsonPath.Describe(root, [])}.");
+        }
+
+        return HttpJsonPath.TryResolve(root, _itemsPath, out var found)
+            ? new HttpSourceException(
+                $"ItemsJsonPath '{_options.ItemsJsonPath}' on page {page} from {HttpRedaction.Full(uri)} is {Describe(found.ValueKind)}, not an array.")
+            : new HttpSourceException(
+                $"ItemsJsonPath '{_options.ItemsJsonPath}' was not found on page {page} from {HttpRedaction.Full(uri)}; {HttpJsonPath.Describe(root, _itemsPath)}.");
+    }
+
+    private async ValueTask HandleRowErrorAsync(RunState run, string source, JsonException exception, byte[] body, Range item, CancellationToken cancellationToken)
+    {
+        var field = exception.Path is { Length: > 1 } path ? path : null;
+        var error = new RowError(source, run.Records, field, Excerpt(body.AsSpan(item)), exception);
+        var action = _options.RowErrorHandler?.Invoke(error) ?? RowErrorAction.Fail;
+
+        ConnectorDiagnostics.RecordRowError("http", _options.BaseUri.Scheme, action.ToString().ToLowerInvariant());
+
+        switch (action)
+        {
+            case RowErrorAction.Skip:
+                return;
+            case RowErrorAction.DeadLetter:
+                await run.DeadLetters.SendAsync(new ConnectorRecordFailure(source, run.Records, field, error.RawExcerpt), exception, cancellationToken)
+                    .ConfigureAwait(false);
+
+                return;
+            default:
+                throw new RecordMappingException(error);
+        }
+    }
+
+    private string? Excerpt(ReadOnlySpan<byte> item)
+    {
+        if (_options.RawExcerptLength == 0)
+            return null;
+
+        var raw = Encoding.UTF8.GetString(item[..Math.Min(item.Length, (_options.RawExcerptLength * 4) + 4)]);
+        return raw.Length <= _options.RawExcerptLength ? raw : string.Concat(raw.AsSpan(0, _options.RawExcerptLength), "…");
     }
 
     private async Task<HttpResponseMessage> SendAsync(Uri uri, CancellationToken cancellationToken)
     {
-        using var request = BuildRequest(uri);
+        using var request = new HttpRequestMessage(_options.RequestMethod, uri);
+
+        foreach (var (key, value) in _options.Headers)
+        {
+            _ = request.Headers.TryAddWithoutValidation(key, value);
+        }
+
+        if (_options.RequestBodyFactory is { } bodyFactory)
+            request.Content = bodyFactory(uri);
 
         // A source only reads, so its request is safe to repeat even when it is a POST that carries a query.
         _ = request.MarkRepeatable();
 
-        await _configuration.Auth.ApplyAsync(request, cancellationToken).ConfigureAwait(false);
+        await _options.Auth.ApplyAsync(request, cancellationToken).ConfigureAwait(false);
 
-        if (_configuration.RequestCustomizer != null)
-            await _configuration.RequestCustomizer(request, cancellationToken).ConfigureAwait(false);
+        if (_options.RequestCustomizer is { } customize)
+            await customize(request, cancellationToken).ConfigureAwait(false);
 
-        LogSendingRequest(_logger, typeof(T).Name, _configuration.RequestMethod.Method, uri);
-        _currentUri = uri;
+        var described = HttpRedaction.Full(request.RequestUri ?? uri);
+        LogSendingRequest(_logger, typeof(T).Name, _options.RequestMethod.Method, described);
+        _currentEndpoint = HttpRedaction.Endpoint(uri);
 
         var response = await _sender.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
         if (response.IsSuccessStatusCode)
-        {
-            // The resilience handler has already read the body into memory, but as a stream that can be read once.
-            // Deserialization and pagination strategies both read it, so make it re-readable. This copies from memory.
-#if NET9_0_OR_GREATER
-            await response.Content.LoadIntoBufferAsync(cancellationToken).ConfigureAwait(false);
-#else
-            await response.Content.LoadIntoBufferAsync().ConfigureAwait(false);
-#endif
             return response;
-        }
 
         using (response)
         {
             var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
             throw new HttpRequestException(
-                $"HttpSourceNode<{typeof(T).Name}>: request to {uri} failed with " +
-                $"{(int)response.StatusCode} {response.ReasonPhrase}. Body: {Truncate(body, 512)}",
+                $"HttpSourceNode<{typeof(T).Name}>: {_options.RequestMethod.Method} {described} failed with " +
+                $"{(int)response.StatusCode} {response.ReasonPhrase}. Body: {Truncate(body, BodyExcerptBytes)}",
                 null,
                 response.StatusCode);
         }
@@ -230,142 +352,60 @@ public sealed partial class HttpSourceNode<T> : SourceNode<T>, IAsyncDisposable
 
     private void OnResilienceEvent(CallEvent callEvent)
     {
-        if (callEvent.Kind != CallEventKind.Retrying || _currentUri is not { } uri)
+        if (callEvent.Kind != CallEventKind.Retrying || _currentEndpoint is not { } endpoint)
             return;
 
-        _metrics.RecordRetry(uri.ToString(), _configuration.RequestMethod.Method, callEvent.AttemptNumber);
-        LogRetrying(_logger, typeof(T).Name, callEvent.AttemptNumber, uri);
+        _metrics.RecordRetry(endpoint, _options.RequestMethod.Method, callEvent.AttemptNumber);
+        LogRetrying(_logger, typeof(T).Name, callEvent.AttemptNumber, endpoint);
     }
 
-    private HttpRequestMessage BuildRequest(Uri uri)
-    {
-        var request = new HttpRequestMessage(_configuration.RequestMethod, uri);
-
-        foreach (var (key, value) in _configuration.Headers)
+    private static string Describe(JsonValueKind kind) =>
+        kind switch
         {
-            request.Headers.TryAddWithoutValidation(key, value);
-        }
-
-        if (_configuration.RequestBodyFactory != null)
-            request.Content = _configuration.RequestBodyFactory(uri);
-
-        return request;
-    }
-
-    private async Task<List<T>> DeserializeItemsAsync(
-        HttpResponseMessage response,
-        JsonSerializerOptions jsonOptions,
-        CancellationToken cancellationToken)
-    {
-        if (_configuration.ItemsJsonPath == null)
-        {
-            var items = new List<T>();
-
-            await foreach (var item in response.Content
-                               .ReadFromJsonAsAsyncEnumerable<T>(jsonOptions, cancellationToken)
-                               .ConfigureAwait(false))
-            {
-                if (item != null)
-                    items.Add(item);
-            }
-
-            return items;
-        }
-
-        var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        using var doc = JsonDocument.Parse(body);
-
-        var element = doc.RootElement;
-        var normalizedPath = NormalizeJsonPath(_configuration.ItemsJsonPath);
-
-        foreach (var segment in normalizedPath.Split('.', StringSplitOptions.RemoveEmptyEntries))
-        {
-            if (!element.TryGetProperty(segment, out element))
-                return [];
-        }
-
-        if (element.ValueKind != JsonValueKind.Array)
-            return [];
-
-        var result = new List<T>(element.GetArrayLength());
-
-        foreach (var arrayElement in element.EnumerateArray())
-        {
-            var item = arrayElement.Deserialize<T>(jsonOptions);
-
-            if (item != null)
-                result.Add(item);
-        }
-
-        return result;
-    }
-
-    private static string NormalizeJsonPath(string path)
-    {
-        var trimmed = path.Trim();
-
-        if (trimmed.StartsWith("$.", StringComparison.Ordinal))
-            return trimmed[2..];
-
-        if (trimmed == "$")
-            return string.Empty;
-
-        if (trimmed.StartsWith('$'))
-            return trimmed[1..];
-
-        return trimmed;
-    }
+            JsonValueKind.Object => "an object",
+            JsonValueKind.Array => "an array",
+            JsonValueKind.String => "a string",
+            JsonValueKind.Number => "a number",
+            JsonValueKind.True or JsonValueKind.False => "a boolean",
+            _ => "null",
+        };
 
     private static string Truncate(string value, int maxLength) =>
         value.Length <= maxLength
             ? value
             : string.Concat(value.AsSpan(0, maxLength), "…");
 
-    private static async Task EnsureResponseBodyWithinLimitAsync(
-        HttpResponseMessage response,
-        long maxBytes,
-        CancellationToken cancellationToken)
+    private static HttpClient CreateClient(HttpSourceOptions<T> options, IHttpClientFactory httpClientFactory)
     {
-        var originalContent = response.Content;
-        var bytes = await originalContent.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
-
-        if (bytes.LongLength > maxBytes)
-        {
-            throw new InvalidOperationException(
-                $"HttpSourceNode response body exceeded MaxResponseBytes limit of {maxBytes} bytes. " +
-                $"Actual body size: {bytes.LongLength} bytes.");
-        }
-
-        var bufferedContent = new ByteArrayContent(bytes);
-
-        foreach (var header in originalContent.Headers)
-        {
-            _ = bufferedContent.Headers.TryAddWithoutValidation(header.Key, header.Value);
-        }
-
-        response.Content = bufferedContent;
-        originalContent.Dispose();
-    }
-
-    private static HttpClient CreateClient(HttpSourceConfiguration configuration, IHttpClientFactory httpClientFactory)
-    {
-        ArgumentNullException.ThrowIfNull(configuration);
+        ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(httpClientFactory);
 
-        return configuration.HttpClientName != null
-            ? httpClientFactory.CreateClient(configuration.HttpClientName)
+        return options.HttpClientName is { } name
+            ? httpClientFactory.CreateClient(name)
             : httpClientFactory.CreateClient();
     }
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "HttpSourceNode<{TypeName}>: reached MaxPages limit of {MaxPages}, stopping.")]
     private static partial void LogMaxPagesReached(ILogger logger, string typeName, int maxPages);
 
-    [LoggerMessage(Level = LogLevel.Debug, Message = "HttpSourceNode<{TypeName}>: page {Page} fetched {Count} items from {Uri}.")]
-    private static partial void LogPageFetched(ILogger logger, string typeName, int page, int count, Uri uri);
+    [LoggerMessage(Level = LogLevel.Debug, Message = "HttpSourceNode<{TypeName}>: page {Page} gave {Count} items from {Uri}.")]
+    private static partial void LogPageFetched(ILogger logger, string typeName, int page, int count, string uri);
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "HttpSourceNode<{TypeName}>: sending {Method} {Uri}.")]
-    private static partial void LogSendingRequest(ILogger logger, string typeName, string method, Uri uri);
+    private static partial void LogSendingRequest(ILogger logger, string typeName, string method, string uri);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "HttpSourceNode<{TypeName}>: attempt {Attempt} failed for {Uri}, retrying.")]
-    private static partial void LogRetrying(ILogger logger, string typeName, int attempt, Uri uri);
+    private static partial void LogRetrying(ILogger logger, string typeName, int attempt, string uri);
+
+    /// <summary>One run's counters and dead-letter channel.</summary>
+    private sealed class RunState(DeadLetterChannel deadLetters)
+    {
+        public DeadLetterChannel DeadLetters { get; } = deadLetters;
+
+        public int Pages { get; set; }
+
+        public long Items { get; set; }
+
+        public long Records { get; set; }
+    }
 }

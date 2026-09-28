@@ -1,4 +1,6 @@
 using System.Text;
+using NPipeline.Connectors.Errors;
+using NPipeline.Connectors.Files;
 using NPipeline.Connectors.Json;
 using NPipeline.Connectors.RoundTrip.Tests.Harnesses;
 using NPipeline.Connectors.RoundTrip.Tests.Infrastructure;
@@ -22,13 +24,13 @@ public abstract class JsonRoundTripTests(JsonFormat format)
     [Fact]
     public Task Nullables() => RoundTripScenarios.Nullables(_harness);
 
-    [KnownBugFact("JSON-3")]
+    [Fact]
     public Task Enums() => RoundTripScenarios.Enums(_harness);
 
     [Fact]
     public Task DateTimeOffsets() => RoundTripScenarios.DateTimeOffsets(_harness);
 
-    [KnownBugFact("JSON-1")]
+    [Fact]
     public Task DateOnlys() => RoundTripScenarios.DateOnlys(_harness);
 
     [Fact]
@@ -37,16 +39,16 @@ public abstract class JsonRoundTripTests(JsonFormat format)
     [Fact]
     public Task ControlCharacters() => RoundTripScenarios.ControlCharacters(_harness);
 
-    [KnownBugFact("JSON-1")]
+    [Fact]
     public Task Binary() => RoundTripScenarios.Binary(_harness);
 
-    [KnownBugFact("JSON-1")]
+    [Fact]
     public Task Lists() => RoundTripScenarios.Lists(_harness);
 
-    [KnownBugFact("JSON-1")]
+    [Fact]
     public Task Nested() => RoundTripScenarios.Nested(_harness);
 
-    [KnownBugFact("X-1")]
+    [Fact]
     public Task PositionalRecords() => RoundTripScenarios.PositionalRecords(_harness);
 
     [Fact]
@@ -63,8 +65,10 @@ public abstract class JsonRoundTripTests(JsonFormat format)
             : "{\"v\":1}\n{\"v\":\"x\"}\n{\"v\":3}\n";
 
         _harness.Provider.Put(_harness.Uri, Encoding.UTF8.GetBytes(content));
-        var configuration = new JsonConfiguration { Format = format, RowErrorHandler = (_, _) => true };
-        var source = new JsonSourceNode<int>(_harness.Provider, _harness.Uri, row => int.Parse(row.Get<string>("v")!), configuration);
+        var source = JsonConnector.Source(
+            _harness.Uri,
+            row => row.Get<int>("v"),
+            o => o with { Provider = _harness.Provider, Format = format, RowErrorHandler = _ => RowErrorAction.Skip });
 
         var values = await NodeRunner.ReadAsync(source);
 
@@ -95,7 +99,8 @@ public sealed class JsonArrayRoundTripTests() : JsonRoundTripTests(JsonFormat.Ar
 
         try
         {
-            var sink = new JsonSinkNode<ScalarRecord>(StorageUri.FromFilePath(path));
+            // Written directly, not through a temporary file, so the test can watch the target grow.
+            var sink = JsonConnector.Sink<ScalarRecord>(StorageUri.FromFilePath(path), o => o with { AtomicWrite = AtomicWrite.Never });
             await sink.ConsumeAsync(new NPipeline.DataFlow.DataStreams.DataStream<ScalarRecord>(Items()), PipelineContext.CreateDefault(), CancellationToken.None);
 
             bytesBeforeLastItem.Should().BeGreaterThan(1_000_000, "a 50,000-item array must not be held in memory until the end");
@@ -104,17 +109,6 @@ public sealed class JsonArrayRoundTripTests() : JsonRoundTripTests(JsonFormat.Ar
         {
             File.Delete(path);
         }
-    }
-
-    [Fact]
-    public void Serializer_options_reflect_later_configuration_changes()
-    {
-        var configuration = new JsonConfiguration();
-        _ = configuration.SerializerOptions;
-
-        configuration.WriteIndented = true;
-
-        configuration.SerializerOptions.WriteIndented.Should().BeTrue();
     }
 }
 

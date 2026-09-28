@@ -1,147 +1,137 @@
-using System.Globalization;
 using System.Text;
 using CsvHelper;
-using NPipeline.Connectors.Csv.Mapping;
-using NPipeline.DataFlow;
-using NPipeline.Nodes;
-using NPipeline.Pipeline;
-using NPipeline.StorageProviders;
-using NPipeline.StorageProviders.Abstractions;
-using NPipeline.StorageProviders.Exceptions;
-using NPipeline.StorageProviders.Models;
+using NPipeline.Connectors.Files;
+using NPipeline.Connectors.Mapping;
 
 namespace NPipeline.Connectors.Csv;
 
 /// <summary>
-///     Sink node that writes items to CSV using a pluggable <see cref="IStorageProvider" />.
+///     Writes records to a CSV file: one column per readable member, named by the options' naming policy, with values
+///     formatted so that <see cref="CsvSourceNode{T}" /> reads them back unchanged (ISO 8601 dates, invariant numbers).
 /// </summary>
-/// <typeparam name="T">Record type to serialize for each CSV row.</typeparam>
-public sealed class CsvSinkNode<T> : SinkNode<T>
+/// <typeparam name="T">The record type, or a scalar type for a single-column file.</typeparam>
+/// <remarks>
+///     A target ending in <c>.gz</c>, <c>.br</c> or <c>.zz</c> is compressed. On the file system the file is written to a
+///     temporary name and moved into place, so readers never see a partial file.
+/// </remarks>
+public sealed class CsvSinkNode<T> : FileSinkNode<T>
 {
-    private static readonly Lazy<IStorageResolver> DefaultResolver =
-        new(() => StorageProviderFactory.CreateResolver());
+    private static readonly Encoding DefaultEncoding = new UTF8Encoding(false);
 
-    private readonly CsvConfiguration _csvConfiguration;
-    private readonly Encoding _encoding;
-    private readonly IStorageProvider? _provider;
-    private readonly IStorageResolver? _resolver;
-    private readonly StorageUri _uri;
-    private readonly Action<CsvWriter, T>? _writerMapper;
+    private readonly IReadOnlyList<string> _columns;
+    private readonly bool _hasHeader;
+    private readonly CsvWriteOptions _options;
+    private readonly Action<CsvRowWriter, T> _write;
 
-    private CsvSinkNode(
-        StorageUri uri,
-        CsvConfiguration? configuration,
-        Encoding? encoding,
-        Action<CsvWriter, T>? writerMapper = null)
+    /// <summary>Creates a sink that writes <typeparamref name="T" />'s readable members as columns.</summary>
+    /// <exception cref="NotSupportedException">A member's type cannot be written to a CSV field.</exception>
+    public CsvSinkNode(CsvWriteOptions options)
+        : base(options)
     {
-        ArgumentNullException.ThrowIfNull(uri);
-        _uri = uri;
-        _csvConfiguration = configuration ?? new CsvConfiguration(CultureInfo.InvariantCulture);
-        _encoding = encoding ?? new UTF8Encoding(false);
-        _writerMapper = writerMapper;
+        var shapeOptions = new RecordShapeOptions { Naming = options.Naming };
+        var shape = RecordShape.For<T>(shapeOptions);
+        shape.ThrowIfNotFlat("CSV");
+
+        var plan = RecordWriterPlan.Create<T, CsvRowWriter>(shapeOptions);
+        _options = options;
+        _columns = plan.ColumnNames;
+        _write = plan.Write;
+        _hasHeader = options.HasHeader ?? !plan.IsScalar;
     }
 
-    /// <summary>
-    ///     Construct a CSV sink node that uses attribute-based mapping.
-    ///     Properties are mapped using CsvColumnAttribute or convention (PascalCase to lowercase).
-    /// </summary>
-    public CsvSinkNode(
-        StorageUri uri,
-        IStorageResolver? resolver = null,
-        CsvConfiguration? configuration = null,
-        Encoding? encoding = null)
-        : this(uri, configuration, encoding, CsvWriterMapperBuilder.Build<T>())
+    /// <summary>Creates a sink that writes each record with <paramref name="write" />.</summary>
+    /// <param name="options">The sink's options.</param>
+    /// <param name="columns">The header, written when the options call for one.</param>
+    /// <param name="write">Writes one record's fields, in <paramref name="columns" /> order.</param>
+    public CsvSinkNode(CsvWriteOptions options, IReadOnlyList<string> columns, Action<CsvRowWriter, T> write)
+        : base(options)
     {
-        _resolver = resolver ?? DefaultResolver.Value;
-    }
-
-    /// <summary>
-    ///     Construct a CSV sink node that uses a specific storage provider with attribute-based mapping.
-    ///     Properties are mapped using CsvColumnAttribute or convention (PascalCase to lowercase).
-    /// </summary>
-    public CsvSinkNode(
-        IStorageProvider provider,
-        StorageUri uri,
-        CsvConfiguration? configuration = null,
-        Encoding? encoding = null)
-        : this(uri, configuration, encoding, CsvWriterMapperBuilder.Build<T>())
-    {
-        ArgumentNullException.ThrowIfNull(provider);
-        _provider = provider;
+        ArgumentNullException.ThrowIfNull(columns);
+        ArgumentNullException.ThrowIfNull(write);
+        _options = options;
+        _columns = columns;
+        _write = write;
+        _hasHeader = options.HasHeader ?? true;
     }
 
     /// <inheritdoc />
-    public override async Task ConsumeAsync(IDataStream<T> input, PipelineContext context, CancellationToken cancellationToken)
+    protected override string ConnectorName => "csv";
+
+    /// <inheritdoc />
+    protected override async Task WriteAsync(Stream stream, IAsyncEnumerable<T> items, FileWriteContext context, CancellationToken cancellationToken)
     {
-        var provider = _provider ?? StorageProviderFactory.GetProviderOrThrow(
-            _resolver ?? throw new InvalidOperationException("No storage resolver configured for CsvSinkNode."),
-            _uri);
+        var text = new StreamWriter(stream, _options.Encoding ?? DefaultEncoding, context.BufferSize, true);
 
-        if (provider is IStorageProviderMetadataProvider metaProvider)
+        await using (text.ConfigureAwait(false))
         {
-            var meta = metaProvider.GetMetadata();
+            var csv = new CsvWriter(text, CreateConfiguration(), true);
 
-            if (!meta.SupportsWrite)
-                throw new UnsupportedStorageCapabilityException(_uri, "write", meta.Name);
-        }
-
-        var stream = await provider.OpenWriteAsync(_uri, cancellationToken).ConfigureAwait(false);
-        await using var streamScope = stream.ConfigureAwait(false);
-        var writer = new StreamWriter(stream, _encoding, _csvConfiguration.BufferSize, false);
-        await using var writerScope = writer.ConfigureAwait(false);
-        var csv = new CsvWriter(writer, _csvConfiguration.HelperConfiguration);
-        await using var csvScope = csv.ConfigureAwait(false);
-
-        var type = typeof(T);
-
-        var shouldWriteHeader = _csvConfiguration.HelperConfiguration.HasHeaderRecord
-                                && ShouldWriteHeader(type);
-
-        // For primitive types, use CsvHelper's built-in WriteRecord instead of the mapper
-        var useMapper = _writerMapper is not null && !type.IsPrimitive && type != typeof(string);
-
-        if (shouldWriteHeader)
-        {
-            if (useMapper)
+            await using (csv.ConfigureAwait(false))
             {
-                var columnNames = CsvWriterMapperBuilder.GetColumnNames<T>();
+                var row = new CsvRowWriter(csv, _options.Culture);
 
-                foreach (var columnName in columnNames)
+                if (_hasHeader)
                 {
-                    csv.WriteField(columnName);
+                    foreach (var column in _columns)
+                    {
+                        csv.WriteField(column);
+                    }
+
+                    await csv.NextRecordAsync().ConfigureAwait(false);
                 }
 
-                await csv.NextRecordAsync().ConfigureAwait(false);
+                await foreach (var item in items.WithCancellation(cancellationToken).ConfigureAwait(false))
+                {
+                    _write(row, item);
+                    await csv.NextRecordAsync().ConfigureAwait(false);
+                }
+
+                // The CsvWriter's buffer first, then the StreamWriter's.
+                await csv.FlushAsync().ConfigureAwait(false);
             }
-            else
-            {
-                csv.WriteHeader(type);
-                await csv.NextRecordAsync().ConfigureAwait(false);
-            }
+
+            await text.FlushAsync(cancellationToken).ConfigureAwait(false);
         }
-
-        await foreach (var item in input.WithCancellation(cancellationToken))
-        {
-            if (item is null)
-                continue;
-
-            if (useMapper)
-                _writerMapper!(csv, item);
-            else
-                csv.WriteRecord(item);
-
-            await csv.NextRecordAsync().ConfigureAwait(false);
-        }
-
-        await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private static bool ShouldWriteHeader(Type type)
+    private CsvHelper.Configuration.CsvConfiguration CreateConfiguration()
     {
-        // Avoid writing headers for primitives/strings where the header would be meaningless (e.g., "Int32").
-        if (type.IsPrimitive || type.IsEnum || type == typeof(string))
-            return false;
+        var configuration = new CsvHelper.Configuration.CsvConfiguration(_options.Culture)
+        {
+            Delimiter = _options.Delimiter,
+            Quote = _options.Quote,
+            HasHeaderRecord = _hasHeader,
+            NewLine = _options.NewLine,
+            BufferSize = _options.BufferSize,
+        };
 
-        return true;
+        _options.ConfigureCsvHelper?.Invoke(configuration);
+        return configuration;
     }
+}
+
+/// <summary>
+///     Writes the fields of one CSV row, in order. A manual writer passed to <see cref="CsvSinkNode{T}" /> calls
+///     <see cref="Write{TValue}" /> once per column.
+/// </summary>
+public sealed class CsvRowWriter : IFieldWriter
+{
+    private readonly IFormatProvider _culture;
+    private readonly CsvWriter _writer;
+
+    internal CsvRowWriter(CsvWriter writer, IFormatProvider culture)
+    {
+        _writer = writer;
+        _culture = culture;
+    }
+
+    /// <summary>Writes the next field, formatted as <see cref="ScalarFormatter" /> formats it; <c>null</c> is an empty field.</summary>
+    /// <exception cref="NotSupportedException"><typeparamref name="TValue" /> is not a scalar type.</exception>
+    public void Write<TValue>(TValue value) => _writer.WriteField(ScalarFormatter.Format(value, _culture));
+
+    /// <summary>Writes the next field as text, quoted when it needs to be.</summary>
+    public void WriteText(string? text) => _writer.WriteField(text);
+
+    /// <inheritdoc />
+    void IFieldWriter.WriteValue<TValue>(int ordinal, TValue value) => Write(value);
 }

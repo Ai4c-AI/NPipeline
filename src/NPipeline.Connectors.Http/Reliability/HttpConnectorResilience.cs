@@ -4,8 +4,8 @@ namespace NPipeline.Connectors.Http.Reliability;
 
 /// <summary>
 ///     Resilience presets for the HTTP connector nodes. Assign one to
-///     <see cref="Configuration.HttpSourceConfiguration.Resilience" /> or
-///     <see cref="Configuration.HttpSinkConfiguration.Resilience" />, or derive your own with a <c>with</c> expression.
+///     <see cref="Configuration.HttpSourceOptions{T}.Resilience" /> or
+///     <see cref="Configuration.HttpSinkOptions{T}.Resilience" />, or derive your own with a <c>with</c> expression.
 /// </summary>
 /// <remarks>
 ///     <para>

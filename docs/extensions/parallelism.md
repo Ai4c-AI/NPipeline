@@ -337,7 +337,7 @@ public class FileProcessingPipeline : IPipelineDefinition
 {
     public void Define(PipelineBuilder builder, PipelineContext context)
     {
-        var source = builder.AddSource(new CsvSourceNode<RawRecord>(uri), "source");
+        var source = builder.AddSource(CsvConnector.Source<RawRecord>(uri), "source");
 
         // File I/O stage - I/O-bound
         var read = builder.AddTransform<FileReaderNode, RawRecord, FileContent>("read");

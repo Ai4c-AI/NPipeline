@@ -5,6 +5,7 @@ using AwesomeAssertions;
 using NPipeline.Connectors.Diagnostics;
 using NPipeline.Connectors.Errors;
 using NPipeline.Connectors.Files;
+using NPipeline.DataFlow.DataStreams;
 using NPipeline.ErrorHandling;
 using NPipeline.Execution;
 using NPipeline.Extensions.Testing;
@@ -397,8 +398,8 @@ public sealed class FileSinkNodeTests
 
     private static async Task Write(LineSink sink, params string?[] items)
     {
-        await using var input = new InMemoryDataStream<string?>(items!);
-        await sink.ConsumeAsync(input!, new PipelineContext(), CancellationToken.None);
+        await using var input = new DataStream<string?>(items.ToAsyncEnumerableCompat(), "items");
+        await sink.ConsumeAsync(input, new PipelineContext(), CancellationToken.None);
     }
 
     private string Text(StorageUri uri) => Encoding.UTF8.GetString(_provider.Get(uri));
@@ -446,4 +447,17 @@ public sealed class MetricCapture : IDisposable
     }
 
     public void Dispose() => _listener.Dispose();
+}
+
+internal static class AsyncEnumerableCompat
+{
+    /// <summary>The items as an async sequence, without System.Linq.Async (not available on every target).</summary>
+    public static async IAsyncEnumerable<T> ToAsyncEnumerableCompat<T>(this IEnumerable<T> items)
+    {
+        foreach (var item in items)
+        {
+            await Task.Yield();
+            yield return item;
+        }
+    }
 }

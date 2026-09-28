@@ -53,8 +53,9 @@ public sealed class GithubToSlackPipeline : IPipelineDefinition
         var owner = Environment.GetEnvironmentVariable("GITHUB_OWNER") ?? "dotnet";
         var repo = Environment.GetEnvironmentVariable("GITHUB_REPO") ?? "runtime";
 
-        // GitHub source configuration
-        services.AddSingleton(new HttpSourceConfiguration
+        // GitHub source options. The nodes are resolved from the container, which supplies these options and the
+        // IHttpClientFactory.
+        services.AddSingleton(new HttpSourceOptions<GithubRelease>
         {
             BaseUri = new Uri($"https://api.github.com/repos/{owner}/{repo}/releases"),
             Headers = new Dictionary<string, string>
@@ -66,12 +67,12 @@ public sealed class GithubToSlackPipeline : IPipelineDefinition
             Auth = string.IsNullOrEmpty(githubToken)
                 ? NullAuthProvider.Instance
                 : new BearerTokenAuthProvider(githubToken),
-            Pagination = new LinkHeaderPaginationStrategy(),
+            Pagination = HttpPagination.LinkHeader,
             MaxPages = 3, // Limit to avoid exhausting API rate limit in a sample
         });
 
-        // Slack sink configuration
-        services.AddSingleton(new HttpSinkConfiguration
+        // Slack sink options
+        services.AddSingleton(new HttpSinkOptions<SlackMessage>
         {
             Uri = new Uri(slackWebhook),
             Method = SinkHttpMethod.Post,

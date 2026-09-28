@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using NPipeline.Connectors.Csv;
+using NPipeline.Connectors.Errors;
 using NPipeline.Pipeline;
 using NPipeline.StorageProviders.Models;
 using Sample_CsvConnector.Nodes;
@@ -27,8 +28,7 @@ public class CsvConnectorPipeline : IPipelineDefinition
     ///     CsvSourceNode -> ValidationTransform -> DataTransform -> CsvSinkNode
     ///     The pipeline reads customer data from the input CSV file, validates and transforms it,
     ///     then writes the processed records to an output CSV file.
-    ///     Note: The resolver parameter is optional for local files - the CsvSourceNode and CsvSinkNode
-    ///     automatically create a default file system resolver if none is provided.
+    ///     Local files need no storage configuration: the nodes resolve the file system provider from the URI.
     /// </remarks>
     public void Define(PipelineBuilder builder, PipelineContext context)
     {
@@ -36,29 +36,23 @@ public class CsvConnectorPipeline : IPipelineDefinition
         var sourcePath = GetSourcePath();
         var targetPath = GetTargetPath();
 
-        // OPTION 1: Traditional approach with manual mapper function
-        // This gives you full control over the mapping logic
-        var sourceNodeManual = new CsvSourceNode<Customer>(
+        // Columns bind to Customer's members by name, case-insensitively, once per file. [Column] and [IgnoreColumn]
+        // control the mapping; values convert strictly, so a bad value fails the run (or goes to RowErrorHandler).
+        var sourceNode = CsvConnector.Source<Customer>(
             StorageUri.FromFilePath(sourcePath),
-            row => new Customer
+            options => options with
             {
-                Id = row.Get("Id", 0),
-                FirstName = row.Get("FirstName", string.Empty),
-                LastName = row.Get("LastName", string.Empty),
-                Email = row.Get("Email", string.Empty),
-                Age = row.Get("Age", 0),
-                RegistrationDate = row.Get("RegistrationDate", default(DateTime)),
-                Country = row.Get("Country", string.Empty),
+                // Log and skip rows that do not convert instead of failing the whole run.
+                RowErrorHandler = error =>
+                {
+                    Console.WriteLine($"Skipping row {error.RecordNumber}: {error.Exception.Message}");
+                    return RowErrorAction.Skip;
+                },
             });
 
-        // OPTION 2: Attribute-based mapping (recommended for most scenarios)
-        // When Customer class has CsvColumn attributes, the mapper is built automatically
-        // using CsvMapperBuilder<T> with compiled expression tree delegates for optimal performance
-        // Uncomment the line below to use attribute-based mapping instead:
-        // var sourceNode = new CsvSourceNode<Customer>(StorageUri.FromFilePath(sourcePath));
+        // For full control, map each row by hand instead:
+        // CsvConnector.Source(uri, row => new Customer { Id = row.Get<int>("Id"), FirstName = row.Get<string>("FirstName") });
 
-        // For this sample, we use the manual mapper to demonstrate both approaches
-        var sourceNode = sourceNodeManual;
         var source = builder.AddSource(sourceNode, "csv-source");
 
         // Add validation transform to filter invalid records
@@ -67,10 +61,9 @@ public class CsvConnectorPipeline : IPipelineDefinition
         // Add data transform to enrich and normalize records
         var transform = builder.AddTransform<DataTransform, Customer, Customer>("data-transform");
 
-        // Create the CSV sink node - writes processed customer data to the output file
-        // With attribute-based mapping, columns are written in the order defined by attributes
-        // Computed properties marked with [CsvIgnore] are automatically excluded
-        var sinkNode = new CsvSinkNode<Customer>(StorageUri.FromFilePath(targetPath));
+        // Writes the processed customers: one column per member in declaration order, skipping [IgnoreColumn] members.
+        // On the file system the file is written under a temporary name and moved into place when complete.
+        var sinkNode = CsvConnector.Sink<Customer>(StorageUri.FromFilePath(targetPath));
         var sink = builder.AddSink(sinkNode, "csv-sink");
 
         // Connect nodes in sequence: source -> validation -> transform -> sink
@@ -148,9 +141,9 @@ KEY FEATURES:
 - No complex configuration needed - just specify the file paths
 
 GETTING STARTED:
-The pipeline is straightforward - create node instances with file paths,
-add them to the builder, and connect them. The CsvSourceNode and
-CsvSinkNode automatically handle the file system interactions.
+Create the nodes with CsvConnector.Source and CsvConnector.Sink, add them
+to the builder, and connect them. Options are records: adjust them with
+'with' expressions (delimiter, culture, row error handling).
 
 This is one of the simplest ways to process CSV files in NPipeline!";
 }

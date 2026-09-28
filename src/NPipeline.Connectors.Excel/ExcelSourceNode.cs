@@ -1,232 +1,201 @@
-using System.Data;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
 using ExcelDataReader;
-using NPipeline.Connectors.Excel.Mapping;
-using NPipeline.DataFlow;
-using NPipeline.DataFlow.DataStreams;
-using NPipeline.Nodes;
-using NPipeline.Pipeline;
-using NPipeline.StorageProviders;
-using NPipeline.StorageProviders.Abstractions;
-using NPipeline.StorageProviders.Exceptions;
-using NPipeline.StorageProviders.Models;
+using NPipeline.Connectors.Files;
+using NPipeline.Connectors.Mapping;
 
 namespace NPipeline.Connectors.Excel;
 
 /// <summary>
-///     Source node that reads Excel data using a pluggable <see cref="IStorageProvider" />.
+///     Reads a sheet of an Excel workbook (<c>.xlsx</c>, <c>.xlsm</c> or <c>.xls</c>) into records with ExcelDataReader.
+///     Columns bind to members by header, case-insensitively, once per file; cell values convert strictly.
 /// </summary>
-/// <typeparam name="T">Type emitted for each Excel row.</typeparam>
+/// <typeparam name="T">The record type, or a scalar type for a single-column sheet.</typeparam>
 /// <remarks>
-///     <para>
-///         This source node supports reading both legacy XLS (binary) and modern XLSX (Open XML) formats
-///         using ExcelDataReader. It provides streaming access to Excel data with configurable options
-///         for sheet selection, header handling, and type conversion.
-///     </para>
-///     <para>
-///         The node supports two constructor patterns:
-///         <list type="bullet">
-///             <item>
-///                 <description>Using an <see cref="IStorageResolver" /> to resolve the provider at execution time</description>
-///             </item>
-///             <item>
-///                 <description>Using a specific <see cref="IStorageProvider" /> instance</description>
-///             </item>
-///         </list>
-///     </para>
-///     <para>
-///         Data mapping is performed using the explicit <see cref="ExcelRow" /> mapper delegate supplied by the caller.
-///         This avoids reflection and supports positional records and custom conversion logic.
-///     </para>
+///     Workbooks are zip archives, so a stream that cannot seek (S3, SFTP, HTTP) is first copied to a temporary file.
+///     The options' <see cref="FileNodeOptions.Uri" /> can also name a directory (ending in <c>/</c>) or a glob.
 /// </remarks>
-public sealed class ExcelSourceNode<T> : SourceNode<T>
+public sealed class ExcelSourceNode<T> : FileSourceNode<T>
 {
-    private static readonly Lazy<IStorageResolver> DefaultResolver = new(
-        () => StorageProviderFactory.CreateResolver(),
-        LazyThreadSafetyMode.ExecutionAndPublication);
+    private readonly RecordBindingOptions _binding;
+    private readonly IReadOnlyList<string> _declaredColumns;
+    private readonly bool _hasHeader;
+    private readonly Func<ExcelRow, T>? _map;
+    private readonly ExcelReadOptions _options;
 
-    private readonly ExcelConfiguration _configuration;
-    private readonly IStorageProvider? _provider;
-    private readonly IStorageResolver? _resolver;
-    private readonly Func<ExcelRow, T> _rowMapper;
-    private readonly StorageUri _uri;
-
-    private ExcelSourceNode(
-        StorageUri uri,
-        ExcelConfiguration? configuration,
-        Func<ExcelRow, T> rowMapper)
+    static ExcelSourceNode()
     {
-        ArgumentNullException.ThrowIfNull(uri);
-        ArgumentNullException.ThrowIfNull(rowMapper);
-        _uri = uri;
-        _configuration = configuration ?? new ExcelConfiguration();
-        _rowMapper = rowMapper;
+        // Legacy .xls files use code pages that .NET does not load by default.
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
     }
 
-    /// <summary>
-    ///     Construct an Excel source that resolves a storage provider from a resolver at execution time.
-    /// </summary>
-    /// <param name="uri">The URI of the Excel file to read from.</param>
-    /// <param name="resolver">
-    ///     The storage resolver used to obtain the storage provider. If <c>null</c>, a default resolver
-    ///     created by <see cref="StorageProviderFactory.CreateResolver" /> is used.
-    /// </param>
-    /// <param name="rowMapper">Row mapper used to construct <typeparamref name="T" /> from an <see cref="ExcelRow" />.</param>
-    /// <param name="configuration">Optional configuration for Excel reading. If <c>null</c>, default configuration is used.</param>
-    /// <exception cref="ArgumentNullException">Thrown if <paramref name="uri" /> is <c>null</c>.</exception>
-    public ExcelSourceNode(
-        StorageUri uri,
-        Func<ExcelRow, T> rowMapper,
-        IStorageResolver? resolver = null,
-        ExcelConfiguration? configuration = null)
-        : this(uri, configuration, rowMapper)
+    /// <summary>Creates a source that maps columns to <typeparamref name="T" />'s members by header.</summary>
+    /// <exception cref="NotSupportedException">A mapped member's type cannot be read from a cell.</exception>
+    public ExcelSourceNode(ExcelReadOptions options)
+        : this(options, null, true)
     {
-        _resolver = resolver;
     }
 
-    /// <summary>
-    ///     Construct an Excel source that resolves a storage provider from a resolver at execution time.
-    ///     Uses attribute-based mapping for automatic property-to-column mapping.
-    /// </summary>
-    /// <param name="uri">The URI of the Excel file to read from.</param>
-    /// <param name="resolver">
-    ///     The storage resolver used to obtain the storage provider. If <c>null</c>, a default resolver
-    ///     created by <see cref="StorageProviderFactory.CreateResolver" /> is used.
-    /// </param>
-    /// <param name="configuration">Optional configuration for Excel reading. If <c>null</c>, default configuration is used.</param>
-    /// <exception cref="ArgumentNullException">Thrown if <paramref name="uri" /> is <c>null</c>.</exception>
-    public ExcelSourceNode(
-        StorageUri uri,
-        IStorageResolver? resolver = null,
-        ExcelConfiguration? configuration = null)
-        : this(uri, configuration, ExcelMapperBuilder.Build<T>())
+    /// <summary>Creates a source that builds each record with <paramref name="map" />.</summary>
+    /// <param name="options">The source's options.</param>
+    /// <param name="map">Builds a record from the current row. An exception it throws is a row error.</param>
+    public ExcelSourceNode(ExcelReadOptions options, Func<ExcelRow, T> map)
+        : this(options, map ?? throw new ArgumentNullException(nameof(map)), false)
     {
-        _resolver = resolver;
     }
 
-    /// <summary>
-    ///     Construct an Excel source that uses a specific storage provider.
-    /// </summary>
-    /// <param name="provider">The storage provider to use for reading the Excel file.</param>
-    /// <param name="uri">The URI of the Excel file to read from.</param>
-    /// <param name="rowMapper">Row mapper used to construct <typeparamref name="T" /> from an <see cref="ExcelRow" />.</param>
-    /// <param name="configuration">Optional configuration for Excel reading. If <c>null</c>, default configuration is used.</param>
-    /// <exception cref="ArgumentNullException">Thrown if <paramref name="provider" /> or <paramref name="uri" /> is <c>null</c>.</exception>
-    public ExcelSourceNode(
-        IStorageProvider provider,
-        StorageUri uri,
-        Func<ExcelRow, T> rowMapper,
-        ExcelConfiguration? configuration = null)
-        : this(uri, configuration, rowMapper)
+    private ExcelSourceNode(ExcelReadOptions options, Func<ExcelRow, T>? map, bool bindMembers)
+        : base(options)
     {
-        ArgumentNullException.ThrowIfNull(provider);
-        _provider = provider;
-    }
+        _options = options;
+        _map = map;
+        _binding = new RecordBindingOptions { Shape = new RecordShapeOptions { Naming = options.Naming }, MissingColumns = options.MissingColumns };
 
-    /// <summary>
-    ///     Construct an Excel source that uses a specific storage provider.
-    ///     Uses attribute-based mapping for automatic property-to-column mapping.
-    /// </summary>
-    /// <param name="provider">The storage provider to use for reading the Excel file.</param>
-    /// <param name="uri">The URI of the Excel file to read from.</param>
-    /// <param name="configuration">Optional configuration for Excel reading. If <c>null</c>, default configuration is used.</param>
-    /// <exception cref="ArgumentNullException">Thrown if <paramref name="provider" /> or <paramref name="uri" /> is <c>null</c>.</exception>
-    public ExcelSourceNode(
-        IStorageProvider provider,
-        StorageUri uri,
-        ExcelConfiguration? configuration = null)
-        : this(uri, configuration, ExcelMapperBuilder.Build<T>())
-    {
-        ArgumentNullException.ThrowIfNull(provider);
-        _provider = provider;
+        var shape = RecordShape.For<T>(_binding.Shape);
+        _hasHeader = options.HasHeader ?? !(bindMembers && shape.IsScalar);
+        _declaredColumns = shape.Members.Select(m => m.ColumnName).ToArray();
+
+        if (bindMembers)
+            shape.ThrowIfNotFlat("Excel");
     }
 
     /// <inheritdoc />
-    public override IDataStream<T> OpenStream(PipelineContext context, CancellationToken cancellationToken)
+    protected override string ConnectorName => "excel";
+
+    /// <inheritdoc />
+    protected override IReadOnlyList<string> DirectoryFileExtensions { get; } = [".xlsx", ".xlsm", ".xls"];
+
+    /// <inheritdoc />
+    protected override bool RequiresSeekableStream => true;
+
+    /// <inheritdoc />
+    protected override bool SupportsCompression => false;
+
+    /// <inheritdoc />
+    protected override async IAsyncEnumerable<T> ReadAsync(Stream stream, FileReadContext context, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var provider = _provider ?? StorageProviderFactory.GetProviderOrThrow(
-            _resolver ?? DefaultResolver.Value,
-            _uri);
+        using var reader = ExcelReaderFactory.CreateReader(stream, new ExcelReaderConfiguration { Password = _options.Password, LeaveOpen = true });
+        SelectSheet(reader, context);
 
-        if (provider is IStorageProviderMetadataProvider metaProvider)
+        var rowNumber = 0;
+
+        for (var skipped = 0; skipped < _options.SkipRows; skipped++)
         {
-            var meta = metaProvider.GetMetadata();
+            if (!reader.Read())
+                yield break;
 
-            if (!meta.SupportsRead)
-                throw new UnsupportedStorageCapabilityException(_uri, "read", meta.Name);
+            rowNumber++;
         }
 
-        var stream = Read(provider, _uri, _configuration, cancellationToken);
-        return new DataStream<T>(stream, $"ExcelSourceNode<{typeof(T).Name}>");
+        IReadOnlyList<string> columns = _declaredColumns;
+
+        if (_hasHeader)
+        {
+            if (!ReadRow(reader, ref rowNumber))
+                yield break;
+
+            columns = ReadHeader(reader);
+        }
+
+        var mapper = _map is null ? RecordBinder.Bind<T, ExcelFieldReader>(columns, _binding) : null;
+        var fields = new ExcelFieldReader(reader);
+        var row = _map is null ? null : new ExcelRow(reader, _hasHeader ? columns : []);
+        long recordNumber = 0;
+
+        while (ReadRow(reader, ref rowNumber))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            recordNumber++;
+            T item = default!;
+            Exception? error = null;
+
+            try
+            {
+                if (mapper is not null)
+                    item = mapper(fields);
+                else
+                {
+                    row!.RecordNumber = recordNumber;
+                    row.RowNumber = rowNumber;
+                    item = _map!(row);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                error = ex;
+            }
+
+            if (error is not null)
+            {
+                await context.HandleRowErrorAsync(recordNumber, error, Describe(reader, rowNumber), cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            yield return item;
+        }
     }
 
-    private async IAsyncEnumerable<T> Read(
-        IStorageProvider provider,
-        StorageUri uri,
-        ExcelConfiguration config,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    private bool ReadRow(IExcelDataReader reader, ref int rowNumber)
     {
-        // Open the stream per-enumeration so disposal is bound to consumer lifetime
-        var stream = await provider.OpenReadAsync(uri, cancellationToken).ConfigureAwait(false);
-        await using var streamScope = stream.ConfigureAwait(false);
-
-        // Configure ExcelDataReader
-        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
-
-        var readerConfig = new ExcelReaderConfiguration
-        {
-            AutodetectSeparators = config.AutodetectSeparators
-                ? new[] { ';', ',', '\t', '|', '#' }
-                : null,
-            AnalyzeInitialCsvRows = config.AnalyzeAllColumns
-                ? 0
-                : config.AnalyzeInitialRowCount,
-            FallbackEncoding = config.Encoding ?? Encoding.UTF8,
-        };
-
-        using var reader = ExcelReaderFactory.CreateReader(stream, readerConfig);
-
-        // Select the appropriate sheet
-        if (!string.IsNullOrEmpty(config.SheetName))
-        {
-            var sheetFound = false;
-
-            do
-            {
-                if (reader.Name.Equals(config.SheetName, StringComparison.OrdinalIgnoreCase))
-                {
-                    sheetFound = true;
-                    break;
-                }
-            } while (reader.NextResult());
-
-            if (!sheetFound)
-                throw new InvalidOperationException($"Sheet '{config.SheetName}' not found in Excel file.");
-        }
-
-        // Use first sheet (already positioned)
-        // Read header row if configured
-        var headers = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-
-        if (config.FirstRowIsHeader && reader.Read())
-        {
-            for (var i = 0; i < reader.FieldCount; i++)
-            {
-                var header = reader.GetString(i);
-
-                if (!string.IsNullOrEmpty(header))
-                    headers[header] = i;
-            }
-        }
-
-        // Read data rows. Mapper exceptions propagate: a row that fails to map is an error, not a row to drop.
         while (reader.Read())
         {
-            var item = _rowMapper(new ExcelRow(reader, headers, config.FirstRowIsHeader));
+            rowNumber++;
 
-            if (item is not null)
-                yield return item;
+            if (!_options.SkipEmptyRows || !IsEmpty(reader))
+                return true;
         }
+
+        return false;
+    }
+
+    private void SelectSheet(IExcelDataReader reader, FileReadContext context)
+    {
+        var index = 0;
+        var names = new List<string>();
+
+        do
+        {
+            names.Add(reader.Name);
+
+            if (_options.SheetName is { } name ? string.Equals(reader.Name, name, StringComparison.OrdinalIgnoreCase) : index == _options.SheetIndex)
+                return;
+
+            index++;
+        } while (reader.NextResult());
+
+        var wanted = _options.SheetName is null ? $"sheet {_options.SheetIndex}" : $"sheet '{_options.SheetName}'";
+        throw new InvalidOperationException($"'{context.Source}' has no {wanted}. Sheets: {string.Join(", ", names)}.");
+    }
+
+    private static string[] ReadHeader(IExcelDataReader reader)
+    {
+        var headers = new string[reader.FieldCount];
+
+        // A header cell can be a number or a date (a "2024" column), not only text.
+        for (var i = 0; i < headers.Length; i++)
+        {
+            headers[i] = Convert.ToString(ExcelFieldReader.Raw(reader, i), CultureInfo.InvariantCulture)?.Trim() ?? string.Empty;
+        }
+
+        return headers;
+    }
+
+    private static bool IsEmpty(IExcelDataReader reader)
+    {
+        for (var i = 0; i < reader.FieldCount; i++)
+        {
+            if (reader.GetValue(i) is { } value && (value is not string text || !string.IsNullOrWhiteSpace(text)))
+                return false;
+        }
+
+        return true;
+    }
+
+    // Workbooks have no raw record, so the excerpt names the sheet and row and lists the cells.
+    private static string Describe(IExcelDataReader reader, int rowNumber)
+    {
+        var cells = Enumerable.Range(0, reader.FieldCount).Select(i => Convert.ToString(ExcelFieldReader.Raw(reader, i), CultureInfo.InvariantCulture));
+        return $"{reader.Name} row {rowNumber}: {string.Join(" | ", cells)}";
     }
 }

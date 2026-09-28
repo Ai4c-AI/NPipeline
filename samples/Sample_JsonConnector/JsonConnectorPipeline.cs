@@ -19,7 +19,7 @@ namespace Sample_JsonConnector;
 ///     The pipeline demonstrates:
 ///     - Attribute-based mapping using Column attributes
 ///     - Different JSON formats (Array and NDJSON)
-///     - Custom configuration options (naming policies, indented output)
+///     - Options as records: serializer options, indented output, row error handling
 ///     - Error handling with RowErrorHandler
 /// </remarks>
 public class JsonConnectorPipeline : IPipelineDefinition
@@ -30,7 +30,7 @@ public class JsonConnectorPipeline : IPipelineDefinition
     /// <remarks>
     ///     This method creates a JSON processing pipeline with multiple scenarios:
     ///     Scenario 1: JSON Array format with attribute-based mapping
-    ///     Scenario 2: NDJSON format with custom configuration
+    ///     Scenario 2: NDJSON, chosen from the file name
     ///     The pipeline reads customer data from the input JSON file, validates and transforms it,
     ///     then writes the processed records to an output JSON file.
     /// </remarks>
@@ -42,19 +42,9 @@ public class JsonConnectorPipeline : IPipelineDefinition
         var ndjsonSourcePath = GetNdjsonSourcePath();
         var ndjsonTargetPath = GetNdjsonTargetPath();
 
-        // SCENARIO 1: JSON Array format with attribute-based mapping
-        // The Customer class uses Column attributes for property mapping
-        // The mapper is automatically built using JsonMapperBuilder<T>
-        var jsonConfiguration = new JsonConfiguration
-        {
-            Format = JsonFormat.Array,
-            PropertyNamingPolicy = JsonPropertyNamingPolicy.CamelCase,
-            WriteIndented = true,
-        };
-
-        var sourceNode = new JsonSourceNode<Customer>(
-            StorageUri.FromFilePath(sourcePath),
-            configuration: jsonConfiguration);
+        // SCENARIO 1: a JSON array. Records are deserialized with System.Text.Json, straight from UTF-8; the Customer
+        // class's [Column] and [IgnoreColumn] attributes are honoured, and names default to camelCase.
+        var sourceNode = JsonConnector.Source<Customer>(StorageUri.FromFilePath(sourcePath));
 
         var source = builder.AddSource(sourceNode, "json-source");
 
@@ -67,9 +57,7 @@ public class JsonConnectorPipeline : IPipelineDefinition
         // Create the JSON sink node - writes processed customer data to the output file
         // With attribute-based mapping, properties are written based on Column attributes
         // Computed properties marked with [IgnoreColumn] are automatically excluded
-        var sinkNode = new JsonSinkNode<Customer>(
-            StorageUri.FromFilePath(targetPath),
-            configuration: jsonConfiguration);
+        var sinkNode = JsonConnector.Sink<Customer>(StorageUri.FromFilePath(targetPath), options => options with { WriteIndented = true });
 
         var sink = builder.AddSink(sinkNode, "json-sink");
 
@@ -82,31 +70,19 @@ public class JsonConnectorPipeline : IPipelineDefinition
         var logger = context.Observability.LoggerFactory.CreateLogger("JsonConnectorPipeline");
         logger.Log(LogLevel.Information, "JSON pipeline configured: {SourcePath} -> {TargetPath}", sourcePath, targetPath);
 
-        logger.Log(LogLevel.Information, "JSON format: {Format}, Naming policy: {NamingPolicy}, Indented: {WriteIndented}",
-            jsonConfiguration.Format, jsonConfiguration.PropertyNamingPolicy, jsonConfiguration.WriteIndented);
 
-        // SCENARIO 2: NDJSON format with custom configuration
+        // SCENARIO 2: NDJSON
         // Uncomment the following code to demonstrate NDJSON processing
         /*
-        var ndjsonConfiguration = new JsonConfiguration
-        {
-            Format = JsonFormat.NewlineDelimited,
-            PropertyNamingPolicy = JsonPropertyNamingPolicy.CamelCase,
-            WriteIndented = false,
-        };
-
-        var ndjsonSourceNode = new JsonSourceNode<Customer>(
-            StorageUri.FromFilePath(ndjsonSourcePath),
-            configuration: ndjsonConfiguration);
+        // The format follows the file name: .ndjson and .jsonl are one record per line (or per top-level value).
+        var ndjsonSourceNode = JsonConnector.Source<Customer>(StorageUri.FromFilePath(ndjsonSourcePath));
 
         var ndjsonSource = builder.AddSource(ndjsonSourceNode, "ndjson-source");
 
         var ndjsonValidation = builder.AddTransform<ValidationTransform, Customer, Customer>("ndjson-validation");
         var ndjsonTransform = builder.AddTransform<DataTransform, Customer, Customer>("ndjson-transform");
 
-        var ndjsonSinkNode = new JsonSinkNode<Customer>(
-            StorageUri.FromFilePath(ndjsonTargetPath),
-            configuration: ndjsonConfiguration);
+        var ndjsonSinkNode = JsonConnector.Sink<Customer>(StorageUri.FromFilePath(ndjsonTargetPath));
 
         var ndjsonSink = builder.AddSink(ndjsonSinkNode, "ndjson-sink");
 
@@ -197,7 +173,7 @@ KEY FEATURES:
 - Simple file-based JSON processing using StorageUri
 - Attribute-based mapping using Column attributes
 - Support for different JSON formats (Array and NDJSON)
-- Custom configuration options (naming policies, indented output)
+- Options as records: serializer options, indented output, row error handling
 - Data validation with filtering
 - Data transformation and enrichment
 - Built-in error handling and logging
@@ -213,16 +189,16 @@ JSON FORMATS:
 - Array format: Traditional JSON array with all records in a single array
 - NDJSON format: Newline-delimited JSON with one record per line
 
-CONFIGURATION OPTIONS:
-- Format: Choose between Array or NDJSON format
-- PropertyNamingPolicy: CamelCase, SnakeCase, or KebabCase
-- WriteIndented: Control JSON output formatting
-- ErrorHandling: SkipRecord or ThrowException
+CONFIGURATION OPTIONS (records, adjusted with 'with'):
+- Format: Auto (by file name and content), Array or NewlineDelimited
+- ItemsPath: read an array nested in a root object, such as ""data.items""
+- SerializerOptions: any System.Text.Json options (naming, converters)
+- WriteIndented: indent array output
+- RowErrorHandler: fail, skip or dead-letter records that do not convert
 
 GETTING STARTED:
-The pipeline is straightforward - create node instances with file paths,
-add them to the builder, and connect them. The JsonSourceNode and
-JsonSinkNode automatically handle the file system interactions.
+Create the nodes with JsonConnector.Source and JsonConnector.Sink, add them
+to the builder, and connect them.
 
 This is one of the simplest ways to process JSON files in NPipeline!";
 }

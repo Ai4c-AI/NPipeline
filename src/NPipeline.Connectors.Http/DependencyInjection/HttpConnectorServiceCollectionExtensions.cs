@@ -1,7 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using NPipeline.Connectors.Http.Metrics;
-using NPipeline.Connectors.Http.Nodes;
 
 namespace NPipeline.Connectors.Http.DependencyInjection;
 
@@ -11,8 +10,8 @@ namespace NPipeline.Connectors.Http.DependencyInjection;
 public static class HttpConnectorServiceCollectionExtensions
 {
     /// <summary>
-    ///     Registers the HTTP connector infrastructure, including a <see cref="NullHttpConnectorMetrics" />
-    ///     implementation of <see cref="IHttpConnectorMetrics" /> (replaceable by the caller).
+    ///     Registers the HTTP connector's services: a <see cref="NullHttpConnectorMetrics" /> implementation of
+    ///     <see cref="IHttpConnectorMetrics" />, which the caller can replace.
     ///     Requires <c>services.AddHttpClient()</c> to have been called first.
     /// </summary>
     /// <param name="services">The <see cref="IServiceCollection" />.</param>
@@ -21,9 +20,9 @@ public static class HttpConnectorServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
 
+        // The nodes need per-node options, so they are created with HttpConnector (or their constructors), taking the
+        // container's IHttpClientFactory and IHttpConnectorMetrics, rather than resolved from the container.
         services.TryAddSingleton<IHttpConnectorMetrics>(NullHttpConnectorMetrics.Instance);
-        services.TryAddTransient(typeof(HttpSourceNode<>), typeof(HttpSourceNode<>));
-        services.TryAddTransient(typeof(HttpSinkNode<>), typeof(HttpSinkNode<>));
 
         return services;
     }
