@@ -1,0 +1,185 @@
+using System.Runtime.CompilerServices;
+using NPipeline.Connectors.Diagnostics;
+using NPipeline.Connectors.Errors;
+using NPipeline.DataFlow;
+using NPipeline.DataFlow.DataStreams;
+using NPipeline.ErrorHandling;
+using NPipeline.Nodes;
+using NPipeline.Pipeline;
+using NPipeline.StorageProviders.Abstractions;
+using NPipeline.StorageProviders.Models;
+
+namespace NPipeline.Connectors.Files;
+
+/// <summary>What a <see cref="FileSourceNode{T}" /> gives the format for one file.</summary>
+public sealed class FileReadContext
+{
+    private readonly string _connector;
+    private readonly SourceDeadLetterChannel _deadLetters;
+    private readonly FileSourceOptions _options;
+
+    internal FileReadContext(StorageUri uri, FileSourceOptions options, string connector, SourceDeadLetterChannel deadLetters)
+    {
+        Uri = uri;
+        Source = FileNodeSupport.Describe(uri);
+        _options = options;
+        _connector = connector;
+        _deadLetters = deadLetters;
+    }
+
+    /// <summary>The file being read.</summary>
+    public StorageUri Uri { get; }
+
+    /// <summary>The file as text without its query string, as it appears in errors.</summary>
+    public string Source { get; }
+
+    /// <summary>The buffer size for the format's reader.</summary>
+    public int BufferSize => _options.BufferSize;
+
+    /// <summary>
+    ///     Applies the configured <see cref="RowErrorHandler" /> to a record that failed to map. Returns when the record is to
+    ///     be skipped (dropped or dead-lettered); throws <see cref="RecordMappingException" /> when the read is to fail.
+    /// </summary>
+    /// <param name="recordNumber">The record's 1-based position in the file.</param>
+    /// <param name="exception">Why it failed. A <see cref="FieldMappingException" /> supplies the field.</param>
+    /// <param name="rawRecord">The raw record or value, if the format has one; it is truncated to the configured excerpt length.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    public async ValueTask HandleRowErrorAsync(long recordNumber, Exception exception, string? rawRecord = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+
+        var field = (exception as FieldMappingException)?.Column;
+        var error = new RowError(Source, recordNumber, field, Excerpt(rawRecord), exception);
+        var action = _options.RowErrorHandler?.Invoke(error) ?? RowErrorAction.Fail;
+
+        ConnectorDiagnostics.RecordRowError(_connector, Uri.Scheme.Value, action.ToString().ToLowerInvariant());
+
+        switch (action)
+        {
+            case RowErrorAction.Skip:
+                return;
+            case RowErrorAction.DeadLetter:
+                var failure = new ConnectorRecordFailure(error.Source, error.RecordNumber, error.Field, error.RawExcerpt);
+                await _deadLetters.SendAsync(failure, exception, cancellationToken).ConfigureAwait(false);
+                return;
+            default:
+                throw new RecordMappingException(error);
+        }
+    }
+
+    private string? Excerpt(string? raw)
+    {
+        var length = _options.RawExcerptLength;
+
+        if (raw is null || length == 0)
+            return null;
+
+        return raw.Length <= length
+            ? raw
+            : string.Concat(raw.AsSpan(0, length), "…");
+    }
+}
+
+/// <summary>
+///     A source that reads records from one or more files through a storage provider. The base resolves the provider,
+///     expands directories and globs, decompresses, makes streams seekable for formats that need it, and reports metrics;
+///     the format implements <see cref="ReadAsync" /> for one file.
+/// </summary>
+/// <typeparam name="T">The record type.</typeparam>
+public abstract class FileSourceNode<T> : SourceNode<T>
+{
+    /// <summary>Creates the source and validates <paramref name="options" />.</summary>
+    protected FileSourceNode(FileSourceOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
+        Options = options;
+    }
+
+    /// <summary>The source's options.</summary>
+    protected FileSourceOptions Options { get; }
+
+    /// <summary>The connector's name in metrics and traces, such as <c>csv</c>.</summary>
+    protected abstract string ConnectorName { get; }
+
+    /// <summary>When <see cref="FileNodeOptions.Uri" /> is a directory, the file suffixes to read (for example <c>.parquet</c>); empty reads every file.</summary>
+    protected virtual IReadOnlyList<string> DirectoryFileExtensions => [];
+
+    /// <summary>Whether the format needs a seekable stream (a zip or a footer-first format). Non-seekable streams are spooled to a temporary file first.</summary>
+    protected virtual bool RequiresSeekableStream => false;
+
+    /// <summary>Whether the format's files can be stream-compressed (gzip and similar). Formats with their own compression return <c>false</c>.</summary>
+    protected virtual bool SupportsCompression => true;
+
+    /// <inheritdoc />
+    public sealed override IDataStream<T> OpenStream(PipelineContext context, CancellationToken cancellationToken)
+    {
+        var provider = FileNodeSupport.ResolveProvider(Options, false);
+        var deadLetters = OpenDeadLetterChannel(context);
+        return new DataStream<T>(ReadFilesAsync(provider, deadLetters, cancellationToken), FileNodeSupport.StreamName(GetType(), typeof(T)));
+    }
+
+    /// <summary>Reads the records of one file. Report records that fail to map through <see cref="FileReadContext.HandleRowErrorAsync" />.</summary>
+    /// <param name="stream">The file's content, decompressed, and seekable when <see cref="RequiresSeekableStream" /> is set. The base disposes it.</param>
+    /// <param name="context">The file and the error handling for its records.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    protected abstract IAsyncEnumerable<T> ReadAsync(Stream stream, FileReadContext context, CancellationToken cancellationToken);
+
+    private async IAsyncEnumerable<T> ReadFilesAsync(
+        IStorageProvider provider,
+        SourceDeadLetterChannel deadLetters,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var files = await FileNodeSupport.ExpandAsync(provider, Options.Uri, Options.Recursive, DirectoryFileExtensions, cancellationToken)
+            .ConfigureAwait(false);
+
+        foreach (var file in files)
+        {
+            await foreach (var item in ReadFileAsync(provider, file, deadLetters, cancellationToken).ConfigureAwait(false))
+            {
+                yield return item;
+            }
+        }
+    }
+
+    private async IAsyncEnumerable<T> ReadFileAsync(
+        IStorageProvider provider,
+        StorageUri file,
+        SourceDeadLetterChannel deadLetters,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var compression = FileNodeSupport.ResolveCompression(Options.Compression, file.Path, SupportsCompression, ConnectorName);
+        using var activity = ConnectorDiagnostics.StartFileActivity("connector.file.read", ConnectorName, file);
+        var chain = new StreamChain();
+        await using var chainScope = chain.ConfigureAwait(false);
+
+        var raw = chain.Push(await provider.OpenReadAsync(file, cancellationToken).ConfigureAwait(false));
+        var counted = chain.Push(new CountingStream(raw));
+        Stream stream = chain.Push(FileNodeSupport.Decompress(counted, compression));
+
+        if (RequiresSeekableStream && !stream.CanSeek)
+        {
+            var spool = chain.Push(FileNodeSupport.CreateSpoolFile(Options.BufferSize));
+            await stream.CopyToAsync(spool, Options.BufferSize, cancellationToken).ConfigureAwait(false);
+            spool.Position = 0;
+            stream = spool;
+        }
+
+        var context = new FileReadContext(file, Options, ConnectorName, deadLetters);
+        long rows = 0;
+
+        try
+        {
+            await foreach (var item in ReadAsync(stream, context, cancellationToken).ConfigureAwait(false))
+            {
+                rows++;
+                yield return item;
+            }
+        }
+        finally
+        {
+            ConnectorDiagnostics.RecordFileRead(ConnectorName, file, rows, counted.Bytes);
+            _ = activity?.SetTag("npipeline.connector.rows", rows);
+        }
+    }
+}

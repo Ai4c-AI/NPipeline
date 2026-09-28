@@ -1,4 +1,6 @@
 using NPipeline.DataFlow;
+using NPipeline.ErrorHandling;
+using NPipeline.Execution;
 using NPipeline.Pipeline;
 
 namespace NPipeline.Nodes;
@@ -73,4 +75,20 @@ public abstract class SourceNode<TOut> : ISourceNode<TOut>, INodeTypeMetadata
 
     /// <inheritdoc />
     public abstract IDataStream<TOut> OpenStream(PipelineContext context, CancellationToken cancellationToken);
+
+    /// <summary>
+    ///     Opens a channel for dead-lettering records this source cannot turn into items, attributed to this node. Call it
+    ///     from <see cref="OpenStream" />, where the runtime makes the node's id available, and keep it for the stream's
+    ///     lifetime.
+    /// </summary>
+    /// <param name="context">The context passed to <see cref="OpenStream" />.</param>
+    /// <returns>
+    ///     A channel attributed to this node's id. Outside a pipeline run (a test calling <see cref="OpenStream" />
+    ///     directly), the id is the node's type name.
+    /// </returns>
+    protected SourceDeadLetterChannel OpenDeadLetterChannel(PipelineContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return new SourceDeadLetterChannel(context, SourceNodeScope.CurrentNodeId ?? GetType().Name);
+    }
 }

@@ -206,8 +206,11 @@ public class ServiceCollectionExtensionsTests
 
         public Task<bool> ExistsAsync(StorageUri uri, CancellationToken cancellationToken = default) => Task.FromResult(false);
 
-        public IAsyncEnumerable<StorageItem> ListAsync(StorageUri prefix, bool recursive = false, CancellationToken cancellationToken = default) =>
-            AsyncEnumerable.Empty<StorageItem>();
+        public async IAsyncEnumerable<StorageItem> ListAsync(StorageUri prefix, bool recursive = false, CancellationToken cancellationToken = default)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
 
         public Task<StorageMetadata?> GetMetadataAsync(StorageUri uri, CancellationToken cancellationToken = default) =>
             Task.FromResult<StorageMetadata?>(null);

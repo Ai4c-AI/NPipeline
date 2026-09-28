@@ -65,7 +65,13 @@ public sealed class NodeExecutor(
         IDictionary<string, IDataStream?> nodeOutputs,
         INode instance)
     {
-        var output = await plan.ExecuteSource!(instance, context, context.CancellationToken).ConfigureAwait(false);
+        IDataStream output;
+
+        // OpenStream runs synchronously inside this scope, so a source can capture its id (SourceNode.OpenDeadLetterChannel).
+        using (SourceNodeScope.Enter(plan.NodeId))
+        {
+            output = await plan.ExecuteSource!(instance, context, context.CancellationToken).ConfigureAwait(false);
+        }
 
         // Counted on a handle the output releases once it is read to the end, so the source's observation ends with
         // its dataflow. Wrapped before lineage and fan-out, so each item the source yields is counted once.
