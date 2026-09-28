@@ -221,8 +221,20 @@ public sealed class MongoResilienceBehaviorTests
                 return Task.FromException<BulkWriteResult<BsonDocument>>(ConnectionError());
             });
 
-        // The real preset: the first retry waits up to a second, and the cancellation lands in that wait.
-        var act = () => WriteAsync(client, SinkConfig(MongoConnectorResilience.Default), w => new BsonDocument("label", w.Label), cts.Token);
+        // Deterministic long backoff: the first retry always waits five seconds, so the cancellation
+        // (50 ms) is guaranteed to land inside that wait. The preset's full jitter can draw a delay
+        // under 50 ms, which lets the second attempt run and makes the assertion flaky.
+        var resilience = MongoConnectorResilience.Default with
+        {
+            Backoff = Backoff.Default with
+            {
+                Jitter = Jitter.None,
+                TransientBase = TimeSpan.FromSeconds(5),
+                MaximumDelay = TimeSpan.FromSeconds(5),
+            },
+        };
+
+        var act = () => WriteAsync(client, SinkConfig(resilience), w => new BsonDocument("label", w.Label), cts.Token);
 
         _ = await act.Should().ThrowAsync<OperationCanceledException>();
         attempts.Should().Be(1);

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Text;
@@ -135,13 +136,17 @@ public sealed class HttpSourceBehaviourTests
     [Fact]
     public async Task Traces_use_opentelemetry_names_and_redact_the_query()
     {
-        var activities = new List<Activity>();
+        var activities = new ConcurrentQueue<Activity>();
 
         using var listener = new ActivityListener
         {
             ShouldListenTo = source => source.Name == "NPipeline.Connectors.Http",
             Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
-            ActivityStopped = activities.Add,
+            ActivityStopped = activity =>
+            {
+                if (activity.GetTagItem("server.address") as string == "api.test")
+                    activities.Enqueue(activity);
+            },
         };
 
         ActivitySource.AddActivityListener(listener);

@@ -258,7 +258,12 @@ public sealed class GcsResilienceBehaviorTests
     {
         var slowRetry = GcsStorageResilience.Default with
         {
-            Backoff = Backoff.Default with { TransientBase = TimeSpan.FromSeconds(30), MaximumDelay = TimeSpan.FromSeconds(30) },
+            Backoff = Backoff.Default with
+            {
+                Jitter = Jitter.None,
+                TransientBase = TimeSpan.FromSeconds(30),
+                MaximumDelay = TimeSpan.FromSeconds(30),
+            },
         };
 
         var (provider, client) = CreateProvider(slowRetry);
@@ -273,6 +278,8 @@ public sealed class GcsResilienceBehaviorTests
                 return Task.FromException<Object>(ApiError(HttpStatusCode.ServiceUnavailable));
             });
 
+        // The backoff is a deterministic 30 s, so the 50 ms cancellation always lands inside the wait.
+        // With the preset's full jitter the draw can fall under 50 ms and let a second attempt run.
         _ = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => provider.ExistsAsync(Uri, cts.Token));
         attempts.Should().Be(1);
     }
