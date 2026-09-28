@@ -18,9 +18,13 @@ namespace NPipeline.Connectors.Json;
 /// </remarks>
 public class JsonConfiguration
 {
+    private bool _propertyNameCaseInsensitive = true;
+
     private JsonPropertyNamingPolicy _propertyNamingPolicy = JsonPropertyNamingPolicy.LowerCase;
 
     private JsonSerializerOptions? _serializerOptions;
+
+    private bool _writeIndented;
 
     /// <summary>
     ///     Initializes a new instance of the <see cref="JsonConfiguration" /> class with default settings.
@@ -76,7 +80,15 @@ public class JsonConfiguration
     ///         improves parsing performance, but is harder for humans to read.
     ///     </para>
     /// </remarks>
-    public bool WriteIndented { get; set; }
+    public bool WriteIndented
+    {
+        get => _writeIndented;
+        set
+        {
+            _writeIndented = value;
+            _serializerOptions = null; // Force recreation of serializer options
+        }
+    }
 
     /// <summary>
     ///     Gets or sets a value indicating whether property name comparison is case-insensitive.
@@ -91,7 +103,15 @@ public class JsonConfiguration
     ///         When <c>false</c>, property names must match exactly, including case.
     ///     </para>
     /// </remarks>
-    public bool PropertyNameCaseInsensitive { get; set; } = true;
+    public bool PropertyNameCaseInsensitive
+    {
+        get => _propertyNameCaseInsensitive;
+        set
+        {
+            _propertyNameCaseInsensitive = value;
+            _serializerOptions = null; // Force recreation of serializer options
+        }
+    }
 
     /// <summary>
     ///     Gets or sets the naming policy for JSON property names.

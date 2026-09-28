@@ -220,30 +220,13 @@ public sealed class ExcelSourceNode<T> : SourceNode<T>
             }
         }
 
-        // Read data rows
+        // Read data rows. Mapper exceptions propagate: a row that fails to map is an error, not a row to drop.
         while (reader.Read())
         {
-            var item = CreateInstance(reader, headers, config.FirstRowIsHeader, _rowMapper);
+            var item = _rowMapper(new ExcelRow(reader, headers, config.FirstRowIsHeader));
 
             if (item is not null)
                 yield return item;
-        }
-    }
-
-    private static T? CreateInstance(
-        IDataReader reader,
-        Dictionary<string, int> headers,
-        bool hasHeaders,
-        Func<ExcelRow, T> rowMapper)
-    {
-        try
-        {
-            var excelRow = new ExcelRow(reader, headers, hasHeaders);
-            return rowMapper(excelRow);
-        }
-        catch
-        {
-            return default;
         }
     }
 }

@@ -40,6 +40,8 @@ namespace NPipeline.Connectors.Json;
 /// </remarks>
 public sealed class JsonSinkNode<T> : SinkNode<T>
 {
+    private const int FlushThresholdBytes = 64 * 1024;
+
     private static readonly Lazy<IStorageResolver> DefaultResolver =
         new(() => StorageProviderFactory.CreateResolver());
 
@@ -196,7 +198,13 @@ public sealed class JsonSinkNode<T> : SinkNode<T>
                 await writer.WriteAsync(utf8Encoding.GetBytes("\n"), cancellationToken).ConfigureAwait(false);
             }
             else
+            {
                 WriteItem(jsonWriter!, item, valueGetters, propertyNames, useMapper);
+
+                // Utf8JsonWriter buffers until flushed, so without this the whole array is held in memory.
+                if (jsonWriter!.BytesPending >= FlushThresholdBytes)
+                    await jsonWriter.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
         }
 
         // Write end array for JSON Array format

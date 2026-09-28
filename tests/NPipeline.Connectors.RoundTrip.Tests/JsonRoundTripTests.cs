@@ -55,7 +55,7 @@ public abstract class JsonRoundTripTests(JsonFormat format)
     [Fact]
     public Task Empty() => RoundTripScenarios.Empty(_harness);
 
-    [KnownBugFact("JSON-4")]
+    [Fact]
     public async Task Row_error_handler_skip_drops_value_type_rows()
     {
         var content = format == JsonFormat.Array
@@ -74,7 +74,7 @@ public abstract class JsonRoundTripTests(JsonFormat format)
 
 public sealed class JsonArrayRoundTripTests() : JsonRoundTripTests(JsonFormat.Array)
 {
-    [KnownBugFact("JSON-2")]
+    [Fact]
     public async Task Sink_streams_output_before_the_input_completes()
     {
         // Written to a real file so the test can watch bytes reach the stream while the sink is still consuming.
@@ -106,7 +106,7 @@ public sealed class JsonArrayRoundTripTests() : JsonRoundTripTests(JsonFormat.Ar
         }
     }
 
-    [KnownBugFact("JSON-6")]
+    [Fact]
     public void Serializer_options_reflect_later_configuration_changes()
     {
         var configuration = new JsonConfiguration();

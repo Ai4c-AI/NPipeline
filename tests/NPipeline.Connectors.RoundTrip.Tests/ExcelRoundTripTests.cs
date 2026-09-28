@@ -55,7 +55,7 @@ public sealed class ExcelRoundTripTests
     public Task Writes_to_non_seekable_streams() =>
         RoundTripScenarios.Scalars(new ExcelHarness { Provider = new InMemoryStorageProvider { NonSeekableWrites = true } });
 
-    [KnownBugFact("XL-1")]
+    [Fact]
     public async Task Source_surfaces_row_mapper_exceptions()
     {
         await _harness.WriteAsync([ScalarRecord.Create(1)]);

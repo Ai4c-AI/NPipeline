@@ -155,7 +155,7 @@ Implement `IRateLimiter` for custom rate limiting (sliding window, per-endpoint,
 | `UriFactory` | `Func<object, Uri>?` | `null` | Per-item URL (overrides `Uri`) |
 | `Method` | `SinkHttpMethod` | `Post` | `Post`, `Put`, or `Patch` |
 | `Headers` | `Dictionary<string, string>` | `{}` | Default headers |
-| `BatchSize` | `int` | `1` | Items per request (1 = individual) |
+| `BatchSize` | `int` | `1` | Items per request (1 = individual). With `UriFactory`, a batch holds consecutive items for the same URI and is sent early when the URI changes |
 | `BatchWrapperKey` | `string?` | `null` | JSON property name wrapping batch array |
 | `Auth` | `IHttpAuthProvider` | `NullAuthProvider` | Authentication provider |
 | `RateLimiter` | `IRateLimiter` | `NullRateLimiter` | Rate limiter |

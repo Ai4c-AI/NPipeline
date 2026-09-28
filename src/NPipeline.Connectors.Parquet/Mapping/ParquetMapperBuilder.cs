@@ -177,9 +177,10 @@ public static class ParquetMapperBuilder
             valueVar,
             defaultValue);
 
-        // Convert DateTime to DateTimeOffset (assuming UTC)
-        var dateTimeOffsetConstructor = typeof(DateTimeOffset).GetConstructor([typeof(DateTime)])
-                                        ?? throw new InvalidOperationException("DateTimeOffset constructor not found");
+        // The sink stores DateTimeOffset as its UTC instant. new DateTimeOffset(DateTime) would apply the host's local
+        // offset to an Unspecified value and shift the instant, so convert through ParquetRow.ToDateTimeOffset.
+        var toDateTimeOffsetMethod = typeof(ParquetRow).GetMethod(nameof(ParquetRow.ToDateTimeOffset), BindingFlags.NonPublic | BindingFlags.Static)
+                                     ?? throw new InvalidOperationException("ParquetRow.ToDateTimeOffset not found");
 
         // Handle the assignment based on whether the property is nullable
         Expression assignValue;
@@ -187,14 +188,14 @@ public static class ParquetMapperBuilder
         if (isNullable && propertyType == typeof(DateTimeOffset?))
         {
             // Property is nullable DateTimeOffset, need to convert from DateTime to DateTimeOffset?
-            var newDateTimeOffset = Expression.New(dateTimeOffsetConstructor, valueVar);
+            var newDateTimeOffset = Expression.Call(toDateTimeOffsetMethod, valueVar);
             var convertToNullable = Expression.Convert(newDateTimeOffset, typeof(DateTimeOffset?));
             assignValue = Expression.Assign(Expression.Property(instanceParam, property), convertToNullable);
         }
         else
         {
             // Property is non-nullable DateTimeOffset
-            var newDateTimeOffset = Expression.New(dateTimeOffsetConstructor, valueVar);
+            var newDateTimeOffset = Expression.Call(toDateTimeOffsetMethod, valueVar);
             assignValue = Expression.Assign(Expression.Property(instanceParam, property), newDateTimeOffset);
         }
 

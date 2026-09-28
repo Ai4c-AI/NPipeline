@@ -226,9 +226,7 @@ public sealed class JsonSourceNode<T> : SourceNode<T>
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var result = MapJsonElement(item, config, cancellationToken);
-
-            if (result is not null)
+            if (TryMapJsonElement(item, config, cancellationToken, out var result) && result is not null)
                 yield return result;
         }
     }
@@ -265,54 +263,40 @@ public sealed class JsonSourceNode<T> : SourceNode<T>
                     ex);
             }
 
-            var result = MapJsonElement(item, config, cancellationToken);
-
-            if (result is not null)
+            if (TryMapJsonElement(item, config, cancellationToken, out var result) && result is not null)
                 yield return result;
         }
     }
 
-    private T? MapJsonElement(
+    /// <summary>
+    ///     Maps one element. Returns <c>false</c> when <see cref="JsonConfiguration.RowErrorHandler" /> skips the row; a
+    ///     skipped row must not be emitted as <c>default</c>, which for a value type is a real value such as 0.
+    /// </summary>
+    private bool TryMapJsonElement(
         JsonElement element,
         JsonConfiguration config,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        out T? result)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        // Check if we have a manual mapper
-        if (_rowMapper is not null)
-        {
-            var row = new JsonRow(element, config.PropertyNameCaseInsensitive);
-
-            try
-            {
-                return _rowMapper(row);
-            }
-            catch (Exception ex)
-            {
-                var handler = config.RowErrorHandler;
-
-                if (handler is not null && handler(ex, row))
-                    return default!; // handler opted to swallow
-
-                throw;
-            }
-        }
-
-        // Use attribute-based mapping via JsonMapperBuilder
-        var attrRow = new JsonRow(element, config.PropertyNameCaseInsensitive);
-        var mapper = JsonMapperBuilder.Build<T>(config.PropertyNamingPolicy);
+        var row = new JsonRow(element, config.PropertyNameCaseInsensitive);
+        var mapper = _rowMapper ?? JsonMapperBuilder.Build<T>(config.PropertyNamingPolicy);
 
         try
         {
-            return mapper(attrRow);
+            result = mapper(row);
+            return true;
         }
         catch (Exception ex)
         {
             var handler = config.RowErrorHandler;
 
-            if (handler is not null && handler(ex, attrRow))
-                return default!; // handler opted to swallow
+            if (handler is not null && handler(ex, row))
+            {
+                result = default;
+                return false; // handler opted to skip
+            }
 
             throw;
         }

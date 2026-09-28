@@ -45,7 +45,7 @@ public sealed class CsvRoundTripTests
     [Fact]
     public Task Empty() => RoundTripScenarios.Empty(_harness);
 
-    [KnownBugFact("CSV-1")]
+    [Fact]
     public async Task Source_maps_pascal_case_headers_written_by_other_tools()
     {
         _harness.Provider.Put(_harness.Uri, Encoding.UTF8.GetBytes("Id,Name,Amount\n1,Ada,12.5\n"));

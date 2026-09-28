@@ -128,27 +128,30 @@ public sealed partial class HttpSinkNode<T> : SinkNode<T>, IAsyncDisposable
         CancellationToken cancellationToken)
     {
         var batch = new List<T>(_configuration.BatchSize);
+        Uri? batchUri = null;
 
         await foreach (var item in input.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
-            batch.Add(item);
+            var uri = ResolveUri(item);
 
-            if (batch.Count >= _configuration.BatchSize)
+            // A request carries items for one URI only, so a change of URI ends the batch. Items stay in input order
+            // and at most BatchSize items are buffered, however many distinct URIs the factory produces.
+            if (batch.Count > 0 && (batch.Count >= _configuration.BatchSize || uri != batchUri))
             {
-                await FlushBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+                await FlushBatchAsync(batch, batchUri!, cancellationToken).ConfigureAwait(false);
                 batch.Clear();
             }
+
+            batch.Add(item);
+            batchUri = uri;
         }
 
         if (batch.Count > 0)
-            await FlushBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+            await FlushBatchAsync(batch, batchUri!, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task FlushBatchAsync(List<T> items, CancellationToken cancellationToken)
+    private async Task FlushBatchAsync(List<T> items, Uri uri, CancellationToken cancellationToken)
     {
-        var firstItem = items[0]!;
-        var uri = ResolveUri(firstItem);
-
         var waitStart = Stopwatch.GetTimestamp();
         await _configuration.RateLimiter.WaitAsync(cancellationToken).ConfigureAwait(false);
 
@@ -169,8 +172,7 @@ public sealed partial class HttpSinkNode<T> : SinkNode<T>, IAsyncDisposable
 
     private async Task SendAsync(Uri uri, List<T> items, CancellationToken cancellationToken)
     {
-        var jsonOptions = _configuration.JsonOptions
-                          ?? new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        var jsonOptions = _configuration.JsonOptions ?? HttpJsonDefaults.Options;
 
         using var content = BuildContent(items, jsonOptions);
         using var request = new HttpRequestMessage(_httpMethod, uri) { Content = content };

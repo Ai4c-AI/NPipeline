@@ -29,12 +29,13 @@ public readonly struct CsvRow(
     {
         value = defaultValue!;
 
-        if (!_hasHeaders || !_headers.TryGetValue(name, out _))
+        if (!_hasHeaders || !_headers.TryGetValue(name, out var index))
             return false;
 
         try
         {
-            var field = _reader.GetField<T>(name);
+            // Read by ordinal: the header map matches case-insensitively, but CsvHelper's name lookup does not.
+            var field = _reader.GetField<T>(index);
 
             if (field is null)
                 return false;

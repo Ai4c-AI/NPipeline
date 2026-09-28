@@ -173,7 +173,7 @@ public sealed class CsvSourceNode<T> : SourceNode<T>
                 var header = headerRecord[i];
 
                 if (!string.IsNullOrWhiteSpace(header))
-                    headers[header] = i;
+                    _ = headers.TryAdd(header, i); // first occurrence wins, as with CsvHelper's name lookup
             }
         }
 

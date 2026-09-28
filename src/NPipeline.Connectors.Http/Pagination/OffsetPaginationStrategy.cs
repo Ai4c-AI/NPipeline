@@ -51,20 +51,29 @@ public sealed class OffsetPaginationStrategy : IPaginationStrategy
     }
 
     /// <inheritdoc />
+    /// <remarks>Counts a root JSON array. The source calls the overload that takes the deserialized item count instead.</remarks>
     public async ValueTask<Uri?> GetNextPageUriAsync(
         Uri currentUri,
         HttpResponseMessage response,
         CancellationToken cancellationToken = default)
     {
         var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        return await GetNextPageUriAsync(currentUri, response, CountResponseItems(body, null), cancellationToken).ConfigureAwait(false);
+    }
 
-        // Count items returned by reading the JSON array length
-        var itemCount = CountResponseItems(body, null); // null = root array
+    /// <inheritdoc />
+    public async ValueTask<Uri?> GetNextPageUriAsync(
+        Uri currentUri,
+        HttpResponseMessage response,
+        int itemCount,
+        CancellationToken cancellationToken = default)
+    {
         _totalFetched += itemCount;
 
         // Check total from JSON path if configured
         if (_options.TotalItemsJsonPath != null)
         {
+            var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             var total = ReadIntFromJson(body, _options.TotalItemsJsonPath);
 
             if (total.HasValue && _totalFetched >= total.Value)

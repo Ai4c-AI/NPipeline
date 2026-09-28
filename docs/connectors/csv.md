@@ -83,7 +83,7 @@ public class Customer
 }
 ```
 
-When no `[Column]` attribute is present, the mapper falls back to convention matching (PascalCase property → lowercase column name).
+When no `[Column]` attribute is present, the mapper falls back to convention matching: the sink writes the property name in lowercase, and the source matches headers case-insensitively, so `FirstName`, `firstname` and `FIRSTNAME` headers all map to a `FirstName` property. If a header appears more than once, the first occurrence is used.
 
 ### Lambda-Based Mapping
 

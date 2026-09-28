@@ -178,58 +178,81 @@ public sealed class ParquetSourceNode<T> : SourceNode<T>
         ParquetConfiguration config,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        // A sliding window over the files, in order: file i + p starts only once file i has been drained. The file being
+        // consumed is therefore always running, so bounded channels cannot deadlock the way a semaphore shared by
+        // workers started all at once could (later files could take every slot while file 0 never started).
         var maxParallelism = Math.Min(config.FileReadParallelism, files.Count);
-        var semaphore = new SemaphoreSlim(maxParallelism, maxParallelism);
-        var channels = new Channel<T>[files.Count];
-        var workers = new Task[files.Count];
+        using var workersCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var running = new Queue<(Channel<T> Channel, Task Worker)>(maxParallelism);
+        var nextFile = 0;
 
-        for (var index = 0; index < files.Count; index++)
+        try
         {
-            var fileIndex = index;
-            var fileUri = files[fileIndex];
-
-            var channel = Channel.CreateBounded<T>(new BoundedChannelOptions(config.RowGroupSize)
+            while (running.Count < maxParallelism)
             {
-                FullMode = BoundedChannelFullMode.Wait,
-                SingleReader = true,
-                SingleWriter = true,
-            });
-
-            channels[fileIndex] = channel;
-
-            workers[fileIndex] = Task.Run(async () =>
-            {
-                await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
-
-                try
-                {
-                    await foreach (var item in ReadFile(provider, fileUri, config, cancellationToken).ConfigureAwait(false))
-                    {
-                        await channel.Writer.WriteAsync(item, cancellationToken).ConfigureAwait(false);
-                    }
-
-                    channel.Writer.TryComplete();
-                }
-                catch (Exception ex)
-                {
-                    channel.Writer.TryComplete(ex);
-                }
-                finally
-                {
-                    _ = semaphore.Release();
-                }
-            }, cancellationToken);
-        }
-
-        for (var index = 0; index < channels.Length; index++)
-        {
-            await foreach (var item in channels[index].Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
-            {
-                yield return item;
+                running.Enqueue(StartFileWorker(provider, files[nextFile++], config, workersCts.Token));
             }
 
-            await workers[index].ConfigureAwait(false);
+            while (running.TryPeek(out var current))
+            {
+                await foreach (var item in current.Channel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    yield return item;
+                }
+
+                await current.Worker.ConfigureAwait(false);
+                _ = running.Dequeue();
+
+                if (nextFile < files.Count)
+                    running.Enqueue(StartFileWorker(provider, files[nextFile++], config, workersCts.Token));
+            }
         }
+        finally
+        {
+            // The consumer stopped early or a file failed: stop the remaining workers and wait for them, so no worker is
+            // left blocked on a full channel holding an open stream.
+            await workersCts.CancelAsync().ConfigureAwait(false);
+
+            foreach (var (_, worker) in running)
+            {
+                await worker.ConfigureAwait(false);
+            }
+        }
+    }
+
+    private (Channel<T> Channel, Task Worker) StartFileWorker(
+        IStorageProvider provider,
+        StorageUri fileUri,
+        ParquetConfiguration config,
+        CancellationToken cancellationToken)
+    {
+        var channel = Channel.CreateBounded<T>(new BoundedChannelOptions(config.RowGroupSize)
+        {
+            FullMode = BoundedChannelFullMode.Wait,
+            SingleReader = true,
+            SingleWriter = true,
+        });
+
+        // The worker never throws: every outcome, including cancellation, completes the channel, so the reader either
+        // drains it or observes the error.
+        var worker = Task.Run(async () =>
+        {
+            try
+            {
+                await foreach (var item in ReadFile(provider, fileUri, config, cancellationToken).ConfigureAwait(false))
+                {
+                    await channel.Writer.WriteAsync(item, cancellationToken).ConfigureAwait(false);
+                }
+
+                _ = channel.Writer.TryComplete();
+            }
+            catch (Exception ex)
+            {
+                _ = channel.Writer.TryComplete(ex);
+            }
+        }, CancellationToken.None);
+
+        return (channel, worker);
     }
 
     private async Task<IReadOnlyList<StorageUri>> DiscoverParquetFiles(
@@ -407,10 +430,9 @@ public sealed class ParquetSourceNode<T> : SourceNode<T>
 
             invocationResult = stringReadMethod.Invoke(rowGroupReader, [field, valuesMemory, null, cancellationToken]);
         }
-
-        // Parquet.net 6.1.0+ normalizes byte[] columns to ReadOnlyMemory<byte>, so match both
-        if (clrType == typeof(byte[]) || clrType == typeof(ReadOnlyMemory<byte>))
+        else if (clrType == typeof(byte[]) || clrType == typeof(ReadOnlyMemory<byte>))
         {
+            // Parquet.net 6.1.0+ normalizes byte[] columns to ReadOnlyMemory<byte>, so match both
             typedValues = new byte[rowCount][];
 
             var byteArrayReadMethod = typeof(ParquetRowGroupReader).GetMethod(

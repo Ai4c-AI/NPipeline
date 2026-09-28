@@ -110,8 +110,7 @@ public sealed partial class HttpSourceNode<T> : SourceNode<T>, IAsyncDisposable
         var uri = _configuration.Pagination.BuildFirstPageUri(_configuration.BaseUri);
         var pageNumber = 0;
 
-        var jsonOptions = _configuration.JsonOptions
-                          ?? new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        var jsonOptions = _configuration.JsonOptions ?? HttpJsonDefaults.Options;
 
         while (true)
         {
@@ -177,7 +176,7 @@ public sealed partial class HttpSourceNode<T> : SourceNode<T>, IAsyncDisposable
                 }
 
                 var nextUri = await _configuration.Pagination
-                    .GetNextPageUriAsync(uri, response, cancellationToken)
+                    .GetNextPageUriAsync(uri, response, items.Count, cancellationToken)
                     .ConfigureAwait(false);
 
                 if (nextUri == null)

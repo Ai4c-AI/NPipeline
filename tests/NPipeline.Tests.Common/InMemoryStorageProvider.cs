@@ -42,6 +42,7 @@ public sealed class InMemoryStorageProvider : IStorageProvider, IDeletableStorag
 
     public Task<Stream> OpenWriteAsync(StorageUri uri, CancellationToken cancellationToken = default)
     {
+        WriteRequests.Enqueue(uri);
         Stream stream = new CommittingStream(bytes => _objects[Key(uri)] = bytes);
 
         if (NonSeekableWrites)
@@ -86,6 +87,9 @@ public sealed class InMemoryStorageProvider : IStorageProvider, IDeletableStorag
 
         await Task.CompletedTask.ConfigureAwait(false);
     }
+
+    /// <summary>Every URI passed to <see cref="OpenWriteAsync" />, in order, including parameters the key ignores.</summary>
+    public ConcurrentQueue<StorageUri> WriteRequests { get; } = new();
 
     /// <summary>Stores <paramref name="bytes" /> at <paramref name="uri" />, as if written by another tool.</summary>
     public void Put(StorageUri uri, byte[] bytes) => _objects[Key(uri)] = bytes;

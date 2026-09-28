@@ -37,6 +37,8 @@ public sealed class HttpSinkConfiguration
     ///     Maximum number of items to buffer before flushing as a batch.
     ///     Use <c>1</c> (default) for item-at-a-time writes.
     ///     Use a larger value for APIs that accept bulk payloads.
+    ///     With <see cref="UriFactory" />, a batch holds consecutive items for the same URI: a change of URI sends the
+    ///     batch early, so no item is posted to another item's endpoint.
     /// </summary>
     public int BatchSize { get; init; } = 1;
 

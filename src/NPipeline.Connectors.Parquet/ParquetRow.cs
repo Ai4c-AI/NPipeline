@@ -209,6 +209,15 @@ public sealed class ParquetRow
         }
     }
 
+    /// <summary>
+    ///     Converts a stored timestamp to a <see cref="DateTimeOffset" /> at UTC. The sink writes a DateTimeOffset as its UTC
+    ///     instant, so an <see cref="DateTimeKind.Unspecified" /> value is UTC, never local time.
+    /// </summary>
+    internal static DateTimeOffset ToDateTimeOffset(DateTime value) =>
+        value.Kind == DateTimeKind.Local
+            ? new DateTimeOffset(value.ToUniversalTime(), TimeSpan.Zero)
+            : new DateTimeOffset(DateTime.SpecifyKind(value, DateTimeKind.Utc), TimeSpan.Zero);
+
     private static T ConvertValue<T>(object value, string columnName)
     {
         var targetType = typeof(T);
@@ -229,7 +238,7 @@ public sealed class ParquetRow
                 return (T)(object)dto.DateTime;
 
             if (underlyingType == typeof(DateTimeOffset) && value is DateTime dt)
-                return (T)(object)new DateTimeOffset(dt, TimeSpan.Zero);
+                return (T)(object)ToDateTimeOffset(dt);
 
             var converted = Convert.ChangeType(value, underlyingType);
 

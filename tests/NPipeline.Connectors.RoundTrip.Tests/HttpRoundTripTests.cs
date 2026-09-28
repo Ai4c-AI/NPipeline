@@ -55,7 +55,7 @@ public sealed class HttpRoundTripTests
     [Fact]
     public Task Empty() => RoundTripScenarios.Empty(_harness);
 
-    [KnownBugFact("HTTP-1")]
+    [Fact]
     public async Task Offset_pagination_reads_every_page_of_a_wrapped_response()
     {
         ServePages(page => $$"""{"data":{{Page(page, 2, 5)}},"total":5}""");
@@ -111,7 +111,7 @@ public sealed class HttpRoundTripTests
         await read.Should().ThrowAsync<Exception>();
     }
 
-    [KnownBugFact("HTTP-3")]
+    [Fact]
     public async Task Batched_sink_sends_each_item_to_its_own_uri()
     {
         var configuration = new HttpSinkConfiguration

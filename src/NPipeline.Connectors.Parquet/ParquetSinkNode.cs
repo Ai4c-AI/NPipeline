@@ -642,32 +642,10 @@ public sealed class ParquetSinkNode<T> : SinkNode<T>
 #pragma warning restore CA2016
     }
 
-    private static StorageUri CreateTempUri(StorageUri uri)
-    {
-        var tempSuffix = $".tmp-{Guid.NewGuid():N}";
-
-        // Use Combine to append the temp suffix to the path
-        // First, get the filename and add the temp suffix
-        var path = uri.Path ?? string.Empty;
-        var lastSlashIndex = path.LastIndexOf('/');
-
-        var fileName = lastSlashIndex >= 0
-            ? path[(lastSlashIndex + 1)..]
-            : path;
-
-        var directory = lastSlashIndex >= 0
-            ? path[..lastSlashIndex]
-            : "";
-
-        var tempFileName = fileName + tempSuffix;
-
-        var tempPath = string.IsNullOrEmpty(directory)
-            ? "/" + tempFileName
-            : directory + "/" + tempFileName;
-
-        // Parse the modified URI string to create a new StorageUri
-        return StorageUri.Parse($"{uri.Scheme}://{uri.Host ?? ""}{tempPath}");
-    }
+    private static StorageUri CreateTempUri(StorageUri uri) =>
+        // Keep everything but the path: parameters, port and user info select the account, region or endpoint, and a
+        // temporary object written elsewhere could not be moved or copied into place.
+        uri with { Path = $"{uri.Path}.tmp-{Guid.NewGuid():N}" };
 
     private async Task PublishAtomicWrite(
         IStorageProvider provider,

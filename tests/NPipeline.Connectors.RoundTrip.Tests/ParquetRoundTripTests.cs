@@ -2,6 +2,7 @@ using NPipeline.Connectors.Parquet;
 using NPipeline.Connectors.RoundTrip.Tests.Harnesses;
 using NPipeline.Connectors.RoundTrip.Tests.Infrastructure;
 using NPipeline.Connectors.RoundTrip.Tests.Models;
+using NPipeline.StorageProviders.Models;
 using NPipeline.Tests.Common;
 
 namespace NPipeline.Connectors.RoundTrip.Tests;
@@ -22,7 +23,7 @@ public sealed class ParquetRoundTripTests
     [KnownBugFact("PQ-3")]
     public Task Enums() => RoundTripScenarios.Enums(_harness);
 
-    [KnownBugFact("PQ-2")]
+    [Fact]
     public Task DateTimeOffsets() => RoundTripScenarios.DateTimeOffsets(_harness);
 
     [Fact]
@@ -65,7 +66,19 @@ public sealed class ParquetRoundTripTests
         _harness.Provider.Keys.Should().ContainSingle().Which.Should().EndWith("/data.parquet");
     }
 
-    [KnownBugFact("PQ-1")]
+    [Fact]
+    public async Task Atomic_write_keeps_uri_parameters_on_the_temporary_object()
+    {
+        var uri = StorageUri.Parse("mem://test/data.parquet?region=ap-southeast-2");
+        var sink = new ParquetSinkNode<ScalarRecord>(_harness.Provider, uri, new ParquetConfiguration());
+
+        await NodeRunner.WriteAsync(sink, [ScalarRecord.Create(1)]);
+
+        _harness.Provider.WriteRequests.Should().HaveCountGreaterThan(1, "the atomic write goes through a temporary object")
+            .And.AllSatisfy(written => written.Parameters.Should().Contain("region", "ap-southeast-2"));
+    }
+
+    [Fact]
     public async Task Parallel_directory_read_does_not_deadlock()
     {
         // The deadlock depends on thread-pool scheduling, so read several times; one pass often gets lucky.
@@ -89,5 +102,35 @@ public sealed class ParquetRoundTripTests
 
             rows.Select(r => r.Id).Should().Equal(Enumerable.Range(0, files * rowsPerFile), "files are read in parallel but emitted in file order");
         }
+    }
+
+    [Fact]
+    public async Task Stopping_a_parallel_read_early_releases_the_workers()
+    {
+        var provider = new InMemoryStorageProvider();
+        var configuration = new ParquetConfiguration { RowGroupSize = 10, FileReadParallelism = 4, UseAtomicWrite = false };
+
+        for (var file = 0; file < 8; file++)
+        {
+            var sink = new ParquetSinkNode<ScalarRecord>(provider, InMemoryStorageProvider.Uri($"parts/f{file}.parquet"), configuration);
+            await NodeRunner.WriteAsync(sink, Enumerable.Range(file * 200, 200).Select(ScalarRecord.Create));
+        }
+
+        var source = new ParquetSourceNode<ScalarRecord>(provider, InMemoryStorageProvider.Uri("parts/"), configuration);
+        var stream = source.OpenStream(NPipeline.Pipeline.PipelineContext.CreateDefault(), CancellationToken.None);
+        var read = 0;
+
+        // Disposing the enumerator after an early break must cancel and await the workers blocked on full channels.
+        var consume = async () =>
+        {
+            await foreach (var _ in stream)
+            {
+                if (++read == 5)
+                    break;
+            }
+        };
+
+        await consume.Should().CompleteWithinAsync(TimeSpan.FromSeconds(10));
+        read.Should().Be(5);
     }
 }
