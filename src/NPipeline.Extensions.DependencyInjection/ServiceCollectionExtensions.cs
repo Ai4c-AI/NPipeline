@@ -121,7 +121,8 @@ public static class ServiceCollectionExtensions
         services.TryAddTransient<IErrorHandlingService, ErrorHandlingService>();
         services.TryAddTransient<IPersistenceService, PersistenceService>();
         services.TryAddSingleton<IRuntimePipelineBinder>(_ => RuntimePipelineBinder.Instance);
-        services.TryAddScoped<IObservabilitySurface>(_ => NullObservabilitySurface.Instance);
+        // An instance, so the observability extension can tell this default from a surface the app registered.
+        services.TryAddSingleton<IObservabilitySurface>(NullObservabilitySurface.Instance);
     }
 
     /// <summary>
@@ -131,7 +132,7 @@ public static class ServiceCollectionExtensions
     ///     <para>
     ///         Every service <paramref name="configuration" /> leaves unset is taken from the container: the error handler,
     ///         lineage and observability factories, the <see cref="Microsoft.Extensions.Logging.ILoggerFactory" /> and the
-    ///         <see cref="Observability.Tracing.IPipelineTracer" />. The registered <see cref="IExecutionObserver" />, such as
+    ///         <see cref="Observability.Tracing.IPipelineTracer" />. Every registered <see cref="IExecutionObserver" />, such as
     ///         the metrics observer <c>AddNPipelineObservability</c> registers, is attached to the context. Use this whenever
     ///         you run a pipeline through <see cref="IPipelineRunner" /> yourself rather than through
     ///         <see cref="RunPipelineAsync{TDefinition}(IServiceProvider, CancellationToken)" />; a context created with
@@ -163,8 +164,9 @@ public static class ServiceCollectionExtensions
         var context = new PipelineContext((configuration ?? PipelineContextConfiguration.Default).WithServiceDefaults(serviceProvider));
 
         // Without this the context keeps its NullExecutionObserver and no metrics are collected. It is not part of the
-        // configuration, so it is attached to the context itself.
-        if (serviceProvider.GetService<IExecutionObserver>() is { } executionObserver)
+        // configuration, so it is attached to the context itself. Every registered observer is notified.
+        if (CompositeExecutionObserver.Combine(serviceProvider.GetServices<IExecutionObserver>(), context.Observability.LoggerFactory) is
+            { } executionObserver)
             context.Observability.ExecutionObserver = executionObserver;
 
         return context;

@@ -98,4 +98,14 @@ public interface IAutoObservabilityScope : IDisposable
     ///     so small transient skew between buckets is possible under concurrent updates.
     /// </returns>
     NodeTimingBreakdown GetTimingBreakdown() => NodeTimingBreakdown.Empty;
+
+    /// <summary>
+    ///     Gets the item counts recorded by this scope so far.
+    /// </summary>
+    /// <remarks>
+    ///     Safe to read while the node runs, for example to report live progress by polling. The counts are read without
+    ///     a lock, so they may be momentarily out of step with each other.
+    /// </remarks>
+    /// <returns>The item counts, or <see cref="NodeItemCounts.Empty" /> when the scope does not count items.</returns>
+    NodeItemCounts GetItemCounts() => NodeItemCounts.Empty;
 }

@@ -74,9 +74,38 @@ public sealed class RouteRule<T>
 }
 
 /// <summary>
+///     A route node's routing configuration, readable without knowing its item type.
+/// </summary>
+/// <remarks>
+///     For tools that inspect a pipeline graph, such as visualizers. <see cref="RouteOptions{T}" /> implements it.
+/// </remarks>
+public interface IRouteOptions
+{
+    /// <summary>
+    ///     Gets the match mode used to resolve route rules.
+    /// </summary>
+    RouteMatchMode MatchMode { get; }
+
+    /// <summary>
+    ///     Gets the behavior for items that do not match any rule and have no otherwise route.
+    /// </summary>
+    NoRouteMatchBehavior NoMatchBehavior { get; }
+
+    /// <summary>
+    ///     Gets the output name that receives unmatched items, when configured.
+    /// </summary>
+    string? OtherwiseOutputName { get; }
+
+    /// <summary>
+    ///     Gets the output names of the route rules, in the order the rules are evaluated.
+    /// </summary>
+    IReadOnlyList<string> OutputNames { get; }
+}
+
+/// <summary>
 ///     Configures conditional routing for a route node.
 /// </summary>
-public sealed class RouteOptions<T>
+public sealed class RouteOptions<T> : IRouteOptions
 {
     private readonly List<RouteRule<T>> _rules = [];
 
@@ -84,6 +113,9 @@ public sealed class RouteOptions<T>
     ///     Gets the ordered route rules used to evaluate items.
     /// </summary>
     public IReadOnlyList<RouteRule<T>> Rules => _rules;
+
+    /// <inheritdoc />
+    public IReadOnlyList<string> OutputNames => _rules.ConvertAll(static rule => rule.OutputName);
 
     /// <summary>
     ///     Gets the match mode used to resolve route rules.

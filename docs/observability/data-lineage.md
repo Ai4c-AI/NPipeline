@@ -40,6 +40,11 @@ services.AddNPipelineLineage(sp => new MyPipelineLineageSink());
 builder.AddPipelineLineageSink<MyPipelineLineageSink>();
 ```
 
+To enable lineage tracking without choosing a pipeline lineage sink, for example in a tool that reads lineage from
+`ILineageCollector`, use `AddNPipelineLineageCore()`. It registers no default sink, so a run reports its pipeline
+lineage only to a sink the pipeline or the app configures. It can be combined with `AddNPipelineLineage` in either
+order.
+
 ### Item-level lineage
 
 Per-item tracking wraps every item at every node, so it is opt-in per pipeline:

@@ -77,15 +77,6 @@ namespace NPipeline.Pipeline;
 /// </remarks>
 public static class PipelineContextKeys
 {
-    /// <summary>
-    ///     Parent pipeline id of a sub-pipeline run, in <see cref="PipelineContext.Properties" /> (value: <see cref="Guid" />).
-    /// </summary>
-    /// <remarks>
-    ///     Set by composite nodes on each sub-pipeline's context. Extensions use it to tell a sub-pipeline run, of which
-    ///     there may be one per item, from a top-level run.
-    /// </remarks>
-    public const string ParentPipelineId = "__Composite_ParentPipelineId";
-
     /// <summary>Dead-letter sink decorator hook key (value: Func&lt;IDeadLetterSink?, IDeadLetterSink?&gt;).</summary>
     /// <remarks>Allows extensions to decorate the resolved dead-letter sink at pipeline execution time.</remarks>
     public const string DeadLetterSinkDecorator = "NPipeline.DeadLetterSinkDecorator";
@@ -93,6 +84,29 @@ public static class PipelineContextKeys
     /// <summary>Lineage sink decorator hook key (value: Func&lt;ILineageSink?, ILineageSink?&gt;).</summary>
     /// <remarks>Allows extensions to decorate the resolved lineage sink at pipeline execution time.</remarks>
     public const string LineageSinkDecorator = "NPipeline.LineageSinkDecorator";
+
+    /// <summary>
+    ///     Resilience policy decorator hook key (value: <c>Func&lt;string?, IResiliencePolicy, IResiliencePolicy&gt;</c>).
+    /// </summary>
+    /// <remarks>
+    ///     Allows extensions to decorate the resolved resilience policies at pipeline execution time, without replacing
+    ///     them. It is called once per run for the run's policy, with a null node id, and once for each node that has its
+    ///     own policy (<c>AddResiliencePolicy(handle, ...)</c>), with that node's id. A node without its own policy uses
+    ///     the decorated run policy.
+    /// </remarks>
+    public const string ResiliencePolicyDecorator = "NPipeline.ResiliencePolicyDecorator";
+
+    /// <summary>
+    ///     Sub-pipeline context initializer hook key (value: <c>Action&lt;PipelineContext, PipelineContext&gt;</c>, called with
+    ///     the parent context and then the new sub-pipeline context).
+    /// </summary>
+    /// <remarks>
+    ///     Called by a node that runs a sub-pipeline, such as a composite node, after it creates the sub-pipeline's
+    ///     context and before the sub-pipeline runs. It lets instrumentation carry its own state into sub-pipelines
+    ///     whatever the node's context inheritance settings. Every sub-pipeline context gets the hook too, so it also
+    ///     reaches nested sub-pipelines. A composite node runs one sub-pipeline per item, so keep it cheap.
+    /// </remarks>
+    public const string SubPipelineContextInitializer = "NPipeline.SubPipelineContextInitializer";
 
     /// <summary>
     ///     Pipeline sample recorder key (value: <c>IPipelineSampleRecorder</c>).

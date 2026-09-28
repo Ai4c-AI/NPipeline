@@ -321,7 +321,7 @@ public sealed class ObservabilitySurface : IObservabilitySurface
     /// </summary>
     private static void WarnIfCollectorMissing(PipelineContext context, ILogger logger, string pipelineName)
     {
-        if (context.Properties.ContainsKey(PipelineContextKeys.ParentPipelineId) ||
+        if (context.RunIdentity.IsNested ||
             context.Observability.ObservabilityFactory.ResolveObservabilityCollector() is not null)
             return;
 
@@ -422,7 +422,7 @@ public sealed class ObservabilitySurface : IObservabilitySurface
     /// </summary>
     private static void ReleaseIfSubPipeline(IObservabilityCollector collector, PipelineContext context)
     {
-        if (context.Properties.ContainsKey(PipelineContextKeys.ParentPipelineId))
+        if (context.RunIdentity.IsNested)
             collector.ReleasePipeline(context.RunIdentity.PipelineId);
     }
 

@@ -96,8 +96,16 @@ public sealed record LineageRecord(
     /// <summary>
     ///     Returns a record with a normalized timestamp and deterministic contributor ordering.
     /// </summary>
+    /// <remarks>
+    ///     Returns this record when there is nothing to normalize: it has a timestamp and no contributors. A record with
+    ///     contributors is always copied, so it never shares a list the caller can still change.
+    /// </remarks>
     public LineageRecord Normalize()
     {
+        // The common one-to-one hop: skip the copy, which Normalize would otherwise make for every record.
+        if (TimestampUtc != default && ContributorCorrelationIds is null && ContributorInputIndices is null)
+            return this;
+
         var normalizedTime = TimestampUtc == default
             ? DateTimeOffset.UtcNow
             : TimestampUtc;

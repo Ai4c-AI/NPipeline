@@ -159,6 +159,24 @@ services.AddNPipelineObservability(new ObservabilityExtensionOptions { AutoObser
 | `EnableMemoryMetrics` | `false` | Track per-node memory allocation delta |
 | `AutoObserveAllNodes` | `false` | Observe nodes without `WithObservability` using `ObservabilityOptions.Default`. A node's specific options take precedence |
 
+`AddNPipelineObservability` is safe to call more than once: the first call's options are kept, and a surface or
+observer your app registered is never replaced. To adjust the options from a library or tool that runs on top of your
+app's registration, use `ConfigureNPipelineObservability`. It works whether it runs before or after
+`AddNPipelineObservability`:
+
+```csharp
+services.ConfigureNPipelineObservability(options => options with { EnableMemoryMetrics = true });
+```
+
+### Additional Execution Observers
+
+Every `IExecutionObserver` registered in the container receives execution events, alongside the metrics observer.
+Register your own with `AddScoped`, not `TryAddScoped`:
+
+```csharp
+services.AddScoped<IExecutionObserver, MyAuditObserver>();
+```
+
 ### Registration Methods
 
 **Default (logging sinks):**

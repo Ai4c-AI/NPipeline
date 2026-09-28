@@ -10,23 +10,24 @@ namespace NPipeline.Extensions.Observability;
 /// </summary>
 /// <remarks>
 ///     This factory creates <see cref="PipelineContext" /> instances that are automatically
-///     wired up with <see cref="MetricsCollectingExecutionObserver" /> to enable automatic
-///     metrics collection during pipeline execution.
+///     wired up with every registered <see cref="IExecutionObserver" />, including the
+///     <see cref="MetricsCollectingExecutionObserver" /> that enables automatic metrics collection.
 /// </remarks>
 public sealed class ObservablePipelineContextFactory : IObservablePipelineContextFactory
 {
-    private readonly IExecutionObserver _executionObserver;
+    private readonly IExecutionObserver[] _executionObservers;
     private readonly IServiceProvider _serviceProvider;
 
     /// <summary>
     ///     Initializes a new instance of the <see cref="ObservablePipelineContextFactory" /> class.
     /// </summary>
     /// <param name="serviceProvider">The service provider for resolving dependencies.</param>
-    /// <param name="executionObserver">The execution observer to use for the context.</param>
-    public ObservablePipelineContextFactory(IServiceProvider serviceProvider, IExecutionObserver executionObserver)
+    /// <param name="executionObservers">The execution observers every context notifies.</param>
+    public ObservablePipelineContextFactory(IServiceProvider serviceProvider, IEnumerable<IExecutionObserver> executionObservers)
     {
         _serviceProvider = serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
-        _executionObserver = executionObserver ?? throw new ArgumentNullException(nameof(executionObserver));
+        ArgumentNullException.ThrowIfNull(executionObservers);
+        _executionObservers = [.. executionObservers];
     }
 
     /// <inheritdoc />
@@ -54,7 +55,9 @@ public sealed class ObservablePipelineContextFactory : IObservablePipelineContex
             configWithServices = configWithServices with { ObservabilityFactory = new DiObservabilityFactory(_serviceProvider) };
 
         var context = new PipelineContext(configWithServices);
-        context.Observability.ExecutionObserver = _executionObserver;
+
+        if (CompositeExecutionObserver.Combine(_executionObservers, context.Observability.LoggerFactory) is { } executionObserver)
+            context.Observability.ExecutionObserver = executionObserver;
 
         return context;
     }

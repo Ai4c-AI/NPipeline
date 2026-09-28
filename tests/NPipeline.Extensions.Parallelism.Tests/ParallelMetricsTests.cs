@@ -63,6 +63,30 @@ public class ParallelMetricsTests
         _ = metrics.MaxItemRetryAttempts.Should().Be(2);
     }
 
+    [Fact]
+    public async Task DropOldestPolicy_PublishesRetryAnnotations_LikeTheBlockingStrategy()
+    {
+        // Arrange - a queue large enough that nothing is dropped; each item fails twice before succeeding.
+        SharedTestState.Reset(10, 0);
+        AttemptCounts.Clear();
+        var ctx = PipelineContext.CreateDefault();
+
+        // Act
+        await PipelineRunner.Create().RunAsync<DropOldestRetryPipeline>(ctx);
+
+        // Assert
+        var registry = ctx.NodeEnvironment.NodeExecutionScopeRegistry;
+        _ = registry.TryGetRuntimeAnnotation(PipelineContextKeys.ParallelMetricsRetryEvents("transform"), out var retryEvents).Should().BeTrue();
+        _ = registry.TryGetRuntimeAnnotation(PipelineContextKeys.ParallelMetricsRetryItems("transform"), out var retryItems).Should().BeTrue();
+
+        _ = registry.TryGetRuntimeAnnotation(PipelineContextKeys.ParallelMetricsMaxItemRetryAttempts("transform"), out var maxAttempts).Should()
+            .BeTrue();
+
+        _ = retryEvents.Should().Be(20L);
+        _ = retryItems.Should().Be(10L);
+        _ = maxAttempts.Should().Be(2L);
+    }
+
     private sealed class FastSource : SourceNode<int>
     {
         public override IDataStream<int> OpenStream(PipelineContext context, CancellationToken cancellationToken)
@@ -164,6 +188,23 @@ public class ParallelMetricsTests
             _ = builder.Connect(source, transform).Connect(transform, sink);
             _ = builder.WithExecutionStrategy(transform, new ParallelExecutionStrategy());
             _ = builder.SetNodeExecutionOption(transform.Id, new ParallelExecOptions(2, 4));
+        }
+    }
+
+    private sealed class DropOldestRetryPipeline : IPipelineDefinition
+    {
+        public void Define(PipelineBuilder builder, PipelineContext context)
+        {
+            var source = builder.AddInMemorySource<int>("Source");
+            var transform = builder.AddTransform<FlakyTransform, int, int>("transform");
+            var sink = builder.AddSink<InMemorySinkNode<int>, int>("sink");
+            _ = builder.Connect(source, transform).Connect(transform, sink);
+            _ = builder.WithExecutionStrategy(transform, new ParallelExecutionStrategy());
+            _ = builder.SetNodeExecutionOption(transform.Id, new ParallelExecOptions(2, 100, BoundedQueuePolicy.DropOldest));
+            _ = builder.WithResilience(o => o with { ItemRetry = new ItemRetryOptions { MaxRetries = 2 } });
+            _ = builder.AddResiliencePolicy(transform, new RetryHandler());
+
+            context.SetSourceData(Enumerable.Range(0, 10), "Source");
         }
     }
 

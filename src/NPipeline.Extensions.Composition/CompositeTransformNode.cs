@@ -52,7 +52,6 @@ public sealed class CompositeTransformNode<TIn, TOut, TDefinition>
     {
         // Create isolated sub-pipeline context
         var subContext = CreateSubPipelineContext(context);
-        subContext.RunIdentity.PipelineName = PipelineAttributeHelper.GetPipelineName(typeof(TDefinition));
 
         // Store input item in sub-context
         subContext.Parameters[CompositeContextKeys.InputItem] = item is null
@@ -126,21 +125,21 @@ public sealed class CompositeTransformNode<TIn, TOut, TDefinition>
             Tracer: parentContext.Observability.Tracer,
             ErrorHandlerFactory: parentContext.ErrorHandlerFactory,
             LineageFactory: parentContext.Lineage.LineageFactory,
-            ObservabilityFactory: parentContext.Observability.ObservabilityFactory);
+            ObservabilityFactory: parentContext.Observability.ObservabilityFactory)
+        {
+            PipelineName = PipelineAttributeHelper.GetPipelineName(typeof(TDefinition)),
+        };
 
         var subContext = new PipelineContext(config);
         subContext.RunIdentity.PipelineId = Guid.NewGuid();
 
-        // Stamp parent linkage for observability
-        subContext.Properties[CompositeContextKeys.ParentNodeId] =
-            parentContext.NodeEnvironment.TryGetNodeId(this, out var parentNodeId)
-                ? parentNodeId
-                : string.Empty;
+        // Parent linkage, which marks the run as nested for observability and lineage.
+        subContext.RunIdentity.ParentPipelineId = parentContext.RunIdentity.PipelineId;
+        subContext.RunIdentity.ParentPipelineName = parentContext.RunIdentity.PipelineName;
 
-        subContext.Properties[CompositeContextKeys.ParentPipelineId] = parentContext.RunIdentity.PipelineId;
-
-        if (parentContext.RunIdentity.PipelineName is not null)
-            subContext.Properties[CompositeContextKeys.ParentPipelineName] = parentContext.RunIdentity.PipelineName;
+        subContext.RunIdentity.ParentNodeId = parentContext.NodeEnvironment.TryGetNodeId(this, out var parentNodeId)
+            ? parentNodeId
+            : null;
 
         if (_contextConfiguration.InheritRunIdentity)
             subContext.RunIdentity.RunId = parentContext.RunIdentity.RunId;
@@ -161,6 +160,14 @@ public sealed class CompositeTransformNode<TIn, TOut, TDefinition>
 
             if (parentContext.Properties.TryGetValue(PipelineContextKeys.DeadLetterSinkDecorator, out var decorator))
                 subContext.Properties[PipelineContextKeys.DeadLetterSinkDecorator] = decorator;
+        }
+
+        // Always passed on, so instrumentation reaches every nested sub-pipeline whatever the inheritance settings.
+        if (parentContext.Properties.TryGetValue(PipelineContextKeys.SubPipelineContextInitializer, out var initializerObj) &&
+            initializerObj is Action<PipelineContext, PipelineContext> initializer)
+        {
+            subContext.Properties[PipelineContextKeys.SubPipelineContextInitializer] = initializer;
+            initializer(parentContext, subContext);
         }
 
         return subContext;

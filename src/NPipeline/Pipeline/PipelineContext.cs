@@ -188,7 +188,11 @@ public sealed class PipelineContext : IAsyncDisposable
         DeadLetterSink = config.DeadLetterSink;
         ErrorHandlerFactory = config.ErrorHandlerFactory ?? new DefaultErrorHandlerFactory(loggerFactory);
 
-        RunIdentity = new PipelineRunIdentityContext(DateTime.UtcNow);
+        RunIdentity = new PipelineRunIdentityContext(DateTime.UtcNow)
+        {
+            RunId = config.RunId,
+            PipelineName = string.IsNullOrWhiteSpace(config.PipelineName) ? null : config.PipelineName,
+        };
         ExecutionConfiguration = new PipelineExecutionConfigurationContext(config.OptimizationProfile);
         ConfiguredResiliencePolicy = config.ResiliencePolicy;
 
@@ -306,10 +310,19 @@ public sealed class PipelineContext : IAsyncDisposable
     internal Func<IResiliencePolicy, IResiliencePolicy>? ResiliencePolicyOverride { get; set; }
 
     /// <summary>
-    ///     Returns <paramref name="policy" /> wrapped by <see cref="ResiliencePolicyOverride" />, when one is set.
+    ///     Returns <paramref name="policy" /> wrapped by the <see cref="PipelineContextKeys.ResiliencePolicyDecorator" /> in
+    ///     <see cref="Properties" />, then by <see cref="ResiliencePolicyOverride" />, when they are set.
     /// </summary>
-    internal IResiliencePolicy ApplyResiliencePolicyOverride(IResiliencePolicy policy) =>
-        ResiliencePolicyOverride is { } wrap ? wrap(policy) : policy;
+    /// <param name="nodeId">The node whose own policy this is, or null for the run's policy.</param>
+    /// <param name="policy">The resolved policy.</param>
+    internal IResiliencePolicy ApplyResiliencePolicyOverride(string? nodeId, IResiliencePolicy policy)
+    {
+        if (Properties.TryGetValue(PipelineContextKeys.ResiliencePolicyDecorator, out var decoratorObj) &&
+            decoratorObj is Func<string?, IResiliencePolicy, IResiliencePolicy> decorator)
+            policy = decorator(nodeId, policy);
+
+        return ResiliencePolicyOverride is { } wrap ? wrap(policy) : policy;
+    }
 
     /// <summary>
     ///     The sink for items that have failed processing and have been redirected.
@@ -417,12 +430,21 @@ public sealed class PipelineContext : IAsyncDisposable
     }
 
     /// <summary>
-    ///     Cancels the run in progress, which stops sibling nodes that are still draining after one of them failed.
+    ///     Cancels the run in progress: every node observing <see cref="CancellationToken" /> is asked to stop, and the
+    ///     run ends with <see cref="OperationCanceledException" />.
     /// </summary>
     /// <remarks>
-    ///     Does nothing when no run is in progress, or when the run has already ended and its linked source disposed.
+    ///     <para>
+    ///         Use it to stop a run you did not start, for example from a dashboard or a hosted service that only holds
+    ///         the context. Cancelling a token linked from <see cref="CancellationToken" /> cannot reach the run.
+    ///     </para>
+    ///     <para>
+    ///         Does nothing when no run is in progress, or when the run has already ended. A callback registered on the
+    ///         run's token that throws is logged, not rethrown. The runner also calls this to stop sibling nodes that
+    ///         are still draining after one of them failed.
+    ///     </para>
     /// </remarks>
-    internal void CancelRun()
+    public void RequestCancellation()
     {
         try
         {
@@ -434,8 +456,8 @@ public sealed class PipelineContext : IAsyncDisposable
         }
         catch (AggregateException ex)
         {
-            // A user callback registered on the run's token threw. The run is being cancelled because of another
-            // failure, which must not be replaced by this one.
+            // A user callback registered on the run's token threw. It must not replace the failure that caused the
+            // cancellation, nor fail the caller that asked for it.
             try
             {
                 PipelineRunnerLogMessages.CancellationCallbackFailed(Observability.LoggerFactory.CreateLogger("PipelineContext"), ex);

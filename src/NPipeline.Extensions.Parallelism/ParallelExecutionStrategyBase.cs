@@ -268,6 +268,20 @@ public abstract class ParallelExecutionStrategyBase(int? maxDegreeOfParallelism 
 
             context.NodeEnvironment.NodeExecutionScopeRegistry.SetRuntimeAnnotation(PipelineContextKeys.ParallelMetricsEnqueued(nodeId), metrics.Enqueued);
             context.NodeEnvironment.NodeExecutionScopeRegistry.SetRuntimeAnnotation(PipelineContextKeys.ParallelMetricsProcessed(nodeId), metrics.Processed);
+
+            // The same retry metrics the blocking strategy publishes.
+            currentActivity?.SetTag("parallel.retry.events", metrics.RetryEvents);
+            currentActivity?.SetTag("parallel.retry.items", metrics.ItemsWithRetry);
+            currentActivity?.SetTag("parallel.retry.maxItemAttempts", metrics.MaxItemRetryAttempts);
+
+            context.NodeEnvironment.NodeExecutionScopeRegistry.SetRuntimeAnnotation(PipelineContextKeys.ParallelMetricsRetryEvents(nodeId),
+                metrics.RetryEvents);
+
+            context.NodeEnvironment.NodeExecutionScopeRegistry.SetRuntimeAnnotation(PipelineContextKeys.ParallelMetricsRetryItems(nodeId),
+                metrics.ItemsWithRetry);
+
+            context.NodeEnvironment.NodeExecutionScopeRegistry.SetRuntimeAnnotation(PipelineContextKeys.ParallelMetricsMaxItemRetryAttempts(nodeId),
+                metrics.MaxItemRetryAttempts);
         }
     }
 

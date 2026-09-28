@@ -24,6 +24,27 @@ public sealed class AutoObservabilityScopeTests
 
     #endregion
 
+    #region Live Count Tests
+
+    [Fact]
+    public void GetItemCounts_WhileRunning_ReturnsCountsSoFar()
+    {
+        // Arrange
+        var collector = new ObservabilityCollector(new TestObservabilityFactory());
+        using var scope = new AutoObservabilityScope(collector, "testNode", ObservabilityOptions.Default, s_pipelineId);
+
+        // Act
+        scope.IncrementProcessed();
+        scope.IncrementProcessed();
+        scope.IncrementEmitted();
+        scope.IncrementReplayed();
+
+        // Assert
+        Assert.Equal(new NodeItemCounts(2, 1, 1), scope.GetItemCounts());
+    }
+
+    #endregion
+
     #region Constructor Tests
 
     [Fact]

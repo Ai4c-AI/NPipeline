@@ -39,7 +39,29 @@ public sealed class CompositeExecutionObserver : IExecutionObserver
             .Where(o => o is not null)
             .ToArray();
 
+        Observers = Array.AsReadOnly(_observers);
         _logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger(nameof(CompositeExecutionObserver));
+    }
+
+    /// <summary>
+    ///     The observers events are forwarded to, in the order they are notified.
+    /// </summary>
+    public IReadOnlyList<IExecutionObserver> Observers { get; }
+
+    /// <summary>
+    ///     Returns one observer that notifies every observer in <paramref name="observers" />: the observer itself when
+    ///     there is only one, and null when there are none.
+    /// </summary>
+    internal static IExecutionObserver? Combine(IEnumerable<IExecutionObserver> observers, ILoggerFactory? loggerFactory)
+    {
+        var list = observers as IReadOnlyList<IExecutionObserver> ?? observers.ToArray();
+
+        return list.Count switch
+        {
+            0 => null,
+            1 => list[0],
+            _ => new CompositeExecutionObserver(loggerFactory, [.. list]),
+        };
     }
 
     /// <summary>

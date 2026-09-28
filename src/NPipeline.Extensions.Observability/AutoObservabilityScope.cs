@@ -163,6 +163,10 @@ public sealed class AutoObservabilityScope : IAutoObservabilityScope
     }
 
     /// <inheritdoc />
+    public NodeItemCounts GetItemCounts() =>
+        new(Interlocked.Read(ref _itemsProcessed), Interlocked.Read(ref _itemsEmitted), Interlocked.Read(ref _itemsReplayed));
+
+    /// <inheritdoc />
     public NodeTimingBreakdown GetTimingBreakdown()
     {
         // This remains lock-free; sample wall-time before/after bucket reads to reduce skew.

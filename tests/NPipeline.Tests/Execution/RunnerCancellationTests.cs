@@ -99,6 +99,42 @@ public sealed class RunnerCancellationTests
         context.CancellationToken.Should().Be(CancellationToken.None);
     }
 
+    [Fact]
+    public async Task RequestCancellation_StopsARunningPipeline_StartedByAnotherCaller()
+    {
+        // The caller holds only the context: it did not start the run and has no token of its own to cancel.
+        var sink = new CollectingSink<int>();
+        await using var context = new PipelineContext();
+
+        var run = PipelineRunner.Create().RunAsync(Unbounded(sink), context);
+        await sink.FirstItemReceived.WaitAsync(WaitLimit);
+
+        context.RequestCancellation();
+
+        var act = () => run.WaitAsync(WaitLimit);
+        _ = await act.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    [Fact]
+    public async Task RequestCancellation_WithNoRunInProgress_DoesNothing()
+    {
+        await using var context = new PipelineContext();
+
+        context.RequestCancellation();
+        context.CancellationToken.IsCancellationRequested.Should().BeFalse();
+
+        // A later run is unaffected.
+        await PipelineRunner.Create().RunAsync(new BehaviorPipeline(b =>
+        {
+            var s = b.AddSource<StreamingSource<int>, int>("source");
+            var k = b.AddSink<CollectingSink<int>, int>("sink");
+
+            _ = b.AddPreconfiguredNodeInstance(s.Id, StreamingSource<int>.Of([1]))
+                .AddPreconfiguredNodeInstance(k.Id, new CollectingSink<int>())
+                .Connect(s, k);
+        }), context);
+    }
+
     private static BehaviorPipeline Unbounded(CollectingSink<int> sink)
     {
         return new BehaviorPipeline(b =>

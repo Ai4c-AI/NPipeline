@@ -118,7 +118,7 @@ internal sealed class PipelineNodeExecutionStage(
 
             // Stop the siblings before cleanup tears down their inputs and instances. A sibling that ignores
             // cancellation is given a grace period, then its outputs are detached so cleanup can dispose them.
-            context.CancelRun();
+            context.RequestCancellation();
             var rest = Task.WhenAll(pending);
 
             if (await Task.WhenAny(rest, Task.Delay(TerminalShutdownGrace, CancellationToken.None)).ConfigureAwait(false) != rest)
@@ -249,7 +249,7 @@ internal sealed class PipelineNodeExecutionStage(
                 out var policyAnnotation) &&
             policyAnnotation is IResiliencePolicy nodePolicy)
             context.NodeEnvironment.NodeExecutionScopeRegistry.SetRuntimeAnnotation(ExecutionAnnotationKeys.NodeResiliencePolicyForNode(nodeId),
-                context.ApplyResiliencePolicyOverride(nodePolicy));
+                context.ApplyResiliencePolicyOverride(nodeId, nodePolicy));
     }
 
     private async Task ExecuteNodeWithRetriesAsync(

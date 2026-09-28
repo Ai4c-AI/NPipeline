@@ -76,6 +76,43 @@ public sealed class NodeExecutionScopeRegistryTests
     }
 
     [Fact]
+    public void TryGetNodeObservabilityScope_WhileRegistered_ReturnsScopeUntilDisposed()
+    {
+        // Arrange
+        var registry = new NodeExecutionScopeRegistry();
+        var scope = new RecordingScope();
+        registry.RegisterNodeObservabilityScope("node-a", scope);
+
+        // Act
+        var found = registry.TryGetNodeObservabilityScope("node-a", out var registered);
+        var missing = registry.TryGetNodeObservabilityScope("node-b", out _);
+        registry.DisposeAllNodeScopes();
+        var afterDispose = registry.TryGetNodeObservabilityScope("node-a", out _);
+
+        // Assert
+        found.Should().BeTrue();
+        registered.Should().BeSameAs(scope);
+        missing.Should().BeFalse();
+        afterDispose.Should().BeFalse();
+    }
+
+    [Fact]
+    public void BeginNodeScope_GetItemCounts_ReadsThroughToRegisteredScope()
+    {
+        // Arrange
+        var registry = new NodeExecutionScopeRegistry();
+        var scope = new CountingScope(new NodeItemCounts(5, 4, 1));
+        registry.RegisterNodeObservabilityScope("node-a", scope);
+
+        // Act
+        using var handle = registry.BeginNodeScope("node-a");
+
+        // Assert
+        handle.GetItemCounts().Should().Be(new NodeItemCounts(5, 4, 1));
+        new RecordingScope().As<IAutoObservabilityScope>().GetItemCounts().Should().Be(NodeItemCounts.Empty);
+    }
+
+    [Fact]
     public void RecordNodeFailureAndDispose_RecordsFailureAndDisposesScope()
     {
         // Arrange
@@ -334,6 +371,33 @@ public sealed class NodeExecutionScopeRegistryTests
         public void Dispose()
         {
             DisposeCount++;
+        }
+    }
+
+    private sealed class CountingScope(NodeItemCounts counts) : IAutoObservabilityScope
+    {
+        public void RecordItemCount(long processed, long emitted)
+        {
+        }
+
+        public void IncrementProcessed()
+        {
+        }
+
+        public void IncrementEmitted()
+        {
+        }
+
+        public void RecordFailure(Exception exception)
+        {
+        }
+
+        public Exception? GetFailureException() => null;
+
+        public NodeItemCounts GetItemCounts() => counts;
+
+        public void Dispose()
+        {
         }
     }
 }

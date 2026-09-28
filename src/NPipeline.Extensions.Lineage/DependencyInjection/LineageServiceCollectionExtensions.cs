@@ -26,6 +26,32 @@ public static class LineageServiceCollectionExtensions
     }
 
     /// <summary>
+    ///     Adds NPipeline lineage services without choosing a pipeline lineage sink.
+    /// </summary>
+    /// <remarks>
+    ///     <para>
+    ///         Registers the lineage collector and the lineage service, so pipelines can track item-level lineage and a
+    ///         tool can read it from <see cref="ILineageCollector" />. Unlike <c>AddNPipelineLineage</c>, it registers no
+    ///         default <see cref="IPipelineLineageSink" />: a run reports its pipeline lineage only to a sink the
+    ///         pipeline or the app configures.
+    ///     </para>
+    ///     <para>
+    ///         Safe to combine with <c>AddNPipelineLineage</c>, in either order: the app's sink choice is kept.
+    ///     </para>
+    /// </remarks>
+    /// <param name="services">The <see cref="IServiceCollection" /> to add the services to.</param>
+    /// <returns>The <see cref="IServiceCollection" /> so that additional calls can be chained.</returns>
+    public static IServiceCollection AddNPipelineLineageCore(this IServiceCollection services)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+
+        services.TryAddScoped<ILineageCollector, LineageCollector>();
+        RegisterLineageService(services);
+
+        return services;
+    }
+
+    /// <summary>
     ///     Adds NPipeline lineage services with a specified pipeline lineage sink type.
     /// </summary>
     /// <typeparam name="TPipelineLineageSink">The type of the pipeline lineage sink.</typeparam>
@@ -127,15 +153,26 @@ public static class LineageServiceCollectionExtensions
     /// </summary>
     private static void RegisterCoreLineageServices(IServiceCollection services)
     {
+        RegisterLineageService(services);
+
+        // Register the default pipeline lineage sink provider
+        services.TryAddScoped<IPipelineLineageSinkProvider, DefaultPipelineLineageSinkProvider>();
+    }
+
+    /// <summary>
+    ///     Replaces the core null lineage services with the real ones, once.
+    /// </summary>
+    private static void RegisterLineageService(IServiceCollection services)
+    {
+        if (services.Any(static d => d.ServiceType == typeof(ILineage) && d.ImplementationType == typeof(LineageService)))
+            return;
+
         // Replace the core DiHandlerFactory (which returns null for lineage report)
         // with DiLineageFactory (which delegates to LineageGenerator).
         services.AddScoped<ILineageFactory, DiLineageFactory>();
 
         // Replace the core null lineage module/service with the real one.
         services.AddScoped<ILineage, LineageService>();
-
-        // Register the default pipeline lineage sink provider
-        services.TryAddScoped<IPipelineLineageSinkProvider, DefaultPipelineLineageSinkProvider>();
 
         // A builder resolved from the container gets the same scoped module the runner will use, so build-time
         // lineage adapters and runtime lineage handling always come from one instance.

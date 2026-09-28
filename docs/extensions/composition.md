@@ -329,13 +329,14 @@ public async Task SubPipeline_InheritsParameters_WhenConfigured()
 
 ## Parent-Child Correlation
 
-The composition extension automatically sets properties on the child context for observability:
+The composition extension links each child run to its parent through `context.RunIdentity`:
 
-| Key | Description |
+| Property | Description |
 |-----|-------------|
 | `ParentNodeId` | ID of the composite node in the parent pipeline |
 | `ParentPipelineId` | GUID of the parent pipeline execution |
 | `ParentPipelineName` | Name of the parent pipeline |
+| `IsNested` | `true` for a child run, `false` for a top-level run |
 
 Child graphs are accessible via `PipelineGraph.ChildGraphs` for inspection and tooling.
 

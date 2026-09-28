@@ -57,6 +57,20 @@ public sealed record PipelineContextConfiguration(
     public static PipelineContextConfiguration Default => new();
 
     /// <summary>
+    ///     The run identifier the context reports in events, metrics and lineage, or <see cref="Guid.Empty" /> to have
+    ///     the runner generate one when the run starts.
+    /// </summary>
+    /// <remarks>
+    ///     Set it to correlate the run with an identifier your own system already holds.
+    /// </remarks>
+    public Guid RunId { get; init; }
+
+    /// <summary>
+    ///     The logical pipeline name the context reports, or null to use the pipeline definition's name.
+    /// </summary>
+    public string? PipelineName { get; init; }
+
+    /// <summary>
     ///     Creates a configuration with specific factories.
     ///     Useful for tests that need to mock observability and error handling components.
     /// </summary>

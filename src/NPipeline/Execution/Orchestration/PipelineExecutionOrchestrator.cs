@@ -175,7 +175,7 @@ internal sealed class PipelineExecutionOrchestrator : IPipelineExecutionOrchestr
     private void WarnIfNodeObservabilityIgnored(Type definitionType, PipelineGraph graph, PipelineContext context)
     {
         if (_observabilitySurface is not NullObservabilitySurface ||
-            context.Properties.ContainsKey(PipelineContextKeys.ParentPipelineId) ||
+            context.RunIdentity.IsNested ||
             graph.ExecutionOptions.NodeExecutionAnnotations is not { Count: > 0 } annotations ||
             !annotations.Values.Any(static value => value is ObservabilityOptions))
             return;

@@ -36,6 +36,47 @@ public class LineageServiceCollectionExtensionsTests
     }
 
     [Fact]
+    public void AddNPipelineLineageCore_RegistersLineageWithoutADefaultSink()
+    {
+        // Arrange
+        var services = new ServiceCollection();
+
+        // Act
+        services.AddNPipelineLineageCore();
+        var serviceProvider = services.BuildServiceProvider();
+
+        // Assert
+        serviceProvider.GetService<ILineageCollector>().Should().BeOfType<LineageCollector>();
+        serviceProvider.GetService<ILineageFactory>().Should().BeOfType<DiLineageFactory>();
+        serviceProvider.GetService<ILineage>().Should().BeOfType<LineageService>();
+        serviceProvider.GetService<IPipelineLineageSink>().Should().BeNull();
+        serviceProvider.GetService<IPipelineLineageSinkProvider>().Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AddNPipelineLineageCore_WithAddNPipelineLineage_InEitherOrder_KeepsTheSinkAndRegistersOnce(bool coreFirst)
+    {
+        // Arrange
+        var services = new ServiceCollection();
+
+        // Act
+        if (coreFirst)
+            services.AddNPipelineLineageCore().AddNPipelineLineage();
+        else
+            services.AddNPipelineLineage().AddNPipelineLineageCore();
+
+        var serviceProvider = services.BuildServiceProvider();
+
+        // Assert
+        serviceProvider.GetService<IPipelineLineageSink>().Should().BeOfType<LoggingPipelineLineageSink>();
+        serviceProvider.GetService<IPipelineLineageSinkProvider>().Should().BeOfType<DefaultPipelineLineageSinkProvider>();
+        services.Should().ContainSingle(d => d.ServiceType == typeof(ILineage));
+        services.Should().ContainSingle(d => d.ServiceType == typeof(ILineageFactory));
+    }
+
+    [Fact]
     public void AddNPipelineLineage_WithNullServices_ShouldThrowArgumentNullException()
     {
         // Arrange & Act & Assert

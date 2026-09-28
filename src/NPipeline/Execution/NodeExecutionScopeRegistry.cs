@@ -101,6 +101,28 @@ public sealed class NodeExecutionScopeRegistry
     }
 
     /// <summary>
+    ///     Gets the observability scope registered for a node that is running, without taking a handle on it.
+    /// </summary>
+    /// <remarks>
+    ///     For reading a running node's state, such as <see cref="IAutoObservabilityScope.GetItemCounts" />, to report
+    ///     live progress. Record nothing through the returned scope: execution strategies record through
+    ///     <see cref="BeginNodeScope" />. The scope is no longer returned once the node's scope is disposed.
+    /// </remarks>
+    public bool TryGetNodeObservabilityScope(string nodeId, [NotNullWhen(true)] out IAutoObservabilityScope? scope)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(nodeId);
+
+        if (_nodeObservabilityScopes.TryGetValue(nodeId, out var registration))
+        {
+            scope = registration.Scope;
+            return true;
+        }
+
+        scope = null;
+        return false;
+    }
+
+    /// <summary>
     ///     Begins node item-level observation tracking for the specified node.
     /// </summary>
     public IAutoObservabilityScope BeginNodeScope(string nodeId)
@@ -364,6 +386,8 @@ public sealed class NodeExecutionScopeRegistry
 
             return _inner.GetTimingBreakdown();
         }
+
+        public NodeItemCounts GetItemCounts() => _inner.GetItemCounts();
 
         public void Dispose()
         {

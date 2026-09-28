@@ -251,24 +251,76 @@ public static class ObservabilityServiceCollectionExtensions
     }
 
     /// <summary>
+    ///     Changes the options the observability extension runs with, whether it is registered before or after this call.
+    /// </summary>
+    /// <remarks>
+    ///     <para>
+    ///         Only the first <c>AddNPipelineObservability</c> call's options are used, so a library or tool that runs on
+    ///         top of an app's registration uses this to adjust the app's options instead of replacing them. Changes apply
+    ///         in the order they are registered, on top of those options.
+    ///     </para>
+    /// </remarks>
+    /// <example>
+    ///     <code>
+    ///     services.ConfigureNPipelineObservability(options => options with { EnableMemoryMetrics = true });
+    ///     </code>
+    /// </example>
+    /// <param name="services">The <see cref="IServiceCollection" /> to configure.</param>
+    /// <param name="configure">Returns the options to use, given the options configured so far.</param>
+    /// <returns>The <see cref="IServiceCollection" /> so that additional calls can be chained.</returns>
+    public static IServiceCollection ConfigureNPipelineObservability(
+        this IServiceCollection services,
+        Func<ObservabilityExtensionOptions, ObservabilityExtensionOptions> configure)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        ArgumentNullException.ThrowIfNull(configure);
+
+        _ = services.AddSingleton(new ObservabilityOptionsChange(configure));
+        return services;
+    }
+
+    /// <summary>
     ///     Registers the shared core services used by all observability configurations.
     /// </summary>
+    /// <remarks>
+    ///     Safe to call more than once: every registration is added only if missing, so a later call never replaces the
+    ///     app's options, observer or observability surface.
+    /// </remarks>
     private static void RegisterCoreObservabilityServices(IServiceCollection services, ObservabilityExtensionOptions options)
     {
+        // The first call's options, plus any ConfigureNPipelineObservability changes, resolved once per container.
+        services.TryAddSingleton(new ObservabilityOptionsBase(options));
+        services.TryAddSingleton(sp => sp.GetServices<ObservabilityOptionsChange>()
+            .Aggregate(sp.GetRequiredService<ObservabilityOptionsBase>().Options, static (current, change) => change.Apply(current)));
+
         // Register the factory for DI resolution
         services.TryAddScoped<IObservabilityFactory, DiObservabilityFactory>();
 
-        // Register the execution observer that bridges core events to the collector
-        services.TryAddScoped<IExecutionObserver>(sp =>
+        // The observer that bridges core events to the collector. Added alongside any observer the app registered:
+        // every registered observer is notified.
+        services.TryAddEnumerable(ServiceDescriptor.Scoped<IExecutionObserver, MetricsCollectingExecutionObserver>(sp =>
             new MetricsCollectingExecutionObserver(
                 sp.GetRequiredService<IObservabilityCollector>(),
-                options.EnableMemoryMetrics));
+                sp.GetRequiredService<ObservabilityExtensionOptions>().EnableMemoryMetrics)));
 
         // Register the context factory for automatic observer configuration
         services.TryAddScoped<IObservablePipelineContextFactory, ObservablePipelineContextFactory>();
 
-        // Replace the core null observability surface with the real one.
-        var defaultNodeOptions = options.AutoObserveAllNodes ? ObservabilityOptions.Default : null;
-        services.AddScoped<IObservabilitySurface>(_ => new ObservabilitySurface(defaultNodeOptions));
+        // Replace the core null observability surface with the real one, but keep a surface the app registered.
+        var surface = services.LastOrDefault(static d => d.ServiceType == typeof(IObservabilitySurface));
+
+        if (surface is null || surface.ImplementationInstance is NullObservabilitySurface)
+        {
+            _ = services.RemoveAll<IObservabilitySurface>();
+
+            services.AddScoped<IObservabilitySurface>(static sp => new ObservabilitySurface(
+                sp.GetRequiredService<ObservabilityExtensionOptions>().AutoObserveAllNodes
+                    ? ObservabilityOptions.Default
+                    : null));
+        }
     }
+
+    private sealed record ObservabilityOptionsBase(ObservabilityExtensionOptions Options);
+
+    private sealed record ObservabilityOptionsChange(Func<ObservabilityExtensionOptions, ObservabilityExtensionOptions> Apply);
 }

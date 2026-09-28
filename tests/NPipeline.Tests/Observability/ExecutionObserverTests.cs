@@ -129,6 +129,41 @@ public sealed class ExecutionObserverTests
     }
 
     [Fact]
+    public void CompositeExecutionObserver_Observers_ListsNonNullObserversInOrder()
+    {
+        // Arrange
+        CollectObserver observer1 = new();
+        CollectObserver observer2 = new();
+
+        // Act
+#nullable disable
+        CompositeExecutionObserver composite = new(observer1, null, observer2);
+#nullable restore
+
+        // Assert
+        composite.Observers.Should().Equal(observer1, observer2);
+        composite.Observers.Contains(observer2).Should().BeTrue();
+    }
+
+    [Fact]
+    public void CompositeExecutionObserver_Combine_ReturnsNullSingleOrComposite()
+    {
+        // Arrange
+        CollectObserver observer1 = new();
+        CollectObserver observer2 = new();
+
+        // Act
+        var none = CompositeExecutionObserver.Combine([], null);
+        var single = CompositeExecutionObserver.Combine([observer1], null);
+        var many = CompositeExecutionObserver.Combine([observer1, observer2], null);
+
+        // Assert
+        none.Should().BeNull();
+        single.Should().BeSameAs(observer1);
+        many.Should().BeOfType<CompositeExecutionObserver>().Which.Observers.Should().Equal(observer1, observer2);
+    }
+
+    [Fact]
     public void CompositeExecutionObserver_Continues_On_Failing_Observer()
     {
         // Arrange
