@@ -27,6 +27,10 @@ namespace NPipeline.Observability.DependencyInjection;
 /// </remarks>
 public static class ObservabilityServiceCollectionExtensions
 {
+    // The options an overload without an options parameter registers. Compared by reference: the caller did not choose
+    // them, so a later call that passes options replaces them.
+    private static readonly ObservabilityExtensionOptions ImplicitDefaultOptions = new();
+
     /// <summary>
     ///     Adds NPipeline observability services with default logging sinks.
     /// </summary>
@@ -36,7 +40,7 @@ public static class ObservabilityServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
 
-        return services.AddNPipelineObservability<LoggingMetricsSink, LoggingPipelineMetricsSink>(ObservabilityExtensionOptions.Default);
+        return services.AddNPipelineObservability<LoggingMetricsSink, LoggingPipelineMetricsSink>(ImplicitDefaultOptions);
     }
 
     /// <summary>
@@ -66,7 +70,7 @@ public static class ObservabilityServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
 
-        return services.AddNPipelineObservability<TMetricsSink, TPipelineMetricsSink>(ObservabilityExtensionOptions.Default);
+        return services.AddNPipelineObservability<TMetricsSink, TPipelineMetricsSink>(ImplicitDefaultOptions);
     }
 
     /// <summary>
@@ -114,7 +118,7 @@ public static class ObservabilityServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(metricsSinkFactory);
         ArgumentNullException.ThrowIfNull(pipelineMetricsSinkFactory);
 
-        return services.AddNPipelineObservability(metricsSinkFactory, pipelineMetricsSinkFactory, ObservabilityExtensionOptions.Default);
+        return services.AddNPipelineObservability(metricsSinkFactory, pipelineMetricsSinkFactory, ImplicitDefaultOptions);
     }
 
     /// <summary>
@@ -164,7 +168,7 @@ public static class ObservabilityServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
 
-        return services.AddNPipelineObservability<TObservabilityCollector, TMetricsSink, TPipelineMetricsSink>(ObservabilityExtensionOptions.Default);
+        return services.AddNPipelineObservability<TObservabilityCollector, TMetricsSink, TPipelineMetricsSink>(ImplicitDefaultOptions);
     }
 
     /// <summary>
@@ -215,7 +219,7 @@ public static class ObservabilityServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(collectorFactory);
 
-        return services.AddNPipelineObservability<TMetricsSink, TPipelineMetricsSink>(collectorFactory, ObservabilityExtensionOptions.Default);
+        return services.AddNPipelineObservability<TMetricsSink, TPipelineMetricsSink>(collectorFactory, ImplicitDefaultOptions);
     }
 
     /// <summary>
@@ -255,9 +259,9 @@ public static class ObservabilityServiceCollectionExtensions
     /// </summary>
     /// <remarks>
     ///     <para>
-    ///         Only the first <c>AddNPipelineObservability</c> call's options are used, so a library or tool that runs on
-    ///         top of an app's registration uses this to adjust the app's options instead of replacing them. Changes apply
-    ///         in the order they are registered, on top of those options.
+    ///         Only the first <c>AddNPipelineObservability</c> call that passes options sets them, so a library or tool
+    ///         that runs on top of an app's registration uses this to adjust the app's options instead of replacing them.
+    ///         Changes apply in the order they are registered, on top of those options.
     ///     </para>
     /// </remarks>
     /// <example>
@@ -284,12 +288,15 @@ public static class ObservabilityServiceCollectionExtensions
     /// </summary>
     /// <remarks>
     ///     Safe to call more than once: every registration is added only if missing, so a later call never replaces the
-    ///     app's options, observer or observability surface.
+    ///     app's options, observer or observability surface. The one exception is options a call without an options
+    ///     parameter registered: the first call that passes options replaces them, so a library that registers
+    ///     observability before the app does not hide the app's options.
     /// </remarks>
     private static void RegisterCoreObservabilityServices(IServiceCollection services, ObservabilityExtensionOptions options)
     {
-        // The first call's options, plus any ConfigureNPipelineObservability changes, resolved once per container.
-        services.TryAddSingleton(new ObservabilityOptionsBase(options));
+        // The first chosen options (or the defaults, until a call chooses some), plus any ConfigureNPipelineObservability
+        // changes, resolved once per container.
+        RegisterOptions(services, options);
         services.TryAddSingleton(sp => sp.GetServices<ObservabilityOptionsChange>()
             .Aggregate(sp.GetRequiredService<ObservabilityOptionsBase>().Options, static (current, change) => change.Apply(current)));
 
@@ -320,7 +327,23 @@ public static class ObservabilityServiceCollectionExtensions
         }
     }
 
-    private sealed record ObservabilityOptionsBase(ObservabilityExtensionOptions Options);
+    private static void RegisterOptions(IServiceCollection services, ObservabilityExtensionOptions options)
+    {
+        var chosen = !ReferenceEquals(options, ImplicitDefaultOptions);
+        var existing = services.FirstOrDefault(static d => d.ServiceType == typeof(ObservabilityOptionsBase));
+
+        if (existing is not null)
+        {
+            if (!chosen || existing.ImplementationInstance is ObservabilityOptionsBase { Chosen: true })
+                return;
+
+            _ = services.Remove(existing);
+        }
+
+        services.AddSingleton(new ObservabilityOptionsBase(options, chosen));
+    }
+
+    private sealed record ObservabilityOptionsBase(ObservabilityExtensionOptions Options, bool Chosen);
 
     private sealed record ObservabilityOptionsChange(Func<ObservabilityExtensionOptions, ObservabilityExtensionOptions> Apply);
 }

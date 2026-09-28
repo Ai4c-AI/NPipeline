@@ -51,7 +51,7 @@ public sealed class ObservabilityRegistrationTests
     }
 
     [Fact]
-    public void AddNPipelineObservability_CalledTwice_KeepsTheFirstOptionsAndOneMetricsObserver()
+    public void AddNPipelineObservability_CalledTwiceWithOptions_KeepsTheFirstOptionsAndOneMetricsObserver()
     {
         // Arrange
         var services = new ServiceCollection();
@@ -64,6 +64,52 @@ public sealed class ObservabilityRegistrationTests
         using var scope = services.BuildServiceProvider().CreateScope();
         Assert.True(scope.ServiceProvider.GetRequiredService<ObservabilityExtensionOptions>().AutoObserveAllNodes);
         _ = Assert.Single(scope.ServiceProvider.GetServices<IExecutionObserver>());
+    }
+
+    [Fact]
+    public void AddNPipelineObservability_WithoutOptions_ThenWithOptions_UsesTheChosenOptions()
+    {
+        // Arrange - a library registers observability before the app configures it.
+        var services = new ServiceCollection();
+
+        // Act
+        _ = services.AddNPipelineObservability();
+        _ = services.AddNPipelineObservability(new ObservabilityExtensionOptions { AutoObserveAllNodes = true });
+
+        // Assert
+        using var scope = services.BuildServiceProvider().CreateScope();
+        Assert.True(scope.ServiceProvider.GetRequiredService<ObservabilityExtensionOptions>().AutoObserveAllNodes);
+        _ = Assert.Single(scope.ServiceProvider.GetServices<IExecutionObserver>());
+    }
+
+    [Fact]
+    public void AddNPipelineObservability_WithOptions_ThenWithoutOptions_KeepsTheChosenOptions()
+    {
+        // Arrange
+        var services = new ServiceCollection();
+
+        // Act
+        _ = services.AddNPipelineObservability(new ObservabilityExtensionOptions { AutoObserveAllNodes = true });
+        _ = services.AddNPipelineObservability();
+
+        // Assert
+        var options = services.BuildServiceProvider().GetRequiredService<ObservabilityExtensionOptions>();
+        Assert.True(options.AutoObserveAllNodes);
+    }
+
+    [Fact]
+    public void AddNPipelineObservability_WithoutOptions_UsesTheDefaults()
+    {
+        // Arrange
+        var services = new ServiceCollection();
+
+        // Act
+        _ = services.AddNPipelineObservability();
+        _ = services.AddNPipelineObservability();
+
+        // Assert
+        var options = services.BuildServiceProvider().GetRequiredService<ObservabilityExtensionOptions>();
+        Assert.Equal(ObservabilityExtensionOptions.Default, options);
     }
 
     [Theory]
