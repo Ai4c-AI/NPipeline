@@ -103,6 +103,9 @@ public sealed class RuntimePipelineBinder : IRuntimePipelineBinder
             ? ResolveLineageSink(overriddenGraph, context.Lineage.LineageFactory, context, runOwned)
             : null;
 
+        // A sub-pipeline can inherit its parent's sink, which already tees every record into the parent's collector.
+        var usesInheritedSink = lineageSink is not null && ReferenceEquals(lineageSink, context.Lineage.LineageSink);
+
         if (!itemLevelLineageEnabled)
             WarnIfItemLevelLineageSinkIgnored(overriddenGraph, context);
 
@@ -115,7 +118,10 @@ public sealed class RuntimePipelineBinder : IRuntimePipelineBinder
             ? context.Lineage.LineageFactory.ResolveLineageCollector()
             : null;
 
-        if (lineageCollector is not null)
+        // Teeing an inherited sink into the collector it already feeds would record each of the sub-pipeline's records
+        // twice. A caller-supplied decorator around it still forwards to it, so the collector sees them once either way.
+        if (lineageCollector is not null &&
+            !(usesInheritedSink && ReferenceEquals(lineageCollector, context.Lineage.LineageCollector)))
             lineageSink = new CollectorTeeingLineageSink(lineageCollector, lineageSink);
 
         var pipelineLineageSink = ResolvePipelineLineageSink(overriddenGraph, context.Lineage.LineageFactory, context, runOwned);

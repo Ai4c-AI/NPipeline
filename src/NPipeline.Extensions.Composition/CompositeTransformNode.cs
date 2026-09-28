@@ -152,6 +152,9 @@ public sealed class CompositeTransformNode<TIn, TOut, TDefinition>
         {
             subContext.Lineage.LineageSink = parentContext.Lineage.LineageSink;
             subContext.Lineage.PipelineLineageSink = parentContext.Lineage.PipelineLineageSink;
+
+            // The inherited sink already feeds this collector, so the sub-pipeline's run must not tee it in again.
+            subContext.Lineage.LineageCollector = parentContext.Lineage.LineageCollector;
         }
 
         if (_contextConfiguration.InheritDeadLetterDecorator)
