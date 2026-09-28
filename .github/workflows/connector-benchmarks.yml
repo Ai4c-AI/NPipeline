@@ -1,0 +1,45 @@
+name: Connector Benchmarks
+
+# Manual only: a full run takes tens of minutes and needs a quiet runner to be meaningful. Compare the uploaded
+# results against benchmarks/NPipeline.Connectors.Benchmarks/baselines/ before and after connector performance work.
+on:
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: "BenchmarkDotNet filter, for example *Parquet* (default: all connectors)"
+        required: false
+        default: "*"
+      framework:
+        description: "Target framework"
+        required: false
+        default: "net10.0"
+        type: choice
+        options:
+          - net10.0
+          - net8.0
+
+jobs:
+  benchmarks:
+    name: Run connector benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Run benchmarks
+        working-directory: benchmarks/NPipeline.Connectors.Benchmarks
+        run: dotnet run -c Release -f ${{ inputs.framework }} -- --filter '${{ inputs.filter }}' --artifacts "$GITHUB_WORKSPACE/bdn"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: connector-benchmarks-${{ inputs.framework }}-${{ github.sha }}
+          path: bdn/results/
