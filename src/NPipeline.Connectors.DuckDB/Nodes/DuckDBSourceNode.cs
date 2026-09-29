@@ -9,6 +9,7 @@ using NPipeline.DataFlow;
 using NPipeline.DataFlow.DataStreams;
 using NPipeline.Nodes;
 using NPipeline.Pipeline;
+using DuckDBAccessMode = NPipeline.Connectors.DuckDB.Configuration.DuckDBAccessMode;
 
 namespace NPipeline.Connectors.DuckDB.Nodes;
 

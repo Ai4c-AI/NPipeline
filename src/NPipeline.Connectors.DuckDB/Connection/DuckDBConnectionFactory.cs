@@ -1,6 +1,7 @@
 using DuckDB.NET.Data;
 using NPipeline.Connectors.DuckDB.Configuration;
 using NPipeline.Connectors.DuckDB.Exceptions;
+using DuckDBAccessMode = NPipeline.Connectors.DuckDB.Configuration.DuckDBAccessMode;
 
 namespace NPipeline.Connectors.DuckDB.Connection;
 

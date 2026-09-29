@@ -7,6 +7,7 @@ using NPipeline.Connectors.DuckDB.Writers;
 using NPipeline.DataFlow;
 using NPipeline.Nodes;
 using NPipeline.Pipeline;
+using DuckDBAccessMode = NPipeline.Connectors.DuckDB.Configuration.DuckDBAccessMode;
 
 namespace NPipeline.Connectors.DuckDB.Nodes;
 
