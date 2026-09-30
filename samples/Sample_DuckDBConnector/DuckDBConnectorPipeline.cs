@@ -1,5 +1,5 @@
 using NPipeline.Connectors.DuckDB.Configuration;
-using NPipeline.Connectors.DuckDB.Nodes;
+using NPipeline.Connectors.DuckDB;
 using NPipeline.Pipeline;
 using Sample_DuckDBConnector.Nodes;
 
@@ -9,7 +9,7 @@ namespace Sample_DuckDBConnector;
 ///     Demonstrates writing to a local DuckDB database, reading back, and exporting to CSV.
 ///     Pipeline: SensorDataSourceNode → DuckDBSinkNode (write to table)
 ///     DuckDBSourceNode (query aggregate) → Console output
-///     DuckDBSinkNode.ToFile (export CSV)
+///     DuckDBConnector.ToFile (export CSV)
 /// </summary>
 public sealed class DuckDBConnectorPipeline : IPipelineDefinition
 {
@@ -18,14 +18,9 @@ public sealed class DuckDBConnectorPipeline : IPipelineDefinition
         // Phase 1: Write sensor data to DuckDB
         var source = builder.AddSource(new SensorDataSourceNode(), "sensor-source");
 
+        // The appender (the default) writes the readings; the table is created from SensorReading if it is missing.
         var sink = builder.AddSink(
-            new DuckDBSinkNode<SensorReading>(GetDatabasePath(), "sensor_readings",
-                new DuckDBConfiguration
-                {
-                    WriteStrategy = DuckDBWriteStrategy.Appender,
-                    AutoCreateTable = true,
-                    TruncateBeforeWrite = true,
-                }),
+            DuckDBConnector.Sink<SensorReading>(DuckDBDatabase.File(GetDatabasePath()), "sensor_readings", o => o with { TruncateBeforeWrite = true }),
             "duckdb-sink");
 
         builder.Connect(source, sink);

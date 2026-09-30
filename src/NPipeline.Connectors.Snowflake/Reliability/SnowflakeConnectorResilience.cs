@@ -6,7 +6,7 @@ namespace NPipeline.Connectors.Snowflake.Reliability;
 
 /// <summary>
 ///     Resilience presets for the Snowflake connector. Assign one to
-///     <see cref="Configuration.SnowflakeConfiguration.Resilience" />, or derive your own with a <c>with</c> expression.
+///     <see cref="Configuration.SnowflakeWriteOptions.Resilience" />, or derive your own with a <c>with</c> expression.
 /// </summary>
 /// <remarks>
 ///     <para>
@@ -28,7 +28,7 @@ namespace NPipeline.Connectors.Snowflake.Reliability;
 ///     </para>
 ///     <para>
 ///         The presets have no attempt timeout and no deadline. Each attempt is bounded by
-///         <see cref="Configuration.SnowflakeConfiguration.CommandTimeout" /> instead, which suits a <c>COPY INTO</c> that
+///         <see cref="NPipeline.Connectors.Sql.SqlNodeOptions.CommandTimeout" /> instead, which suits a <c>COPY INTO</c> that
 ///         runs for minutes. A timeout set on the policy applies to every write strategy, staged copy included.
 ///     </para>
 /// </remarks>
@@ -50,7 +50,7 @@ public static class SnowflakeConnectorResilience
     /// <summary>
     ///     Four attempts (three retries) of statement-level transient errors, with exponential backoff and full jitter
     ///     from two seconds up to 60 seconds, or from ten seconds when Snowflake throttles. There is no attempt timeout or deadline;
-    ///     <see cref="Configuration.SnowflakeConfiguration.CommandTimeout" /> bounds each attempt. Replaces
+    ///     <see cref="NPipeline.Connectors.Sql.SqlNodeOptions.CommandTimeout" /> bounds each attempt. Replaces
     ///     <c>MaxRetryAttempts = 3</c> and <c>RetryDelay = 2 s</c>.
     /// </summary>
     public static Resilience Default { get; } = new()

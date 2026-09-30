@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <!-- net8.0 is an LTS target, so the round trips run on it as well as the latest framework. -->
+        <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <IsPackable>false</IsPackable>
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    </PropertyGroup>
+
+    <PropertyGroup>
+        <NoWarn>$(NoWarn);CS1591</NoWarn>
+        <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="coverlet.collector">
+            <PrivateAssets>all</PrivateAssets>
+            <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+        </PackageReference>
+        <PackageReference Include="AwesomeAssertions"/>
+        <PackageReference Include="Microsoft.NET.Test.Sdk"/>
+        <PackageReference Include="Testcontainers.MsSql"/>
+        <PackageReference Include="Testcontainers.MySql"/>
+        <PackageReference Include="Testcontainers.PostgreSql"/>
+        <PackageReference Include="xunit"/>
+        <PackageReference Include="xunit.runner.visualstudio">
+            <PrivateAssets>all</PrivateAssets>
+            <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+        </PackageReference>
+    </ItemGroup>
+
+    <ItemGroup>
+        <Using Include="Xunit"/>
+        <Using Include="AwesomeAssertions"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\NPipeline.Tests.Common\NPipeline.Tests.Common.csproj"/>
+        <ProjectReference Include="..\..\src\NPipeline.Connectors.SqlServer\NPipeline.Connectors.SqlServer.csproj"/>
+        <ProjectReference Include="..\..\src\NPipeline.Connectors.Postgres\NPipeline.Connectors.Postgres.csproj"/>
+        <ProjectReference Include="..\..\src\NPipeline.Connectors.MySQL\NPipeline.Connectors.MySQL.csproj"/>
+        <ProjectReference Include="..\..\src\NPipeline.Connectors.DuckDB\NPipeline.Connectors.DuckDB.csproj"/>
+    </ItemGroup>
+
+</Project>

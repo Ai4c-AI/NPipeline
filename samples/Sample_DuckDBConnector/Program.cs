@@ -1,7 +1,8 @@
 using System.Reflection;
 using Microsoft.Extensions.Hosting;
 using NPipeline.Connectors.DuckDB.Configuration;
-using NPipeline.Connectors.DuckDB.Nodes;
+using NPipeline.Connectors.DuckDB;
+using NPipeline.Connectors.Mapping;
 using NPipeline.Extensions.DependencyInjection;
 using NPipeline.Pipeline;
 
@@ -32,8 +33,11 @@ public static class Program
         Console.WriteLine("Phase 2: Querying aggregate statistics...");
 
         // We reuse a SensorStat shape for the aggregate query
-        var statsSource = new DuckDBSourceNode<SensorStat>(
-            dbPath,
+        var database = DuckDBDatabase.File(dbPath);
+
+        // The query's snake_case aliases (reading_count) map to the members (ReadingCount).
+        var statsSource = DuckDBConnector.Source<SensorStat>(
+            database,
             """
             SELECT region,
                    COUNT(*) AS reading_count,
@@ -42,7 +46,8 @@ public static class Program
             FROM sensor_readings
             GROUP BY region
             ORDER BY region
-            """);
+            """,
+            o => o with { Naming = ColumnNamingPolicy.SnakeCaseLower });
 
         Console.WriteLine($"  {"Region",-10} {"Count",8} {"Avg Temp",10} {"Avg Humidity",14}");
         Console.WriteLine($"  {new string('-', 44)}");
@@ -59,14 +64,8 @@ public static class Program
 
         var csvPath = DuckDBConnectorPipeline.GetCsvExportPath();
 
-        var exportSource = new DuckDBSourceNode<SensorReading>(
-            dbPath,
-            "SELECT * FROM sensor_readings ORDER BY id LIMIT 10");
-
-        var exportSink = DuckDBSinkNode<SensorReading>.ToFile(csvPath, new DuckDBConfiguration
-        {
-            FileExportOptions = new DuckDBFileExportOptions { CsvHeader = true },
-        });
+        var exportSource = DuckDBConnector.Source<SensorReading>(database, "SELECT * FROM sensor_readings ORDER BY id LIMIT 10");
+        var exportSink = DuckDBConnector.ToFile<SensorReading>(csvPath, o => o with { Export = new DuckDBFileExportOptions { CsvHeader = true } });
 
         await exportSink.ConsumeAsync(
             exportSource.OpenStream(PipelineContext.CreateDefault(), CancellationToken.None),

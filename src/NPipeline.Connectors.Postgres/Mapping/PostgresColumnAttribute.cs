@@ -27,9 +27,4 @@ public sealed class PostgresColumnAttribute : ColumnAttribute
     ///     Gets or sets the column size (for variable-length types).
     /// </summary>
     public int? Size { get; set; }
-
-    /// <summary>
-    ///     Gets or sets a value indicating whether the column participates in the primary key.
-    /// </summary>
-    public bool PrimaryKey { get; set; }
 }

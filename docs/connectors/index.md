@@ -30,12 +30,12 @@ For reading from and writing to relational and document databases.
 | Connector | System | Key Features | Package |
 |-----------|--------|-------------|---------|
 | [PostgreSQL](postgres.md) | PostgreSQL | COPY protocol, upsert, streaming results | `NPipeline.Connectors.Postgres` |
-| [MySQL](mysql.md) | MySQL/MariaDB | Bulk load, upsert, CDC support | `NPipeline.Connectors.MySQL` |
+| [MySQL](mysql.md) | MySQL/MariaDB | Bulk load, upsert | `NPipeline.Connectors.MySQL` |
 | [SQL Server](sqlserver.md) | SQL Server | BulkCopy, MERGE upsert, streaming | `NPipeline.Connectors.SqlServer` |
-| [Snowflake](snowflake.md) | Snowflake | JWT auth, batch write, streaming results | `NPipeline.Connectors.Snowflake` |
+| [Snowflake](snowflake.md) | Snowflake | Staged COPY, MERGE upsert | `NPipeline.Connectors.Snowflake` |
 | [MongoDB](mongodb.md) | MongoDB | Upsert, change streams, checkpointing | `NPipeline.Connectors.MongoDB` |
 | [Cosmos DB](cosmos.md) | Azure Cosmos DB | SQL/Mongo/Cassandra APIs, change feed | `NPipeline.Connectors.Azure.CosmosDb` |
-| [DuckDB](duckdb.md) | DuckDB | Appender writes, auto-create tables | `NPipeline.Connectors.DuckDB` |
+| [DuckDB](duckdb.md) | DuckDB | Queries over Parquet/CSV/JSON, appender writes, file export | `NPipeline.Connectors.DuckDB` |
 
 ### Message Queues
 
@@ -82,6 +82,9 @@ public void Define(PipelineBuilder builder, PipelineContext context)
 ### Storage Provider Integration
 
 File-based connectors (CSV, JSON, Parquet, Excel) read from and write to `IStorageProvider`. This means the same connector code works with local files, S3, Azure Blob, GCS, or SFTP. Globs, compression, atomic writes and row errors are described in [File Connectors: Shared Behaviour](file-connectors.md).
+
+The SQL connectors (SQL Server, PostgreSQL, MySQL, Snowflake, DuckDB) share their mapping, row errors, transactions,
+upserts and checkpoints; see [SQL Connectors: Shared Behaviour](sql-connectors.md).
 
 ```csharp
 var storageProvider = new AwsS3StorageProvider(s3Options);

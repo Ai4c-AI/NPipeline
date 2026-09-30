@@ -46,6 +46,37 @@ public sealed class MongoMapperBuilderTests
     }
 
     [Fact]
+    public void Build_TreatsNullForANonNullableMemberAsAnError()
+    {
+        var doc = new BsonDocument { { "name", "WidgetA" }, { "qty", BsonNull.Value } };
+        var mapper = MongoMapperBuilder.Build<SimpleModel>();
+
+        var map = () => mapper(new MongoRow(doc));
+
+        map.Should().Throw<MongoMappingException>();
+    }
+
+    [Fact]
+    public void Build_ConvertsTextCultureInvariantly()
+    {
+        var culture = System.Globalization.CultureInfo.CurrentCulture;
+
+        try
+        {
+            System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.GetCultureInfo("de-DE");
+            var doc = new BsonDocument { { "value", "1.5" } };
+
+            var result = MongoMapperBuilder.Build<TextDecimal>()(new MongoRow(doc));
+
+            result.Value.Should().Be(1.5m);
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = culture;
+        }
+    }
+
+    [Fact]
     public void Build_ThrowsMongoMappingExceptionOnTypeMismatch()
     {
         // "qty" is a nested document, not an int - should throw MongoMappingException
@@ -126,5 +157,11 @@ public sealed class MongoMapperBuilderTests
 
         [MongoField("writable")]
         public string Writable { get; set; } = "";
+    }
+
+    public sealed class TextDecimal
+    {
+        [MongoField("value")]
+        public decimal Value { get; set; }
     }
 }

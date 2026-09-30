@@ -1,4 +1,5 @@
 using MongoDB.Bson;
+using NPipeline.Connectors.Mapping;
 
 namespace NPipeline.Connectors.Azure.CosmosDb.Mapping;
 
@@ -72,7 +73,7 @@ public sealed class CosmosBsonRow : ICosmosDataWrapper
             if (dotNetValue == null)
                 return true;
 
-            value = (T?)Convert.ChangeType(dotNetValue, typeof(T));
+            value = ScalarConverter.Convert<T>(dotNetValue);
             return true;
         }
         catch

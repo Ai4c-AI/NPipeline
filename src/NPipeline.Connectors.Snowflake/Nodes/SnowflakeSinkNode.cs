@@ -1,267 +1,74 @@
-using NPipeline.Connectors.Configuration;
-using NPipeline.Connectors.Nodes;
+using System.Data.Common;
+using Snowflake.Data.Client;
+using NPipeline.Connectors.Sql;
 using NPipeline.Connectors.Snowflake.Configuration;
-using NPipeline.Connectors.Snowflake.Connection;
 using NPipeline.Connectors.Snowflake.Writers;
-using NPipeline.StorageProviders;
 using NPipeline.StorageProviders.Abstractions;
-using NPipeline.StorageProviders.Models;
-using NPipeline.StorageProviders.Utilities;
 
 namespace NPipeline.Connectors.Snowflake.Nodes;
 
 /// <summary>
-///     Snowflake sink node for writing data to Snowflake database.
+///     Writes records to a Snowflake table: with multi-row statements, one statement per row, or a staged CSV file loaded
+///     with <c>COPY INTO</c>, as <see cref="SnowflakeWriteOptions.WriteStrategy" /> says. Create one with
+///     <see cref="SnowflakeConnector" />.
 /// </summary>
-/// <typeparam name="T">The type of objects consumed by sink.</typeparam>
-public class SnowflakeSinkNode<T> : DatabaseSinkNode<T>, IAsyncDisposable
+/// <remarks>
+///     Members marked <c>[SnowflakeColumn(Identity = true)]</c> are read but not written. Upserts use <c>MERGE</c>; a
+///     batch must not repeat a key.
+/// </remarks>
+/// <typeparam name="T">The record type.</typeparam>
+public sealed class SnowflakeSinkNode<T> : SqlSinkNode<T>
 {
-    private static readonly Lazy<IStorageResolver> DefaultResolver = new(
-        () => SnowflakeStorageResolverFactory.CreateResolver(),
-        LazyThreadSafetyMode.ExecutionAndPublication);
+    private static readonly Lazy<IStorageResolver> Resolver = new(SnowflakeStorageResolverFactory.CreateResolver);
 
-    private readonly SnowflakeConfiguration _configuration;
-    private readonly string? _connectionName;
-    private readonly ISnowflakeConnectionPool? _connectionPool;
-    private readonly bool _ownsConnectionPool;
-    private readonly Func<T, IEnumerable<DatabaseParameter>>? _parameterMapper;
-    private readonly string _schema;
-    private readonly IStorageProvider? _storageProvider;
-    private readonly IStorageResolver? _storageResolver;
-    private readonly StorageUri? _storageUri;
-    private readonly string _tableName;
-    private readonly SnowflakeWriteStrategy _writeStrategy;
+    private readonly SnowflakeWriteOptions _options;
 
-    /// <summary>
-    ///     Initializes a new instance of <see cref="SnowflakeSinkNode{T}" /> class.
-    /// </summary>
-    /// <param name="connectionString">The connection string.</param>
-    /// <param name="tableName">The table name.</param>
-    /// <param name="configuration">Optional configuration.</param>
-    /// <param name="customMapper">Optional custom parameter mapper function.</param>
-    public SnowflakeSinkNode(
-        string connectionString,
-        string tableName,
-        SnowflakeConfiguration? configuration = null,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper = null)
+    /// <summary>Creates a sink that writes <typeparamref name="T" />'s readable members as columns.</summary>
+    /// <exception cref="NotSupportedException">A member is not a single value.</exception>
+    public SnowflakeSinkNode(SnowflakeWriteOptions options)
+        : base(options, SnowflakeDialect.Instance, SnowflakeShape.Write((options ?? throw new ArgumentNullException(nameof(options))).Naming))
     {
-        ArgumentNullException.ThrowIfNull(connectionString);
-        ArgumentNullException.ThrowIfNull(tableName);
-
-        _configuration = configuration ?? new SnowflakeConfiguration();
-        _configuration.Validate();
-        _connectionPool = new SnowflakeConnectionPool(connectionString);
-        _ownsConnectionPool = true;
-        _tableName = tableName;
-        _writeStrategy = _configuration.WriteStrategy;
-        _parameterMapper = customMapper;
-        _schema = _configuration.Schema;
-        _connectionName = null;
-
-        if (_configuration.ValidateIdentifiers)
-        {
-            DatabaseIdentifierValidator.ValidateIdentifier(_tableName, nameof(_tableName));
-            DatabaseIdentifierValidator.ValidateIdentifier(_schema, nameof(_schema));
-        }
+        _options = options;
     }
 
-    /// <summary>
-    ///     Initializes a new instance of <see cref="SnowflakeSinkNode{T}" /> class with connection pool.
-    /// </summary>
-    /// <param name="connectionPool">The connection pool.</param>
-    /// <param name="tableName">The table name.</param>
-    /// <param name="configuration">Optional configuration.</param>
-    /// <param name="customMapper">Optional custom parameter mapper function.</param>
-    /// <param name="connectionName">Optional named connection when using a shared pool.</param>
-    public SnowflakeSinkNode(
-        ISnowflakeConnectionPool connectionPool,
-        string tableName,
-        SnowflakeConfiguration? configuration = null,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper = null,
-        string? connectionName = null)
+    /// <inheritdoc />
+    protected override IStorageResolver DefaultResolver => Resolver.Value;
+
+    /// <inheritdoc />
+    protected override DbConnection CreateConnection(string connectionString) => new SnowflakeDbConnection(connectionString);
+
+    /// <inheritdoc />
+    protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken) =>
+        _options.ConnectionPool is { } pool
+            ? _options.ConnectionName is { Length: > 0 } name
+                ? await pool.GetConnectionAsync(name, cancellationToken).ConfigureAwait(false)
+                : await pool.GetConnectionAsync(cancellationToken).ConfigureAwait(false)
+            : await base.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+
+    /// <inheritdoc />
+    protected override SqlWriter<T> CreateWriter() => _options.WriteStrategy switch
     {
-        ArgumentNullException.ThrowIfNull(connectionPool);
-        ArgumentNullException.ThrowIfNull(tableName);
+        SnowflakeWriteStrategy.PerRow => new SqlPerRowWriter<T>(Target),
+        SnowflakeWriteStrategy.StagedCopy => new SnowflakeStagedCopyWriter<T>(Target, _options.Stage, _options.StageFilePrefix, _options.PurgeStagedFiles),
+        _ => new SqlBatchWriter<T>(Target),
+    };
 
-        _configuration = configuration ?? new SnowflakeConfiguration();
-        _configuration.Validate();
-        _connectionPool = connectionPool;
-        _tableName = tableName;
-        _writeStrategy = _configuration.WriteStrategy;
-        _parameterMapper = customMapper;
-        _schema = _configuration.Schema;
+    /// <inheritdoc />
+    protected override async Task ExecuteAsync(DbConnection connection, Func<CancellationToken, Task> write, CancellationToken cancellationToken)
+    {
+        var attempt = 0;
 
-        _connectionName = string.IsNullOrWhiteSpace(connectionName)
-            ? null
-            : connectionName;
-
-        if (_configuration.ValidateIdentifiers)
+        _ = await _options.Resilience.RunAsync(async ct =>
         {
-            DatabaseIdentifierValidator.ValidateIdentifier(_tableName, nameof(_tableName));
-            DatabaseIdentifierValidator.ValidateIdentifier(_schema, nameof(_schema));
-        }
-    }
+            // A connection-level failure closes the connection; reopen it so the retry has somewhere to run.
+            if (attempt++ > 0 && connection.State != System.Data.ConnectionState.Open)
+            {
+                await connection.CloseAsync().ConfigureAwait(false);
+                await connection.OpenAsync(ct).ConfigureAwait(false);
+            }
 
-    /// <summary>
-    ///     Initializes a new instance of <see cref="SnowflakeSinkNode{T}" /> class using a <see cref="StorageUri" />.
-    /// </summary>
-    /// <param name="uri">The storage URI containing Snowflake connection information.</param>
-    /// <param name="tableName">The table name.</param>
-    /// <param name="writeStrategy">The write strategy.</param>
-    /// <param name="resolver">The storage resolver used to obtain storage provider.</param>
-    /// <param name="customMapper">Optional custom parameter mapper function.</param>
-    /// <param name="configuration">Optional configuration.</param>
-    /// <param name="schema">Optional schema name (default: PUBLIC).</param>
-    public SnowflakeSinkNode(
-        StorageUri uri,
-        string tableName,
-        SnowflakeWriteStrategy writeStrategy = SnowflakeWriteStrategy.Batch,
-        IStorageResolver? resolver = null,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper = null,
-        SnowflakeConfiguration? configuration = null,
-        string? schema = null)
-    {
-        ArgumentNullException.ThrowIfNull(uri);
-        ArgumentNullException.ThrowIfNull(tableName);
-
-        _storageUri = uri;
-        _storageResolver = resolver;
-        _tableName = tableName;
-        _writeStrategy = writeStrategy;
-        _parameterMapper = customMapper;
-        _configuration = configuration ?? new SnowflakeConfiguration();
-        _configuration.Validate();
-        _schema = schema ?? _configuration.Schema;
-        _connectionName = null;
-
-        if (_configuration.ValidateIdentifiers)
-        {
-            DatabaseIdentifierValidator.ValidateIdentifier(_tableName, nameof(_tableName));
-            DatabaseIdentifierValidator.ValidateIdentifier(_schema, nameof(_schema));
-        }
-    }
-
-    /// <summary>
-    ///     Initializes a new instance of <see cref="SnowflakeSinkNode{T}" /> class using a specific storage provider.
-    /// </summary>
-    /// <param name="provider">The storage provider.</param>
-    /// <param name="uri">The storage URI containing Snowflake connection information.</param>
-    /// <param name="tableName">The table name.</param>
-    /// <param name="writeStrategy">The write strategy.</param>
-    /// <param name="customMapper">Optional custom parameter mapper function.</param>
-    /// <param name="configuration">Optional configuration.</param>
-    /// <param name="schema">Optional schema name (default: PUBLIC).</param>
-    public SnowflakeSinkNode(
-        IStorageProvider provider,
-        StorageUri uri,
-        string tableName,
-        SnowflakeWriteStrategy writeStrategy = SnowflakeWriteStrategy.Batch,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper = null,
-        SnowflakeConfiguration? configuration = null,
-        string? schema = null)
-    {
-        ArgumentNullException.ThrowIfNull(provider);
-        ArgumentNullException.ThrowIfNull(uri);
-        ArgumentNullException.ThrowIfNull(tableName);
-
-        _storageProvider = provider;
-        _storageUri = uri;
-        _tableName = tableName;
-        _writeStrategy = writeStrategy;
-        _parameterMapper = customMapper;
-        _configuration = configuration ?? new SnowflakeConfiguration();
-        _configuration.Validate();
-        _schema = schema ?? _configuration.Schema;
-        _connectionName = null;
-
-        if (_configuration.ValidateIdentifiers)
-        {
-            DatabaseIdentifierValidator.ValidateIdentifier(_tableName, nameof(_tableName));
-            DatabaseIdentifierValidator.ValidateIdentifier(_schema, nameof(_schema));
-        }
-    }
-
-    /// <summary>
-    ///     Gets whether to use transactions.
-    /// </summary>
-    protected override bool UseTransaction => _configuration.UseTransaction;
-
-    /// <summary>
-    ///     Gets batch size for batch writes.
-    /// </summary>
-    protected override int BatchSize => _configuration.BatchSize;
-
-    /// <summary>
-    ///     Gets delivery semantic.
-    /// </summary>
-    protected override DeliverySemantic DeliverySemantic => _configuration.DeliverySemantic;
-
-    /// <summary>
-    ///     Gets checkpoint strategy.
-    /// </summary>
-    protected override CheckpointStrategy CheckpointStrategy => _configuration.CheckpointStrategy;
-
-    /// <summary>
-    ///     Gets whether to continue on error.
-    /// </summary>
-    protected override bool ContinueOnError => _configuration.ContinueOnError;
-
-    /// <summary>
-    ///     Disposes the connection pool, but only when this node created it: an injected pool belongs to its caller.
-    /// </summary>
-    public async ValueTask DisposeAsync()
-    {
-        GC.SuppressFinalize(this);
-
-        if (_ownsConnectionPool && _connectionPool is not null)
-            await _connectionPool.DisposeAsync().ConfigureAwait(false);
-    }
-
-    /// <summary>
-    ///     Gets a database connection asynchronously.
-    /// </summary>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>A task representing the asynchronous operation.</returns>
-    protected override async Task<IDatabaseConnection> GetConnectionAsync(CancellationToken cancellationToken)
-    {
-        if (_storageUri != null)
-        {
-            var provider = _storageProvider ?? StorageProviderFactory.GetProviderOrThrow(
-                _storageResolver ?? DefaultResolver.Value,
-                _storageUri);
-
-            if (provider is IDatabaseStorageProvider databaseProvider)
-                return await databaseProvider.GetConnectionAsync(_storageUri, cancellationToken).ConfigureAwait(false);
-
-            throw new InvalidOperationException($"Storage provider must implement {nameof(IDatabaseStorageProvider)} to use StorageUri.");
-        }
-
-        var connection = _connectionName is { Length: > 0 }
-            ? await _connectionPool!.GetConnectionAsync(_connectionName, cancellationToken).ConfigureAwait(false)
-            : await _connectionPool!.GetConnectionAsync(cancellationToken).ConfigureAwait(false);
-
-        return new SnowflakeDatabaseConnection(connection);
-    }
-
-    /// <summary>
-    ///     Creates a database writer for the connection based on the configured write strategy.
-    /// </summary>
-    /// <param name="connection">The database connection.</param>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>A task representing the asynchronous operation.</returns>
-    protected override Task<IDatabaseWriter<T>> CreateWriterAsync(IDatabaseConnection connection, CancellationToken cancellationToken)
-    {
-        var writer = _writeStrategy switch
-        {
-            SnowflakeWriteStrategy.PerRow => Task.FromResult<IDatabaseWriter<T>>(
-                new SnowflakePerRowWriter<T>(connection, _schema, _tableName, _parameterMapper, _configuration)),
-            SnowflakeWriteStrategy.Batch => Task.FromResult<IDatabaseWriter<T>>(
-                new SnowflakeBatchWriter<T>(connection, _schema, _tableName, _parameterMapper, _configuration)),
-            SnowflakeWriteStrategy.StagedCopy => Task.FromResult<IDatabaseWriter<T>>(
-                new SnowflakeStagedCopyWriter<T>(connection, _schema, _tableName, _parameterMapper, _configuration)),
-            _ => throw new NotSupportedException($"Write strategy '{_writeStrategy}' is not supported"),
-        };
-
-        return writer;
+            await write(ct).ConfigureAwait(false);
+            return true;
+        }, cancellationToken).ConfigureAwait(false);
     }
 }

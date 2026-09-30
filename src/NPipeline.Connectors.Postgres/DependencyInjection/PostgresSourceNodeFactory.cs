@@ -1,71 +1,47 @@
+using NPipeline.Connectors.Sql;
 using NPipeline.Connectors.Postgres.Configuration;
 using NPipeline.Connectors.Postgres.Connection;
-using NPipeline.Connectors.Postgres.Mapping;
 using NPipeline.Connectors.Postgres.Nodes;
 
 namespace NPipeline.Connectors.Postgres.DependencyInjection;
 
-/// <summary>
-///     Factory for creating PostgreSQL source nodes with dependency injection support.
-/// </summary>
-public class PostgresSourceNodeFactory
+/// <summary>Creates PostgreSQL sources on the registered connection pool.</summary>
+public interface IPostgresSourceNodeFactory
 {
-    private readonly IPostgresConnectionPool _connectionPool;
+    /// <summary>A source that maps columns to <typeparamref name="T" />'s members by name.</summary>
+    /// <param name="query">The query.</param>
+    /// <param name="configure">Adjusts the default options; set <see cref="PostgresReadOptions.ConnectionName" /> for a named connection.</param>
+    PostgresSourceNode<T> CreateSourceNode<T>(string query, Func<PostgresReadOptions, PostgresReadOptions>? configure = null);
 
-    /// <summary>
-    ///     Initializes a new instance of the <see cref="PostgresSourceNodeFactory" /> class.
-    /// </summary>
-    /// <param name="connectionPool">The connection pool.</param>
-    public PostgresSourceNodeFactory(IPostgresConnectionPool connectionPool)
+    /// <summary>A source that builds each record from a <see cref="SqlRow" /> with <paramref name="map" />.</summary>
+    /// <param name="query">The query.</param>
+    /// <param name="map">Builds a record from a row.</param>
+    /// <param name="configure">Adjusts the default options.</param>
+    PostgresSourceNode<T> CreateSourceNode<T>(string query, Func<SqlRow, T> map, Func<PostgresReadOptions, PostgresReadOptions>? configure = null);
+}
+
+/// <summary>Creates PostgreSQL sources on the registered connection pool.</summary>
+/// <param name="connectionPool">The pool.</param>
+public class PostgresSourceNodeFactory(IPostgresConnectionPool connectionPool) : IPostgresSourceNodeFactory
+{
+    private readonly IPostgresConnectionPool _connectionPool = connectionPool ?? throw new ArgumentNullException(nameof(connectionPool));
+
+    /// <inheritdoc />
+    public PostgresSourceNode<T> CreateSourceNode<T>(string query, Func<PostgresReadOptions, PostgresReadOptions>? configure = null) =>
+        new(Options(query, configure));
+
+    /// <inheritdoc />
+    public PostgresSourceNode<T> CreateSourceNode<T>(string query, Func<SqlRow, T> map, Func<PostgresReadOptions, PostgresReadOptions>? configure = null) =>
+        new(Options(query, configure), map ?? throw new ArgumentNullException(nameof(map)));
+
+    private PostgresReadOptions Options(string query, Func<PostgresReadOptions, PostgresReadOptions>? configure)
     {
-        _connectionPool = connectionPool ?? throw new ArgumentNullException(nameof(connectionPool));
+        var options = new PostgresReadOptions { ConnectionPool = _connectionPool, Query = query };
+        options = configure is null ? options : configure(options);
+
+        if (options.ConnectionName is { Length: > 0 } name && !_connectionPool.HasNamedConnection(name))
+            throw new InvalidOperationException($"Named connection '{name}' not found.");
+
+        return options;
     }
-
-    /// <summary>
-    ///     Creates a PostgreSQL source node using a connection from the pool.
-    /// </summary>
-    /// <typeparam name="T">The type of objects to read.</typeparam>
-    /// <param name="connectionName">The name of the connection to use.</param>
-    /// <param name="query">The SQL query to execute.</param>
-    /// <param name="rowMapper">Optional custom row mapper function.</param>
-    /// <param name="configuration">Optional configuration. If null, defaults are used.</param>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>A configured PostgreSQL source node.</returns>
-    public Task<PostgresSourceNode<T>> CreateSourceAsync<T>(
-        string connectionName,
-        string query,
-        Func<PostgresRow, T>? rowMapper = null,
-        PostgresConfiguration? configuration = null,
-        CancellationToken cancellationToken = default)
-        where T : class
-    {
-        ArgumentNullException.ThrowIfNull(connectionName);
-        ArgumentNullException.ThrowIfNull(query);
-
-        cancellationToken.ThrowIfCancellationRequested();
-
-        if (!_connectionPool.HasNamedConnection(connectionName))
-            throw new InvalidOperationException($"Named connection '{connectionName}' not found.");
-
-        var config = configuration ?? new PostgresConfiguration();
-
-        return Task.FromResult(new PostgresSourceNode<T>(_connectionPool, query, rowMapper, config, null, config.ContinueOnError, connectionName));
-    }
-
-    /// <summary>
-    ///     Creates a PostgreSQL source node using attribute-based mapping.
-    /// </summary>
-    /// <typeparam name="T">The type of objects to read (must have mapping attributes).</typeparam>
-    /// <param name="connectionName">The name of the connection to use.</param>
-    /// <param name="query">The SQL query to execute.</param>
-    /// <param name="configuration">Optional configuration. If null, defaults are used.</param>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>A configured PostgreSQL source node.</returns>
-    public Task<PostgresSourceNode<T>> CreateSourceWithAttributesAsync<T>(
-        string connectionName,
-        string query,
-        PostgresConfiguration? configuration = null,
-        CancellationToken cancellationToken = default)
-        where T : class =>
-        CreateSourceAsync<T>(connectionName, query, null, configuration, cancellationToken);
 }

@@ -1,284 +1,73 @@
-using NPipeline.Connectors.Configuration;
-using NPipeline.Connectors.Nodes;
+using System.Data.Common;
 using NPipeline.Connectors.Postgres.Configuration;
-using NPipeline.Connectors.Postgres.Connection;
 using NPipeline.Connectors.Postgres.Writers;
-using NPipeline.StorageProviders;
+using NPipeline.Connectors.Sql;
+using Npgsql;
 using NPipeline.StorageProviders.Abstractions;
-using NPipeline.StorageProviders.Models;
-using NPipeline.StorageProviders.Utilities;
 
 namespace NPipeline.Connectors.Postgres.Nodes;
 
 /// <summary>
-///     PostgreSQL sink node for writing data to PostgreSQL database.
+///     Writes records to a PostgreSQL table: with multi-row statements, one statement per row, or binary <c>COPY</c>, as
+///     <see cref="PostgresWriteOptions.WriteStrategy" /> says. Create one with <see cref="PostgresConnector" />.
 /// </summary>
-/// <typeparam name="T">The type of objects consumed by sink.</typeparam>
-public class PostgresSinkNode<T> : DatabaseSinkNode<T>, IAsyncDisposable
+/// <remarks>
+///     The table's column types are read once per write, so dates and times are sent as the column's type. Upserts use
+///     <c>INSERT … ON CONFLICT</c> on the key columns, which need a unique index; a batch must not repeat a key.
+/// </remarks>
+/// <typeparam name="T">The record type.</typeparam>
+public sealed class PostgresSinkNode<T> : SqlSinkNode<T>
 {
-    private static readonly Lazy<IStorageResolver> DefaultResolver = new(
-        () => PostgresStorageResolverFactory.CreateResolver(),
-        LazyThreadSafetyMode.ExecutionAndPublication);
+    private static readonly Lazy<IStorageResolver> Resolver = new(PostgresStorageResolverFactory.CreateResolver);
 
-    private readonly PostgresConfiguration _configuration;
-    private readonly string? _connectionName;
-    private readonly IPostgresConnectionPool? _connectionPool;
-    private readonly bool _ownsConnectionPool;
-    private readonly Func<T, IEnumerable<DatabaseParameter>>? _parameterMapper;
-    private readonly string _schema;
-    private readonly IStorageProvider? _storageProvider;
-    private readonly IStorageResolver? _storageResolver;
-    private readonly StorageUri? _storageUri;
-    private readonly string _tableName;
-    private readonly PostgresWriteStrategy _writeStrategy;
+    private readonly PostgresWriteOptions _options;
 
-    /// <summary>
-    ///     Initializes a new instance of <see cref="PostgresSinkNode{T}" /> class.
-    /// </summary>
-    /// <param name="connectionString">The connection string.</param>
-    /// <param name="tableName">The table name.</param>
-    /// <param name="writeStrategy">The write strategy.</param>
-    /// <param name="parameterMapper">Optional parameter mapper function.</param>
-    /// <param name="configuration">Optional configuration.</param>
-    /// <param name="schema">Optional schema name (default: public).</param>
-    public PostgresSinkNode(
-        string connectionString,
-        string tableName,
-        PostgresWriteStrategy writeStrategy = PostgresWriteStrategy.Batch,
-        Func<T, IEnumerable<DatabaseParameter>>? parameterMapper = null,
-        PostgresConfiguration? configuration = null,
-        string? schema = null)
+    /// <summary>Creates a sink that writes <typeparamref name="T" />'s readable members as columns.</summary>
+    /// <exception cref="NotSupportedException">A member is not a single value.</exception>
+    public PostgresSinkNode(PostgresWriteOptions options)
+        : base(options, PostgresDialect.Instance, PostgresShape.For((options ?? throw new ArgumentNullException(nameof(options))).Naming))
     {
-        ArgumentNullException.ThrowIfNull(connectionString);
-        ArgumentNullException.ThrowIfNull(tableName);
-
-        _configuration = configuration ?? new PostgresConfiguration();
-        _configuration.Validate();
-        _connectionPool = new PostgresConnectionPool(connectionString);
-        _ownsConnectionPool = true;
-        _tableName = tableName;
-        _writeStrategy = writeStrategy;
-        _parameterMapper = parameterMapper;
-        _schema = schema ?? _configuration.Schema;
-        _connectionName = null;
-
-        if (_configuration.ValidateIdentifiers)
-        {
-            DatabaseIdentifierValidator.ValidateIdentifier(_tableName, nameof(_tableName));
-            DatabaseIdentifierValidator.ValidateIdentifier(_schema, nameof(_schema));
-        }
+        _options = options;
     }
 
-    /// <summary>
-    ///     Initializes a new instance of <see cref="PostgresSinkNode{T}" /> class with connection pool.
-    /// </summary>
-    /// <param name="connectionPool">The connection pool.</param>
-    /// <param name="tableName">The table name.</param>
-    /// <param name="writeStrategy">The write strategy.</param>
-    /// <param name="parameterMapper">Optional parameter mapper function.</param>
-    /// <param name="configuration">Optional configuration.</param>
-    /// <param name="schema">Optional schema name (default: public).</param>
-    /// <param name="connectionName">Optional named connection when using a shared pool.</param>
-    public PostgresSinkNode(
-        IPostgresConnectionPool connectionPool,
-        string tableName,
-        PostgresWriteStrategy writeStrategy = PostgresWriteStrategy.Batch,
-        Func<T, IEnumerable<DatabaseParameter>>? parameterMapper = null,
-        PostgresConfiguration? configuration = null,
-        string? schema = null,
-        string? connectionName = null)
+    /// <inheritdoc />
+    protected override IStorageResolver DefaultResolver => Resolver.Value;
+
+    /// <inheritdoc />
+    protected override DbConnection CreateConnection(string connectionString) => new NpgsqlConnection(connectionString);
+
+    /// <inheritdoc />
+    protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken) =>
+        _options.ConnectionPool is { } pool
+            ? _options.ConnectionName is { Length: > 0 } name
+                ? await pool.GetConnectionAsync(name, cancellationToken).ConfigureAwait(false)
+                : await pool.GetConnectionAsync(cancellationToken).ConfigureAwait(false)
+            : await base.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+
+    /// <inheritdoc />
+    protected override SqlWriter<T> CreateWriter() => _options.WriteStrategy switch
     {
-        ArgumentNullException.ThrowIfNull(connectionPool);
+        PostgresWriteStrategy.PerRow => new SqlPerRowWriter<T>(Target),
+        PostgresWriteStrategy.Copy => new PostgresCopyWriter<T>(Target),
+        _ => new SqlBatchWriter<T>(Target),
+    };
 
-        if (string.IsNullOrWhiteSpace(tableName))
-            throw new ArgumentNullException(nameof(tableName));
+    /// <inheritdoc />
+    protected override async Task ExecuteAsync(DbConnection connection, Func<CancellationToken, Task> write, CancellationToken cancellationToken)
+    {
+        var attempt = 0;
 
-        _configuration = configuration ?? new PostgresConfiguration();
-        _configuration.Validate();
-        _connectionPool = connectionPool;
-        _tableName = tableName;
-        _writeStrategy = writeStrategy;
-        _parameterMapper = parameterMapper;
-        _schema = schema ?? _configuration.Schema;
-
-        _connectionName = string.IsNullOrWhiteSpace(connectionName)
-            ? null
-            : connectionName;
-
-        if (_configuration.ValidateIdentifiers)
+        _ = await _options.Resilience.RunAsync(async ct =>
         {
-            DatabaseIdentifierValidator.ValidateIdentifier(_tableName, nameof(_tableName));
-            DatabaseIdentifierValidator.ValidateIdentifier(_schema, nameof(_schema));
-        }
-    }
+            // A connection-level failure closes the connection; reopen it so the retry has somewhere to run.
+            if (attempt++ > 0 && connection.State != System.Data.ConnectionState.Open)
+            {
+                await connection.CloseAsync().ConfigureAwait(false);
+                await connection.OpenAsync(ct).ConfigureAwait(false);
+            }
 
-    /// <summary>
-    ///     Initializes a new instance of <see cref="PostgresSinkNode{T}" /> class using a <see cref="StorageUri" />.
-    /// </summary>
-    /// <param name="uri">The storage URI containing PostgreSQL connection information.</param>
-    /// <param name="tableName">The table name.</param>
-    /// <param name="writeStrategy">The write strategy.</param>
-    /// <param name="resolver">
-    ///     The storage resolver used to obtain storage provider. If <c>null</c>, a default resolver
-    ///     created by <see cref="PostgresStorageResolverFactory.CreateResolver" /> is used.
-    /// </param>
-    /// <param name="parameterMapper">Optional parameter mapper function.</param>
-    /// <param name="configuration">Optional configuration.</param>
-    /// <param name="schema">Optional schema name (default: public).</param>
-    /// <exception cref="ArgumentNullException">Thrown if <paramref name="uri" /> is <c>null</c>.</exception>
-    public PostgresSinkNode(
-        StorageUri uri,
-        string tableName,
-        PostgresWriteStrategy writeStrategy = PostgresWriteStrategy.Batch,
-        IStorageResolver? resolver = null,
-        Func<T, IEnumerable<DatabaseParameter>>? parameterMapper = null,
-        PostgresConfiguration? configuration = null,
-        string? schema = null)
-    {
-        ArgumentNullException.ThrowIfNull(uri);
-        ArgumentNullException.ThrowIfNull(tableName);
-
-        _storageUri = uri;
-        _storageResolver = resolver;
-        _tableName = tableName;
-        _writeStrategy = writeStrategy;
-        _parameterMapper = parameterMapper;
-        _configuration = configuration ?? new PostgresConfiguration();
-        _configuration.Validate();
-        _schema = schema ?? _configuration.Schema;
-        _connectionName = null;
-
-        if (_configuration.ValidateIdentifiers)
-        {
-            DatabaseIdentifierValidator.ValidateIdentifier(_tableName, nameof(_tableName));
-            DatabaseIdentifierValidator.ValidateIdentifier(_schema, nameof(_schema));
-        }
-    }
-
-    /// <summary>
-    ///     Initializes a new instance of <see cref="PostgresSinkNode{T}" /> class using a specific storage provider.
-    /// </summary>
-    /// <param name="provider">The storage provider.</param>
-    /// <param name="uri">The storage URI containing PostgreSQL connection information.</param>
-    /// <param name="tableName">The table name.</param>
-    /// <param name="writeStrategy">The write strategy.</param>
-    /// <param name="parameterMapper">Optional parameter mapper function.</param>
-    /// <param name="configuration">Optional configuration.</param>
-    /// <param name="schema">Optional schema name (default: public).</param>
-    /// <exception cref="ArgumentNullException">Thrown if <paramref name="provider" /> or <paramref name="uri" /> is <c>null</c>.</exception>
-    public PostgresSinkNode(
-        IStorageProvider provider,
-        StorageUri uri,
-        string tableName,
-        PostgresWriteStrategy writeStrategy = PostgresWriteStrategy.Batch,
-        Func<T, IEnumerable<DatabaseParameter>>? parameterMapper = null,
-        PostgresConfiguration? configuration = null,
-        string? schema = null)
-    {
-        ArgumentNullException.ThrowIfNull(provider);
-        ArgumentNullException.ThrowIfNull(uri);
-        ArgumentNullException.ThrowIfNull(tableName);
-
-        _storageProvider = provider;
-        _storageUri = uri;
-        _tableName = tableName;
-        _writeStrategy = writeStrategy;
-        _parameterMapper = parameterMapper;
-        _configuration = configuration ?? new PostgresConfiguration();
-        _configuration.Validate();
-        _schema = schema ?? _configuration.Schema;
-        _connectionName = null;
-
-        if (_configuration.ValidateIdentifiers)
-        {
-            DatabaseIdentifierValidator.ValidateIdentifier(_tableName, nameof(_tableName));
-            DatabaseIdentifierValidator.ValidateIdentifier(_schema, nameof(_schema));
-        }
-    }
-
-    /// <summary>
-    ///     Gets whether to use transactions.
-    /// </summary>
-    protected override bool UseTransaction => _configuration.UseTransaction;
-
-    /// <summary>
-    ///     Gets batch size for batch writes.
-    /// </summary>
-    protected override int BatchSize => _configuration.BatchSize;
-
-    /// <summary>
-    ///     Gets delivery semantic.
-    /// </summary>
-    protected override DeliverySemantic DeliverySemantic => _configuration.DeliverySemantic;
-
-    /// <summary>
-    ///     Gets checkpoint strategy.
-    /// </summary>
-    protected override CheckpointStrategy CheckpointStrategy => _configuration.CheckpointStrategy;
-
-    /// <summary>
-    ///     Gets whether to continue on error.
-    /// </summary>
-    protected override bool ContinueOnError => _configuration.ContinueOnError;
-
-    /// <summary>
-    ///     Disposes the connection pool, but only when this node created it: an injected pool belongs to its caller.
-    /// </summary>
-    public async ValueTask DisposeAsync()
-    {
-        GC.SuppressFinalize(this);
-
-        if (_ownsConnectionPool && _connectionPool is not null)
-            await _connectionPool.DisposeAsync().ConfigureAwait(false);
-    }
-
-    /// <summary>
-    ///     Gets a database connection asynchronously.
-    /// </summary>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>A task representing the asynchronous operation.</returns>
-    protected override async Task<IDatabaseConnection> GetConnectionAsync(CancellationToken cancellationToken)
-    {
-        // If using StorageUri-based construction, get connection from database storage provider
-        if (_storageUri != null)
-        {
-            var provider = _storageProvider ?? StorageProviderFactory.GetProviderOrThrow(
-                _storageResolver ?? DefaultResolver.Value,
-                _storageUri);
-
-            if (provider is IDatabaseStorageProvider databaseProvider)
-                return await databaseProvider.GetConnectionAsync(_storageUri, cancellationToken).ConfigureAwait(false);
-
-            throw new InvalidOperationException($"Storage provider must implement {nameof(IDatabaseStorageProvider)} to use StorageUri.");
-        }
-
-        // Original connection pool logic
-        var connection = _connectionName is { Length: > 0 }
-            ? await _connectionPool!.GetConnectionAsync(_connectionName, cancellationToken).ConfigureAwait(false)
-            : await _connectionPool!.GetConnectionAsync(cancellationToken).ConfigureAwait(false);
-
-        return new PostgresDatabaseConnection(connection);
-    }
-
-    /// <summary>
-    ///     Creates a database writer for the connection.
-    /// </summary>
-    /// <param name="connection">The database connection.</param>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>A task representing the asynchronous operation.</returns>
-    protected override Task<IDatabaseWriter<T>> CreateWriterAsync(IDatabaseConnection connection, CancellationToken cancellationToken)
-    {
-        var writer = _writeStrategy switch
-        {
-            PostgresWriteStrategy.PerRow => Task.FromResult<IDatabaseWriter<T>>(new PostgresPerRowWriter<T>(connection, _schema, _tableName, _parameterMapper,
-                _configuration)),
-            PostgresWriteStrategy.Batch => Task.FromResult<IDatabaseWriter<T>>(new PostgresBatchWriter<T>(connection, _schema, _tableName, _parameterMapper,
-                _configuration)),
-            PostgresWriteStrategy.Copy => Task.FromResult<IDatabaseWriter<T>>(new PostgresCopyWriter<T>(connection, _schema, _tableName, _parameterMapper,
-                _configuration)),
-            _ => throw new NotSupportedException($"Write strategy '{_writeStrategy}' is not supported"),
-        };
-
-        return writer;
+            await write(ct).ConfigureAwait(false);
+            return true;
+        }, cancellationToken).ConfigureAwait(false);
     }
 }

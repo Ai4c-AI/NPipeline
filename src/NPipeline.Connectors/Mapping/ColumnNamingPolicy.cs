@@ -21,6 +21,9 @@ public abstract class ColumnNamingPolicy
     /// <summary>snake_case, as System.Text.Json writes it: <c>first_name</c>, <c>http_server</c>.</summary>
     public static ColumnNamingPolicy SnakeCaseLower { get; } = new JsonPolicy(JsonNamingPolicy.SnakeCaseLower);
 
+    /// <summary><c>ORDER_ID</c>: upper-case words separated by underscores, as Snowflake folds unquoted names.</summary>
+    public static ColumnNamingPolicy SnakeCaseUpper { get; } = new JsonPolicy(JsonNamingPolicy.SnakeCaseUpper);
+
     /// <summary>kebab-case, as System.Text.Json writes it: <c>first-name</c>.</summary>
     public static ColumnNamingPolicy KebabCaseLower { get; } = new JsonPolicy(JsonNamingPolicy.KebabCaseLower);
 

@@ -8,14 +8,13 @@ namespace Sample_SqlServerConnector;
 ///     Represents a customer entity with SQL Server-specific mapping attributes.
 ///     Demonstrates the use of SqlServerTable, SqlServerColumn, Column, and IgnoreColumn attributes.
 /// </summary>
-[SqlServerTable("Customers", Schema = "Sales")]
 public sealed class Customer
 {
     /// <summary>
     ///     Gets or sets the unique customer identifier.
-    ///     Uses SqlServerColumn with PrimaryKey and Identity for auto-increment.
+    ///     Uses SqlServerColumn with Identity for an auto-increment column.
     /// </summary>
-    [SqlServerColumn("CustomerID", PrimaryKey = true, Identity = true)]
+    [SqlServerColumn("CustomerID", Identity = true)]
     public int CustomerId { get; set; }
 
     /// <summary>
@@ -72,14 +71,13 @@ public sealed class Customer
 ///     Represents an order entity with SQL Server-specific mapping attributes.
 ///     Demonstrates attribute-based mapping with various SQL Server features.
 /// </summary>
-[SqlServerTable("Orders", Schema = "Sales")]
 public sealed class Order
 {
     /// <summary>
     ///     Gets or sets the unique order identifier.
-    ///     Uses SqlServerColumn with PrimaryKey and Identity.
+    ///     Uses SqlServerColumn with Identity.
     /// </summary>
-    [SqlServerColumn("OrderID", PrimaryKey = true, Identity = true)]
+    [SqlServerColumn("OrderID", Identity = true)]
     public int OrderId { get; set; }
 
     /// <summary>
@@ -136,7 +134,6 @@ public sealed class Order
 ///     Represents an enriched customer with additional computed properties.
 ///     Demonstrates transformation and computed property handling.
 /// </summary>
-[SqlServerTable("EnrichedCustomers", Schema = "Analytics")]
 public sealed class EnrichedCustomer
 {
     /// <summary>

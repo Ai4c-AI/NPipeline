@@ -1,8 +1,10 @@
 using System.Collections.Concurrent;
 using System.Linq.Expressions;
 using System.Reflection;
+using MongoDB.Bson;
 using MongoDB.Bson.Serialization.Attributes;
 using NPipeline.Connectors.Attributes;
+using NPipeline.Connectors.Mapping;
 using NPipeline.Connectors.MongoDB.Attributes;
 using NPipeline.Connectors.MongoDB.Exceptions;
 
@@ -149,68 +151,21 @@ internal static class MongoMapperBuilder
     /// <summary>
     ///     Converts a value to the target type.
     /// </summary>
-    private static object? ConvertValue(object? value, Type targetType)
-    {
-        if (value == null)
-        {
-            return targetType.IsValueType
-                ? Activator.CreateInstance(targetType)
-                : null;
-        }
-
-        var sourceType = value.GetType();
-
-        if (targetType.IsAssignableFrom(sourceType))
-            return value;
-
-        // Handle nullable types
-        var underlyingType = Nullable.GetUnderlyingType(targetType);
-
-        if (underlyingType != null)
-        {
-            if (value == null)
-                return null;
-
-            return ConvertValue(value, underlyingType);
-        }
-
-        // Handle common conversions
-        if (targetType == typeof(Guid) && value is string guidStr)
-            return Guid.Parse(guidStr);
-
-        if (targetType == typeof(DateTime) && value is DateTime dt)
-            return dt;
-
-        if (targetType == typeof(DateTimeOffset) && value is DateTime dto)
-            return new DateTimeOffset(dto);
-
-        // Handle numeric conversions
-        if (IsNumericType(targetType) && IsNumericType(sourceType))
-            return Convert.ChangeType(value, targetType);
-
-        // Handle string conversion
-        if (targetType == typeof(string))
-            return value.ToString();
-
-        // Fallback
-        return Convert.ChangeType(value, targetType);
-    }
-
     /// <summary>
-    ///     Checks if a type is a numeric type.
+    ///     Converts a field's value strictly and culture-invariantly; a <c>null</c> for a non-nullable member is an error
+    ///     rather than the type's default.
     /// </summary>
-    private static bool IsNumericType(Type type) =>
-        type == typeof(int) ||
-        type == typeof(long) ||
-        type == typeof(short) ||
-        type == typeof(byte) ||
-        type == typeof(float) ||
-        type == typeof(double) ||
-        type == typeof(decimal) ||
-        type == typeof(uint) ||
-        type == typeof(ulong) ||
-        type == typeof(ushort) ||
-        type == typeof(sbyte);
+    private static object? ConvertValue(object? value, Type targetType) => ScalarConverter.Convert(DotNetValue(value), targetType);
+
+    /// <summary>A BSON value as the .NET value it holds (a <c>Decimal128</c> as a <c>decimal</c>), so it converts like any other.</summary>
+    private static object? DotNetValue(object? value) =>
+        value switch
+        {
+            null or BsonNull => null,
+            BsonValue bson => DotNetValue(BsonTypeMapper.MapToDotNetValue(bson)),
+            Decimal128 d => Decimal128.ToDecimal(d),
+            _ => value,
+        };
 
     /// <summary>
     ///     Converts a string to camelCase.

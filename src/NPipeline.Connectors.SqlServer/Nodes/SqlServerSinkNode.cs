@@ -1,278 +1,73 @@
-using NPipeline.Connectors.Configuration;
-using NPipeline.Connectors.Nodes;
+using System.Data.Common;
+using Microsoft.Data.SqlClient;
+using NPipeline.Connectors.Sql;
 using NPipeline.Connectors.SqlServer.Configuration;
-using NPipeline.Connectors.SqlServer.Connection;
 using NPipeline.Connectors.SqlServer.Writers;
-using NPipeline.StorageProviders;
 using NPipeline.StorageProviders.Abstractions;
-using NPipeline.StorageProviders.Models;
-using NPipeline.StorageProviders.Utilities;
 
 namespace NPipeline.Connectors.SqlServer.Nodes;
 
 /// <summary>
-///     SQL Server sink node for writing data to SQL Server database.
+///     Writes records to a SQL Server table: with multi-row statements, one statement per row, or <c>SqlBulkCopy</c>, as
+///     <see cref="SqlServerWriteOptions.WriteStrategy" /> says. Create one with <see cref="SqlServerConnector" />.
 /// </summary>
-/// <typeparam name="T">The type of objects consumed by sink.</typeparam>
-public class SqlServerSinkNode<T> : DatabaseSinkNode<T>, IAsyncDisposable
+/// <remarks>
+///     Members marked <c>[SqlServerColumn(Identity = true)]</c> are read but not written. Upserts use <c>MERGE</c> with
+///     <c>HOLDLOCK</c>; a batch must not repeat a key.
+/// </remarks>
+/// <typeparam name="T">The record type.</typeparam>
+public sealed class SqlServerSinkNode<T> : SqlSinkNode<T>
 {
-    private static readonly Lazy<IStorageResolver> DefaultResolver = new(
-        () => SqlServerStorageResolverFactory.CreateResolver(),
-        LazyThreadSafetyMode.ExecutionAndPublication);
+    private static readonly Lazy<IStorageResolver> Resolver = new(SqlServerStorageResolverFactory.CreateResolver);
 
-    private readonly SqlServerConfiguration _configuration;
-    private readonly string? _connectionName;
-    private readonly ISqlServerConnectionPool? _connectionPool;
-    private readonly bool _ownsConnectionPool;
-    private readonly Func<T, IEnumerable<DatabaseParameter>>? _parameterMapper;
-    private readonly string _schema;
-    private readonly IStorageProvider? _storageProvider;
-    private readonly IStorageResolver? _storageResolver;
-    private readonly StorageUri? _storageUri;
-    private readonly string _tableName;
-    private readonly SqlServerWriteStrategy _writeStrategy;
+    private readonly SqlServerWriteOptions _options;
 
-    /// <summary>
-    ///     Initializes a new instance of <see cref="SqlServerSinkNode{T}" /> class.
-    /// </summary>
-    /// <param name="connectionString">The connection string.</param>
-    /// <param name="tableName">The table name.</param>
-    /// <param name="configuration">Optional configuration.</param>
-    /// <param name="customMapper">Optional custom parameter mapper function.</param>
-    public SqlServerSinkNode(
-        string connectionString,
-        string tableName,
-        SqlServerConfiguration? configuration = null,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper = null)
+    /// <summary>Creates a sink that writes <typeparamref name="T" />'s readable members as columns.</summary>
+    /// <exception cref="NotSupportedException">A member is not a single value.</exception>
+    public SqlServerSinkNode(SqlServerWriteOptions options)
+        : base(options, SqlServerDialect.Instance, SqlServerShape.Write((options ?? throw new ArgumentNullException(nameof(options))).Naming))
     {
-        ArgumentNullException.ThrowIfNull(connectionString);
-        ArgumentNullException.ThrowIfNull(tableName);
-
-        _configuration = configuration ?? new SqlServerConfiguration();
-        _configuration.Validate();
-        _connectionPool = new SqlServerConnectionPool(connectionString);
-        _ownsConnectionPool = true;
-        _tableName = tableName;
-        _writeStrategy = _configuration.WriteStrategy;
-        _parameterMapper = customMapper;
-        _schema = _configuration.Schema;
-        _connectionName = null;
-
-        if (_configuration.ValidateIdentifiers)
-        {
-            DatabaseIdentifierValidator.ValidateIdentifier(_tableName, nameof(_tableName));
-            DatabaseIdentifierValidator.ValidateIdentifier(_schema, nameof(_schema));
-        }
+        _options = options;
     }
 
-    /// <summary>
-    ///     Initializes a new instance of <see cref="SqlServerSinkNode{T}" /> class with connection pool.
-    /// </summary>
-    /// <param name="connectionPool">The connection pool.</param>
-    /// <param name="tableName">The table name.</param>
-    /// <param name="configuration">Optional configuration.</param>
-    /// <param name="customMapper">Optional custom parameter mapper function.</param>
-    /// <param name="connectionName">Optional named connection when using a shared pool.</param>
-    public SqlServerSinkNode(
-        ISqlServerConnectionPool connectionPool,
-        string tableName,
-        SqlServerConfiguration? configuration = null,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper = null,
-        string? connectionName = null)
+    /// <inheritdoc />
+    protected override IStorageResolver DefaultResolver => Resolver.Value;
+
+    /// <inheritdoc />
+    protected override DbConnection CreateConnection(string connectionString) => new SqlConnection(connectionString);
+
+    /// <inheritdoc />
+    protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken) =>
+        _options.ConnectionPool is { } pool
+            ? _options.ConnectionName is { Length: > 0 } name
+                ? await pool.GetConnectionAsync(name, cancellationToken).ConfigureAwait(false)
+                : await pool.GetConnectionAsync(cancellationToken).ConfigureAwait(false)
+            : await base.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+
+    /// <inheritdoc />
+    protected override SqlWriter<T> CreateWriter() => _options.WriteStrategy switch
     {
-        ArgumentNullException.ThrowIfNull(connectionPool);
-        ArgumentNullException.ThrowIfNull(tableName);
+        SqlServerWriteStrategy.PerRow => new SqlPerRowWriter<T>(Target),
+        SqlServerWriteStrategy.BulkCopy => new SqlServerBulkCopyWriter<T>(Target, _options.BulkCopyTimeout),
+        _ => new SqlBatchWriter<T>(Target),
+    };
 
-        if (string.IsNullOrWhiteSpace(connectionName))
-            throw new ArgumentNullException(nameof(connectionName));
+    /// <inheritdoc />
+    protected override async Task ExecuteAsync(DbConnection connection, Func<CancellationToken, Task> write, CancellationToken cancellationToken)
+    {
+        var attempt = 0;
 
-        _configuration = configuration ?? new SqlServerConfiguration();
-        _configuration.Validate();
-        _connectionPool = connectionPool;
-        _tableName = tableName;
-        _writeStrategy = _configuration.WriteStrategy;
-        _parameterMapper = customMapper;
-        _schema = _configuration.Schema;
-
-        _connectionName = string.IsNullOrWhiteSpace(connectionName)
-            ? null
-            : connectionName;
-
-        if (_configuration.ValidateIdentifiers)
+        _ = await _options.Resilience.RunAsync(async ct =>
         {
-            DatabaseIdentifierValidator.ValidateIdentifier(_tableName, nameof(_tableName));
-            DatabaseIdentifierValidator.ValidateIdentifier(_schema, nameof(_schema));
-        }
-    }
+            // A connection-level failure closes the connection; reopen it so the retry has somewhere to run.
+            if (attempt++ > 0 && connection.State != System.Data.ConnectionState.Open)
+            {
+                await connection.CloseAsync().ConfigureAwait(false);
+                await connection.OpenAsync(ct).ConfigureAwait(false);
+            }
 
-    /// <summary>
-    ///     Initializes a new instance of <see cref="SqlServerSinkNode{T}" /> class using a <see cref="StorageUri" />.
-    /// </summary>
-    /// <param name="uri">The storage URI containing SQL Server connection information.</param>
-    /// <param name="tableName">The table name.</param>
-    /// <param name="writeStrategy">The write strategy.</param>
-    /// <param name="resolver">
-    ///     The storage resolver used to obtain storage provider. If <c>null</c>, a default resolver
-    ///     created by <see cref="SqlServerStorageResolverFactory.CreateResolver" /> is used.
-    /// </param>
-    /// <param name="customMapper">Optional custom parameter mapper function.</param>
-    /// <param name="configuration">Optional configuration.</param>
-    /// <param name="schema">Optional schema name (default: dbo).</param>
-    /// <exception cref="ArgumentNullException">Thrown if <paramref name="uri" /> is <c>null</c>.</exception>
-    public SqlServerSinkNode(
-        StorageUri uri,
-        string tableName,
-        SqlServerWriteStrategy writeStrategy = SqlServerWriteStrategy.Batch,
-        IStorageResolver? resolver = null,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper = null,
-        SqlServerConfiguration? configuration = null,
-        string? schema = null)
-    {
-        ArgumentNullException.ThrowIfNull(uri);
-        ArgumentNullException.ThrowIfNull(tableName);
-
-        _storageUri = uri;
-        _storageResolver = resolver;
-        _tableName = tableName;
-        _writeStrategy = writeStrategy;
-        _parameterMapper = customMapper;
-        _configuration = configuration ?? new SqlServerConfiguration();
-        _configuration.Validate();
-        _schema = schema ?? _configuration.Schema;
-        _connectionName = null;
-
-        if (_configuration.ValidateIdentifiers)
-        {
-            DatabaseIdentifierValidator.ValidateIdentifier(_tableName, nameof(_tableName));
-            DatabaseIdentifierValidator.ValidateIdentifier(_schema, nameof(_schema));
-        }
-    }
-
-    /// <summary>
-    ///     Initializes a new instance of <see cref="SqlServerSinkNode{T}" /> class using a specific storage provider.
-    /// </summary>
-    /// <param name="provider">The storage provider.</param>
-    /// <param name="uri">The storage URI containing SQL Server connection information.</param>
-    /// <param name="tableName">The table name.</param>
-    /// <param name="writeStrategy">The write strategy.</param>
-    /// <param name="customMapper">Optional custom parameter mapper function.</param>
-    /// <param name="configuration">Optional configuration.</param>
-    /// <param name="schema">Optional schema name (default: dbo).</param>
-    /// <exception cref="ArgumentNullException">Thrown if <paramref name="provider" /> or <paramref name="uri" /> is <c>null</c>.</exception>
-    public SqlServerSinkNode(
-        IStorageProvider provider,
-        StorageUri uri,
-        string tableName,
-        SqlServerWriteStrategy writeStrategy = SqlServerWriteStrategy.Batch,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper = null,
-        SqlServerConfiguration? configuration = null,
-        string? schema = null)
-    {
-        ArgumentNullException.ThrowIfNull(provider);
-        ArgumentNullException.ThrowIfNull(uri);
-        ArgumentNullException.ThrowIfNull(tableName);
-
-        _storageProvider = provider;
-        _storageUri = uri;
-        _tableName = tableName;
-        _writeStrategy = writeStrategy;
-        _parameterMapper = customMapper;
-        _configuration = configuration ?? new SqlServerConfiguration();
-        _configuration.Validate();
-        _schema = schema ?? _configuration.Schema;
-        _connectionName = null;
-
-        if (_configuration.ValidateIdentifiers)
-        {
-            DatabaseIdentifierValidator.ValidateIdentifier(_tableName, nameof(_tableName));
-            DatabaseIdentifierValidator.ValidateIdentifier(_schema, nameof(_schema));
-        }
-    }
-
-    /// <summary>
-    ///     Gets whether to use transactions.
-    /// </summary>
-    protected override bool UseTransaction => _configuration.UseTransaction;
-
-    /// <summary>
-    ///     Gets batch size for batch writes.
-    /// </summary>
-    protected override int BatchSize => _configuration.BatchSize;
-
-    /// <summary>
-    ///     Gets delivery semantic.
-    /// </summary>
-    protected override DeliverySemantic DeliverySemantic => _configuration.DeliverySemantic;
-
-    /// <summary>
-    ///     Gets checkpoint strategy.
-    /// </summary>
-    protected override CheckpointStrategy CheckpointStrategy => _configuration.CheckpointStrategy;
-
-    /// <summary>
-    ///     Gets whether to continue on error.
-    /// </summary>
-    protected override bool ContinueOnError => _configuration.ContinueOnError;
-
-    /// <summary>
-    ///     Disposes the connection pool, but only when this node created it: an injected pool belongs to its caller.
-    /// </summary>
-    public async ValueTask DisposeAsync()
-    {
-        GC.SuppressFinalize(this);
-
-        if (_ownsConnectionPool && _connectionPool is not null)
-            await _connectionPool.DisposeAsync().ConfigureAwait(false);
-    }
-
-    /// <summary>
-    ///     Gets a database connection asynchronously.
-    /// </summary>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>A task representing the asynchronous operation.</returns>
-    protected override async Task<IDatabaseConnection> GetConnectionAsync(CancellationToken cancellationToken)
-    {
-        // If using StorageUri-based construction, get connection from database storage provider
-        if (_storageUri != null)
-        {
-            var provider = _storageProvider ?? StorageProviderFactory.GetProviderOrThrow(
-                _storageResolver ?? DefaultResolver.Value,
-                _storageUri);
-
-            if (provider is IDatabaseStorageProvider databaseProvider)
-                return await databaseProvider.GetConnectionAsync(_storageUri, cancellationToken).ConfigureAwait(false);
-
-            throw new InvalidOperationException($"Storage provider must implement {nameof(IDatabaseStorageProvider)} to use StorageUri.");
-        }
-
-        // Original connection pool logic
-        var connection = _connectionName is { Length: > 0 }
-            ? await _connectionPool!.GetConnectionAsync(_connectionName, cancellationToken).ConfigureAwait(false)
-            : await _connectionPool!.GetConnectionAsync(cancellationToken).ConfigureAwait(false);
-
-        return new SqlServerDatabaseConnection(connection);
-    }
-
-    /// <summary>
-    ///     Creates a database writer for the connection based on the configured write strategy.
-    /// </summary>
-    /// <param name="connection">The database connection.</param>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>A task representing the asynchronous operation.</returns>
-    protected override Task<IDatabaseWriter<T>> CreateWriterAsync(IDatabaseConnection connection, CancellationToken cancellationToken)
-    {
-        var writer = _writeStrategy switch
-        {
-            SqlServerWriteStrategy.PerRow => Task.FromResult<IDatabaseWriter<T>>(new SqlServerPerRowWriter<T>(connection, _schema, _tableName, _parameterMapper,
-                _configuration)),
-            SqlServerWriteStrategy.Batch => Task.FromResult<IDatabaseWriter<T>>(new SqlServerBatchWriter<T>(connection, _schema, _tableName, _parameterMapper,
-                _configuration)),
-            SqlServerWriteStrategy.BulkCopy => Task.FromResult<IDatabaseWriter<T>>(new SqlServerBulkCopyWriter<T>(connection, _schema, _tableName,
-                _parameterMapper,
-                _configuration)),
-            _ => throw new NotSupportedException($"Write strategy '{_writeStrategy}' is not supported"),
-        };
-
-        return writer;
+            await write(ct).ConfigureAwait(false);
+            return true;
+        }, cancellationToken).ConfigureAwait(false);
     }
 }

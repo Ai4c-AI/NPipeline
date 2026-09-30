@@ -1,143 +1,33 @@
 using NPipeline.Connectors.SqlServer.Configuration;
 using NPipeline.Connectors.SqlServer.Connection;
 using NPipeline.Connectors.SqlServer.Nodes;
-using NPipeline.StorageProviders.Models;
 
 namespace NPipeline.Connectors.SqlServer.DependencyInjection;
 
-/// <summary>
-///     Factory interface for creating SQL Server sink nodes with dependency injection support.
-/// </summary>
+/// <summary>Creates SQL Server sinks on the registered connection pool.</summary>
 public interface ISqlServerSinkNodeFactory
 {
-    /// <summary>
-    ///     Creates a SQL Server sink node using the default connection.
-    /// </summary>
-    /// <typeparam name="T">The type of objects to write.</typeparam>
-    /// <param name="tableName">The name of the target table.</param>
-    /// <param name="configuration">Optional configuration. If null, defaults are used.</param>
-    /// <returns>A configured SQL Server sink node.</returns>
-    SqlServerSinkNode<T> CreateSinkNode<T>(
-        string tableName,
-        SqlServerConfiguration? configuration = null)
-        where T : class;
-
-    /// <summary>
-    ///     Creates a SQL Server sink node with a custom mapper using the default connection.
-    /// </summary>
-    /// <typeparam name="T">The type of objects to write.</typeparam>
-    /// <param name="tableName">The name of the target table.</param>
-    /// <param name="customMapper">Optional custom parameter mapper function.</param>
-    /// <param name="configuration">Optional configuration. If null, defaults are used.</param>
-    /// <returns>A configured SQL Server sink node.</returns>
-    SqlServerSinkNode<T> CreateSinkNode<T>(
-        string tableName,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper,
-        SqlServerConfiguration? configuration = null)
-        where T : class;
-
-    /// <summary>
-    ///     Creates a SQL Server sink node using a named connection.
-    /// </summary>
-    /// <typeparam name="T">The type of objects to write.</typeparam>
-    /// <param name="tableName">The name of the target table.</param>
-    /// <param name="connectionName">The name of the connection to use.</param>
-    /// <param name="configuration">Optional configuration. If null, defaults are used.</param>
-    /// <returns>A configured SQL Server sink node.</returns>
-    SqlServerSinkNode<T> CreateSinkNode<T>(
-        string tableName,
-        string? connectionName,
-        SqlServerConfiguration? configuration = null)
-        where T : class;
-
-    /// <summary>
-    ///     Creates a SQL Server sink node using a named connection with a custom mapper.
-    /// </summary>
-    /// <typeparam name="T">The type of objects to write.</typeparam>
-    /// <param name="tableName">The name of the target table.</param>
-    /// <param name="connectionName">The name of the connection to use.</param>
-    /// <param name="customMapper">Optional custom parameter mapper function.</param>
-    /// <param name="configuration">Optional configuration. If null, defaults are used.</param>
-    /// <returns>A configured SQL Server sink node.</returns>
-    SqlServerSinkNode<T> CreateSinkNode<T>(
-        string tableName,
-        string? connectionName,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper,
-        SqlServerConfiguration? configuration = null)
-        where T : class;
+    /// <summary>A sink that writes <typeparamref name="T" />'s readable members to <paramref name="table" />.</summary>
+    /// <param name="table">The table.</param>
+    /// <param name="configure">Adjusts the default options; set <see cref="SqlServerWriteOptions.ConnectionName" /> for a named connection.</param>
+    SqlServerSinkNode<T> CreateSinkNode<T>(string table, Func<SqlServerWriteOptions, SqlServerWriteOptions>? configure = null);
 }
 
-/// <summary>
-///     Factory for creating SQL Server sink nodes with dependency injection support.
-/// </summary>
-public class SqlServerSinkNodeFactory : ISqlServerSinkNodeFactory
+/// <summary>Creates SQL Server sinks on the registered connection pool.</summary>
+/// <param name="connectionPool">The pool.</param>
+public class SqlServerSinkNodeFactory(ISqlServerConnectionPool connectionPool) : ISqlServerSinkNodeFactory
 {
-    private readonly ISqlServerConnectionPool _connectionPool;
-
-    /// <summary>
-    ///     Initializes a new instance of the <see cref="SqlServerSinkNodeFactory" /> class.
-    /// </summary>
-    /// <param name="connectionPool">The connection pool.</param>
-    public SqlServerSinkNodeFactory(ISqlServerConnectionPool connectionPool)
-    {
-        _connectionPool = connectionPool ?? throw new ArgumentNullException(nameof(connectionPool));
-    }
+    private readonly ISqlServerConnectionPool _connectionPool = connectionPool ?? throw new ArgumentNullException(nameof(connectionPool));
 
     /// <inheritdoc />
-    public SqlServerSinkNode<T> CreateSinkNode<T>(
-        string tableName,
-        SqlServerConfiguration? configuration = null)
-        where T : class
+    public SqlServerSinkNode<T> CreateSinkNode<T>(string table, Func<SqlServerWriteOptions, SqlServerWriteOptions>? configure = null)
     {
-        ArgumentNullException.ThrowIfNull(tableName);
+        var options = new SqlServerWriteOptions { ConnectionPool = _connectionPool, Table = table };
+        options = configure is null ? options : configure(options);
 
-        var config = configuration ?? new SqlServerConfiguration();
-        return new SqlServerSinkNode<T>(_connectionPool, tableName, config);
-    }
+        if (options.ConnectionName is { Length: > 0 } name && _connectionPool is SqlServerConnectionPool pool && !pool.HasNamedConnection(name))
+            throw new InvalidOperationException($"Named connection '{name}' not found.");
 
-    /// <inheritdoc />
-    public SqlServerSinkNode<T> CreateSinkNode<T>(
-        string tableName,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper,
-        SqlServerConfiguration? configuration = null)
-        where T : class
-    {
-        ArgumentNullException.ThrowIfNull(tableName);
-
-        var config = configuration ?? new SqlServerConfiguration();
-        return new SqlServerSinkNode<T>(_connectionPool, tableName, config, customMapper);
-    }
-
-    /// <inheritdoc />
-    public SqlServerSinkNode<T> CreateSinkNode<T>(
-        string tableName,
-        string? connectionName,
-        SqlServerConfiguration? configuration = null)
-        where T : class
-    {
-        ArgumentNullException.ThrowIfNull(tableName);
-
-        if (!string.IsNullOrWhiteSpace(connectionName) && !_connectionPool.HasNamedConnection(connectionName))
-            throw new InvalidOperationException($"Named connection '{connectionName}' not found.");
-
-        var config = configuration ?? new SqlServerConfiguration();
-        return new SqlServerSinkNode<T>(_connectionPool, tableName, config, null, connectionName);
-    }
-
-    /// <inheritdoc />
-    public SqlServerSinkNode<T> CreateSinkNode<T>(
-        string tableName,
-        string? connectionName,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper,
-        SqlServerConfiguration? configuration = null)
-        where T : class
-    {
-        ArgumentNullException.ThrowIfNull(tableName);
-
-        if (!string.IsNullOrWhiteSpace(connectionName) && !_connectionPool.HasNamedConnection(connectionName))
-            throw new InvalidOperationException($"Named connection '{connectionName}' not found.");
-
-        var config = configuration ?? new SqlServerConfiguration();
-        return new SqlServerSinkNode<T>(_connectionPool, tableName, config, customMapper, connectionName);
+        return new SqlServerSinkNode<T>(options);
     }
 }

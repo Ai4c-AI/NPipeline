@@ -16,10 +16,6 @@ public class SnowflakeOptions
     /// </summary>
     public IDictionary<string, string> NamedConnections { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>
-    ///     Gets or sets the default configuration for Snowflake operations.
-    /// </summary>
-    public SnowflakeConfiguration DefaultConfiguration { get; set; } = new();
 
     /// <summary>
     ///     Gets a connection string by name.

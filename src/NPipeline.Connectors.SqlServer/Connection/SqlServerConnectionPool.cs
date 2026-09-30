@@ -10,7 +10,6 @@ namespace NPipeline.Connectors.SqlServer.Connection;
 /// </summary>
 public class SqlServerConnectionPool : ISqlServerConnectionPool
 {
-    private readonly SqlServerConfiguration _configuration;
     private readonly string? _defaultConnectionString;
     private readonly ConcurrentDictionary<string, string> _namedConnectionStrings;
 
@@ -41,14 +40,12 @@ public class SqlServerConnectionPool : ISqlServerConnectionPool
         ArgumentNullException.ThrowIfNull(options);
 
         _namedConnectionStrings = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        _configuration = options.DefaultConfiguration ?? new SqlServerConfiguration();
-        _configuration.ValidateConnectionSettings();
 
         var hasDefault = !string.IsNullOrWhiteSpace(options.DefaultConnectionString);
 
         if (hasDefault)
         {
-            _defaultConnectionString = BuildConnectionString(options.DefaultConnectionString, _configuration);
+            _defaultConnectionString = options.DefaultConnectionString;
             ConnectionString = _defaultConnectionString;
         }
 
@@ -57,7 +54,7 @@ public class SqlServerConnectionPool : ISqlServerConnectionPool
             if (string.IsNullOrWhiteSpace(kvp.Value))
                 throw new ArgumentException($"Connection string for '{kvp.Key}' cannot be empty.", nameof(options));
 
-            var connectionString = BuildConnectionString(kvp.Value, _configuration);
+            var connectionString = kvp.Value;
             _ = _namedConnectionStrings.TryAdd(kvp.Key, connectionString);
             ConnectionString ??= connectionString;
             _defaultConnectionString ??= connectionString;
@@ -127,24 +124,5 @@ public class SqlServerConnectionPool : ISqlServerConnectionPool
         // This pool only manages connection string configuration.
         await Task.CompletedTask.ConfigureAwait(false);
         GC.SuppressFinalize(this);
-    }
-
-    private static string BuildConnectionString(string connectionString, SqlServerConfiguration configuration)
-    {
-        var builder = new SqlConnectionStringBuilder(connectionString)
-        {
-            ConnectTimeout = configuration.ConnectTimeout,
-            CommandTimeout = configuration.CommandTimeout,
-            MinPoolSize = configuration.MinPoolSize,
-            MaxPoolSize = configuration.MaxPoolSize,
-        };
-
-        if (configuration.EnableMARS)
-            builder.MultipleActiveResultSets = true;
-
-        if (!string.IsNullOrWhiteSpace(configuration.ApplicationName))
-            builder.ApplicationName = configuration.ApplicationName;
-
-        return builder.ConnectionString;
     }
 }

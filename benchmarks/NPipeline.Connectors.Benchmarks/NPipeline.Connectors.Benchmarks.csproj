@@ -15,6 +15,9 @@
 
     <ItemGroup>
         <PackageReference Include="BenchmarkDotNet"/>
+        <PackageReference Include="Testcontainers.MsSql"/>
+        <PackageReference Include="Testcontainers.MySql"/>
+        <PackageReference Include="Testcontainers.PostgreSql"/>
     </ItemGroup>
 
     <ItemGroup>
@@ -24,6 +27,10 @@
         <ProjectReference Include="..\..\src\NPipeline.Connectors.Excel\NPipeline.Connectors.Excel.csproj"/>
         <ProjectReference Include="..\..\src\NPipeline.Connectors.Parquet\NPipeline.Connectors.Parquet.csproj"/>
         <ProjectReference Include="..\..\src\NPipeline.Connectors.Http\NPipeline.Connectors.Http.csproj"/>
+        <ProjectReference Include="..\..\src\NPipeline.Connectors.SqlServer\NPipeline.Connectors.SqlServer.csproj"/>
+        <ProjectReference Include="..\..\src\NPipeline.Connectors.Postgres\NPipeline.Connectors.Postgres.csproj"/>
+        <ProjectReference Include="..\..\src\NPipeline.Connectors.MySQL\NPipeline.Connectors.MySQL.csproj"/>
+        <ProjectReference Include="..\..\src\NPipeline.Connectors.DuckDB\NPipeline.Connectors.DuckDB.csproj"/>
     </ItemGroup>
 
 </Project>

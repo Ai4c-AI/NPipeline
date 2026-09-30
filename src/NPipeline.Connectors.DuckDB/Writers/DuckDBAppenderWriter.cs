@@ -1,138 +1,65 @@
+using System.Data.Common;
 using DuckDB.NET.Data;
-using NPipeline.Connectors.DuckDB.Mapping;
+using NPipeline.Connectors.Sql;
 
 namespace NPipeline.Connectors.DuckDB.Writers;
 
-/// <summary>
-///     High-performance writer using DuckDB's native Appender API.
-///     Appends rows directly to a table with minimal overhead.
-/// </summary>
-internal sealed class DuckDBAppenderWriter<T> : IDuckDBWriter<T>
+/// <summary>Writes each batch with DuckDB's appender, appending each value with its own type.</summary>
+internal sealed class DuckDBAppenderWriter<T>(SqlWriteTarget<T> target, string? schema, string table) : SqlWriter<T>(target)
 {
-    private readonly DuckDBConnection _connection;
-    private readonly string _tableName;
-    private readonly Func<object, object?>[] _valueGetters;
-    private DuckDBAppender? _appender;
-    private bool _disposed;
-
-    public DuckDBAppenderWriter(DuckDBConnection connection, string tableName)
+    public override Task WriteAsync(DbConnection connection, DbTransaction? transaction, IReadOnlyList<T> batch, CancellationToken cancellationToken)
     {
-        _connection = connection ?? throw new ArgumentNullException(nameof(connection));
-        _tableName = tableName ?? throw new ArgumentNullException(nameof(tableName));
-        _valueGetters = DuckDBWriterMapperBuilder.GetValueGetters<T>();
-    }
+        var values = new object?[Target.QuotedColumns.Count];
 
-    public Task WriteAsync(T item, CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-
-        _appender ??= _connection.CreateAppender(_tableName);
-
-        var row = _appender.CreateRow();
-
-        for (var i = 0; i < _valueGetters.Length; i++)
+        // The appender flushes when it is disposed; it joins the connection's transaction if one is open.
+        using (var appender = string.IsNullOrEmpty(schema)
+                   ? ((DuckDBConnection)connection).CreateAppender(table)
+                   : ((DuckDBConnection)connection).CreateAppender(schema, table))
         {
-            var value = _valueGetters[i](item!);
-            AppendTypedValue(row, value);
-        }
+            foreach (var item in batch)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                Target.Plan.Extract(item, values);
+                var row = appender.CreateRow();
 
-        row.EndRow();
+                foreach (var value in values)
+                {
+                    Append(row, value);
+                }
+
+                row.EndRow();
+            }
+        }
 
         return Task.CompletedTask;
     }
 
-    public Task FlushAsync(CancellationToken cancellationToken)
+    private static void Append(IDuckDBAppenderRow row, object? value)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-
-        // DuckDB Appender has no Flush; data is flushed on Close/Dispose
-        _appender?.Close();
-        _appender?.Dispose();
-        _appender = null;
-        return Task.CompletedTask;
-    }
-
-    public ValueTask DisposeAsync()
-    {
-        if (_disposed)
-            return ValueTask.CompletedTask;
-
-        _disposed = true;
-
-        _appender?.Close();
-        _appender?.Dispose();
-
-        return ValueTask.CompletedTask;
-    }
-
-    private static void AppendTypedValue(IDuckDBAppenderRow row, object? value)
-    {
-        if (value is null)
+        _ = value switch
         {
-            row.AppendNullValue();
-            return;
-        }
-
-        switch (value)
-        {
-            case bool b:
-                row.AppendValue(b);
-                break;
-            case byte b:
-                row.AppendValue(b);
-                break;
-            case sbyte b:
-                row.AppendValue(b);
-                break;
-            case short s:
-                row.AppendValue(s);
-                break;
-            case int i:
-                row.AppendValue(i);
-                break;
-            case long l:
-                row.AppendValue(l);
-                break;
-            case ushort u:
-                row.AppendValue(u);
-                break;
-            case uint u:
-                row.AppendValue(u);
-                break;
-            case ulong u:
-                row.AppendValue(u);
-                break;
-            case float f:
-                row.AppendValue(f);
-                break;
-            case double d:
-                row.AppendValue(d);
-                break;
-            case decimal m:
-                row.AppendValue(m);
-                break;
-            case string s:
-                row.AppendValue(s);
-                break;
-            case DateTime dt:
-                row.AppendValue(dt);
-                break;
-            case DateTimeOffset dto:
-                row.AppendValue(dto);
-                break;
-            case TimeSpan ts:
-                row.AppendValue(ts);
-                break;
-            case Guid g:
-                row.AppendValue(g);
-                break;
-            case byte[] bytes:
-                row.AppendValue(bytes);
-                break;
-            default:
-                // Fallback: convert to string (covers enums stored as string by WriterMapperBuilder)
-                row.AppendValue(value.ToString());
-                break;
-        }
+            null => row.AppendNullValue(),
+            bool v => row.AppendValue(v),
+            sbyte v => row.AppendValue(v),
+            byte v => row.AppendValue(v),
+            short v => row.AppendValue(v),
+            ushort v => row.AppendValue(v),
+            int v => row.AppendValue(v),
+            uint v => row.AppendValue(v),
+            long v => row.AppendValue(v),
+            ulong v => row.AppendValue(v),
+            float v => row.AppendValue(v),
+            double v => row.AppendValue(v),
+            decimal v => row.AppendValue(v),
+            string v => row.AppendValue(v),
+            DateTime v => row.AppendValue(v),
+            DateTimeOffset v => row.AppendValue(v),
+            DateOnly v => row.AppendValue(v),
+            TimeOnly v => row.AppendValue(v),
+            TimeSpan v => row.AppendValue(v),
+            Guid v => row.AppendValue(v),
+            byte[] v => row.AppendValue(v),
+            _ => throw new NotSupportedException($"The DuckDB appender cannot write a {value.GetType().Name}."),
+        };
     }
 }

@@ -6,7 +6,8 @@ using NPipeline.Connectors.SqlServer.Connection;
 namespace NPipeline.Connectors.SqlServer.DependencyInjection;
 
 /// <summary>
-///     Extension methods for configuring SQL Server connector in dependency injection.
+///     Extension methods for configuring the SQL Server connector in dependency injection. The methods share one
+///     <see cref="SqlServerOptions" /> instance, so they can be called in any order.
 /// </summary>
 public static class SqlServerServiceCollectionExtensions
 {
@@ -14,31 +15,16 @@ public static class SqlServerServiceCollectionExtensions
     ///     Adds the SQL Server connector to the service collection.
     /// </summary>
     /// <param name="services">The service collection.</param>
-    /// <param name="configure">Optional configuration action.</param>
+    /// <param name="configure">Optional configuration action, applied to the options connections were already added to.</param>
     /// <returns>The service collection for chaining.</returns>
     public static IServiceCollection AddSqlServerConnector(
         this IServiceCollection services,
-        Action<SqlServerOptions>? configure = null)
-    {
-        var options = new SqlServerOptions();
-        configure?.Invoke(options);
-
-        services.TryAddSingleton(options);
-
-        services.TryAddSingleton<ISqlServerConnectionPool>(sp =>
-        {
-            var opts = sp.GetRequiredService<SqlServerOptions>();
-            return new SqlServerConnectionPool(opts);
-        });
-
-        services.TryAddSingleton<ISqlServerSourceNodeFactory, SqlServerSourceNodeFactory>();
-        services.TryAddSingleton<ISqlServerSinkNodeFactory, SqlServerSinkNodeFactory>();
-
-        return services;
-    }
+        Action<SqlServerOptions>? configure = null) =>
+        services.AddSqlServerConnector<SqlServerOptions>(configure);
 
     /// <summary>
-    ///     Adds the SQL Server connector to the service collection with custom options.
+    ///     Adds the SQL Server connector to the service collection with custom options. Connections added before this call
+    ///     are carried over to the <typeparamref name="TOptions" /> instance.
     /// </summary>
     /// <typeparam name="TOptions">The options type.</typeparam>
     /// <param name="services">The service collection.</param>
@@ -49,17 +35,9 @@ public static class SqlServerServiceCollectionExtensions
         Action<TOptions>? configure = null)
         where TOptions : SqlServerOptions, new()
     {
-        var options = new TOptions();
-        configure?.Invoke(options);
+        configure?.Invoke(Options<TOptions>(services));
 
-        services.TryAddSingleton<SqlServerOptions>(options);
-
-        services.TryAddSingleton<ISqlServerConnectionPool>(sp =>
-        {
-            var opts = sp.GetRequiredService<SqlServerOptions>();
-            return new SqlServerConnectionPool(opts);
-        });
-
+        services.TryAddSingleton<ISqlServerConnectionPool>(sp => new SqlServerConnectionPool(sp.GetRequiredService<SqlServerOptions>()));
         services.TryAddSingleton<ISqlServerSourceNodeFactory, SqlServerSourceNodeFactory>();
         services.TryAddSingleton<ISqlServerSinkNodeFactory, SqlServerSinkNodeFactory>();
 
@@ -78,12 +56,7 @@ public static class SqlServerServiceCollectionExtensions
         string name,
         string connectionString)
     {
-        var options = services.FirstOrDefault(sd => sd.ServiceType == typeof(SqlServerOptions))?.ImplementationInstance as SqlServerOptions
-                      ?? new SqlServerOptions();
-
-        options.AddOrUpdateConnection(name, connectionString);
-        services.TryAddSingleton(options);
-
+        Options<SqlServerOptions>(services).AddOrUpdateConnection(name, connectionString);
         return services;
     }
 
@@ -97,12 +70,8 @@ public static class SqlServerServiceCollectionExtensions
         this IServiceCollection services,
         string connectionString)
     {
-        var options = services.FirstOrDefault(sd => sd.ServiceType == typeof(SqlServerOptions))?.ImplementationInstance as SqlServerOptions
-                      ?? new SqlServerOptions();
-
-        options.DefaultConnectionString = connectionString;
-        services.TryAddSingleton(options);
-
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+        Options<SqlServerOptions>(services).DefaultConnectionString = connectionString;
         return services;
     }
 
@@ -118,8 +87,41 @@ public static class SqlServerServiceCollectionExtensions
         string name,
         string connectionString)
     {
-        _ = services.AddKeyedSingleton<ISqlServerConnectionPool>(name, (sp, key) => { return new SqlServerConnectionPool(connectionString); });
+        _ = services.AddKeyedSingleton<ISqlServerConnectionPool>(name, (_, _) => new SqlServerConnectionPool(connectionString));
 
         return services;
+    }
+
+    /// <summary>
+    ///     The registered options, registering them first if needed. Options of a base type registered by an earlier call
+    ///     are replaced by <typeparamref name="TOptions" /> with their connections copied, so nothing an earlier call set is lost.
+    /// </summary>
+    private static TOptions Options<TOptions>(IServiceCollection services)
+        where TOptions : SqlServerOptions, new()
+    {
+        var descriptor = services.FirstOrDefault(sd => sd.ServiceType == typeof(SqlServerOptions));
+
+        if (descriptor?.ImplementationInstance is TOptions existing)
+            return existing;
+
+        if (descriptor is not null && descriptor.ImplementationInstance is not SqlServerOptions)
+            throw new InvalidOperationException($"{nameof(SqlServerOptions)} is registered with a factory or type; configure connections there instead.");
+
+        var options = new TOptions();
+
+        if (descriptor?.ImplementationInstance is SqlServerOptions registered)
+        {
+            options.DefaultConnectionString = registered.DefaultConnectionString;
+
+            foreach (var (name, connectionString) in registered.NamedConnections)
+            {
+                options.AddOrUpdateConnection(name, connectionString);
+            }
+
+            _ = services.Remove(descriptor);
+        }
+
+        _ = services.AddSingleton<SqlServerOptions>(options);
+        return options;
     }
 }

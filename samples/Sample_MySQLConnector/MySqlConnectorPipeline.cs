@@ -1,7 +1,7 @@
 using MySqlConnector;
 using NPipeline.Connectors.MySql;
 using NPipeline.Connectors.MySql.Configuration;
-using NPipeline.Connectors.MySql.Nodes;
+using NPipeline.Connectors.Sql;
 using NPipeline.Pipeline;
 using NPipeline.StorageProviders.Models;
 
@@ -168,14 +168,8 @@ public sealed class MySqlConnectorPipeline
     {
         Console.WriteLine("2. Demonstrating PerRow write strategy...");
 
-        var config = new MySqlConfiguration
-        {
-            WriteStrategy = MySqlWriteStrategy.PerRow,
-        };
-
-        // MySqlSinkNode is created here; in a real pipeline it would be wired
-        // up with a source node via the pipeline builder.
-        var sink = new MySqlSinkNode<Product>(_connectionString, "products", config);
+        // The sink is created here; in a real pipeline it would be wired up with a source node via the pipeline builder.
+        var sink = MySqlNodes.Sink<Product>(_connectionString, "products", o => o with { WriteStrategy = MySqlWriteStrategy.PerRow });
         Console.WriteLine("   MySqlSinkNode<Product> created with PerRow strategy.");
         _ = sink; // Used within the pipeline execution
     }
@@ -188,20 +182,13 @@ public sealed class MySqlConnectorPipeline
     {
         Console.WriteLine("3. Demonstrating Batch write strategy...");
 
-        var config = new MySqlConfiguration
-        {
-            WriteStrategy = MySqlWriteStrategy.Batch,
-            BatchSize = 100,
-            MaxBatchSize = 5000,
-            UseTransaction = true,
-        };
-
-        var sink = new MySqlSinkNode<Product>(_connectionString, "products", config);
+        // Multi-row INSERTs of 100 rows, each batch in its own transaction.
+        var sink = MySqlNodes.Sink<Product>(_connectionString, "products", o => o with { BatchSize = 100 });
         Console.WriteLine("   MySqlSinkNode<Product> created with Batch strategy (batch size: 100).");
 
         // Show source node with parameterized query
         var query = "SELECT product_id, product_name, category, unit_price, stock_quantity, is_active, created_at FROM `products` WHERE is_active = 1";
-        var source = new MySqlSourceNode<Product>(_connectionString, query, config);
+        var source = MySqlNodes.Source<Product>(_connectionString, query);
         Console.WriteLine("   MySqlSourceNode<Product> created for active products.");
 
         await Task.CompletedTask;
@@ -216,27 +203,13 @@ public sealed class MySqlConnectorPipeline
     {
         Console.WriteLine("4. Demonstrating upsert (ON DUPLICATE KEY UPDATE)...");
 
-        var upsertConfig = new MySqlConfiguration
-        {
-            WriteStrategy = MySqlWriteStrategy.Batch,
-            UseUpsert = true,
-            OnDuplicateKeyAction = OnDuplicateKeyAction.Update,
-            UpsertKeyColumns = ["event_id"],
-        };
-
-        var upsertSink = new MySqlSinkNode<OrderEvent>(_connectionString, "order_events", upsertConfig);
+        var upsertSink = MySqlNodes.Sink<OrderEvent>(_connectionString, "order_events", o => o with { Upsert = SqlUpsert.On("event_id") });
         Console.WriteLine("   MySqlSinkNode<OrderEvent> created with upsert ON DUPLICATE KEY UPDATE.");
 
-        // INSERT IGNORE variant
-        var ignoreConfig = new MySqlConfiguration
-        {
-            WriteStrategy = MySqlWriteStrategy.Batch,
-            UseUpsert = true,
-            OnDuplicateKeyAction = OnDuplicateKeyAction.Ignore,
-        };
-
-        var ignoreSink = new MySqlSinkNode<OrderEvent>(_connectionString, "order_events", ignoreConfig);
-        Console.WriteLine("   MySqlSinkNode<OrderEvent> created with INSERT IGNORE.");
+        // Keep existing rows instead of updating them
+        var ignoreSink = MySqlNodes.Sink<OrderEvent>(_connectionString, "order_events",
+            o => o with { Upsert = new SqlUpsert(["event_id"], SqlUpsertAction.Ignore) });
+        Console.WriteLine("   MySqlSinkNode<OrderEvent> created that keeps rows whose key exists.");
 
         await Task.CompletedTask;
         _ = (upsertSink, ignoreSink);
@@ -250,14 +223,14 @@ public sealed class MySqlConnectorPipeline
     {
         Console.WriteLine("5. Demonstrating attribute-based mapping...");
 
-        // Product uses [MySqlTable("products")] + [MySqlColumn] / [Column] attributes
-        var sink = new MySqlSinkNode<Product>(_connectionString, "products");
-        Console.WriteLine("   MySqlSinkNode<Product> infers table from [MySqlTable] attribute.");
+        // Product uses [MySqlColumn] / [Column] attributes; the auto-increment id is not written.
+        var sink = MySqlNodes.Sink<Product>(_connectionString, "products");
+        Console.WriteLine("   MySqlSinkNode<Product> maps members with [MySqlColumn] and [Column].");
 
         // Custom MySqlRow mapper
         var query = "SELECT product_id, product_name, category, unit_price, stock_quantity, is_active, created_at FROM `products`";
 
-        var source = new MySqlSourceNode<Product>(_connectionString, query, row => new Product
+        var source = MySqlNodes.Source(_connectionString, query, row => new Product
         {
             ProductId = row.Get<int>("product_id"),
             ProductName = row.Get<string>("product_name"),
@@ -268,7 +241,7 @@ public sealed class MySqlConnectorPipeline
             CreatedAt = row.Get<DateTime>("created_at"),
         });
 
-        Console.WriteLine("   MySqlSourceNode<Product> with custom MySqlRow mapper created.");
+        Console.WriteLine("   MySqlSourceNode<Product> with a SqlRow mapper created.");
 
         await Task.CompletedTask;
         _ = (sink, source);
@@ -284,17 +257,8 @@ public sealed class MySqlConnectorPipeline
 
         // Build a dummy URI for demonstration (not connected)
         var uri = StorageUri.Parse("mysql://dbuser:secret@localhost:3306/myapp");
-        var resolver = MySqlStorageResolverFactory.CreateResolver();
-
-        var source = new MySqlSourceNode<Product>(
-            uri,
-            "SELECT * FROM `products`",
-            resolver);
-
-        var sink = new MySqlSinkNode<Product>(
-            uri,
-            "products",
-            resolver: resolver);
+        var source = MySqlNodes.Source<Product>(uri, "SELECT * FROM `products`");
+        var sink = MySqlNodes.Sink<Product>(uri, "products");
 
         Console.WriteLine($"   StorageUri: {uri}");
         Console.WriteLine("   MySqlSourceNode and MySqlSinkNode created from StorageUri.");

@@ -1,12 +1,15 @@
 ---
 title: "SQL Server Connector"
-description: "Read from and write to SQL Server databases with bulk copy, batch inserts, and MERGE upserts."
+description: "Read from and write to SQL Server with multi-row inserts, SqlBulkCopy and MERGE upserts."
 order: 9
 ---
 
 # SQL Server Connector
 
-The `NPipeline.Connectors.SqlServer` package provides source and sink nodes for SQL Server. Supports connection pooling, parameterized queries, batch inserts, high-performance `SqlBulkCopy`, and `MERGE` upserts.
+The `NPipeline.Connectors.SqlServer` package reads SQL Server queries into records and writes records to tables, with
+multi-row `INSERT` statements, one statement per row, or `SqlBulkCopy`, and upserts with `MERGE`. Mapping, row
+errors, transactions, failed batches and checkpoints work as in every SQL connector; see
+[SQL Connectors: Shared Behaviour](sql-connectors.md).
 
 ## Installation
 
@@ -14,392 +17,132 @@ The `NPipeline.Connectors.SqlServer` package provides source and sink nodes for 
 dotnet add package NPipeline.Connectors.SqlServer
 ```
 
-**Dependencies:** [Microsoft.Data.SqlClient](https://www.nuget.org/packages/Microsoft.Data.SqlClient) 7.x
+**Dependencies:** [Microsoft.Data.SqlClient](https://www.nuget.org/packages/Microsoft.Data.SqlClient), `NPipeline.Connectors`
 
-## Source Node - `SqlServerSourceNode<T>`
-
-### Constructors
+## Reading
 
 ```csharp
-// Connection string + query
-public SqlServerSourceNode(
-    string connectionString, string query,
-    SqlServerConfiguration? configuration = null)
+public sealed record Order(int Id, string Customer, decimal Total, DateTimeOffset PlacedAt);
 
-// With custom mapper
-public SqlServerSourceNode(
-    string connectionString, string query,
-    Func<SqlServerRow, T>? customMapper = null,
-    SqlServerConfiguration? configuration = null)
-
-// Connection pool (recommended for DI)
-public SqlServerSourceNode(
-    ISqlServerConnectionPool connectionPool, string query,
-    SqlServerConfiguration? configuration = null,
-    DatabaseParameter[]? parameters = null,
-    bool continueOnError = false,
-    string? connectionName = null)
+var source = SqlServerConnector.Source<Order>(connectionString, "SELECT Id, Customer, Total, PlacedAt FROM dbo.Orders ORDER BY Id");
+builder.AddSource(source, "orders");
 ```
 
-### Example
+Columns bind to members by name, case-insensitively, and members map to columns of the same name. Parameters are bound
+by name:
 
 ```csharp
-var source = new SqlServerSourceNode<Order>(
-    "Server=localhost;Database=Sales;Trusted_Connection=true;",
-    "SELECT Id, Customer, Amount FROM dbo.Orders WHERE Status = @status",
-    configuration: new SqlServerConfiguration
-    {
-        StreamResults = true,
-        FetchSize = 5000
-    });
+var recent = SqlServerConnector.Source<Order>(connectionString, "SELECT * FROM dbo.Orders WHERE PlacedAt >= @since ORDER BY Id",
+    o => o with { Parameters = [new DatabaseParameter("@since", DateTimeOffset.UtcNow.AddDays(-1))] });
 ```
 
-## Sink Node - `SqlServerSinkNode<T>`
-
-| Strategy | Description | Best For |
-|----------|-------------|----------|
-| `PerRow` | Individual `INSERT` per item | Small volumes |
-| `Batch` (default) | Batched `INSERT` statements | Most workloads |
-| `BulkCopy` | `SqlBulkCopy` | Maximum throughput |
-
-### Constructors
+## Writing
 
 ```csharp
-// Connection string
-public SqlServerSinkNode(
-    string connectionString, string tableName,
-    SqlServerConfiguration? configuration = null,
-    Func<T, IEnumerable<DatabaseParameter>>? customMapper = null)
-
-// Connection pool (recommended for DI)
-public SqlServerSinkNode(
-    ISqlServerConnectionPool connectionPool, string tableName,
-    SqlServerConfiguration? configuration = null,
-    Func<T, IEnumerable<DatabaseParameter>>? customMapper = null,
-    string? connectionName = null)
+var sink = SqlServerConnector.Sink<Order>(connectionString, "Orders", o => o with { Schema = "sales" });
+builder.AddSink(sink, "orders-out");
 ```
 
-### Example: Bulk Copy
+| `WriteStrategy` | Writes | Notes |
+| --- | --- | --- |
+| `Batch` (default) | Multi-row `INSERT` or `MERGE` statements | Split to stay under SQL Server's 2,100-parameter limit |
+| `PerRow` | One statement per row | Slowest; one command, reused |
+| `BulkCopy` | `SqlBulkCopy`, streaming the batch through a data reader | Fastest for large loads; inserts only |
+
+Parameters are typed so every statement reuses one query plan: strings as `nvarchar(4000)` (or `nvarchar(max)` when
+longer), binary as `varbinary(8000)`, decimals as `decimal(38, 18)` (a value that does not fit is typed by itself), and
+dates as `datetime2`, `datetimeoffset`, `date` and `time`. Batch statements carry at most ten rows, which SQL Server
+compiles fastest.
+
+### Upserts
+
+`Upsert = SqlUpsert.On("Id")` writes `MERGE … WITH (HOLDLOCK)`, which makes the match and the insert one atomic step, so
+concurrent upserts of a key cannot both insert it. `SqlUpsertAction.Ignore` inserts only rows whose key is new.
+
+### Write options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `WriteStrategy` | `Batch` | See above |
+| `BulkCopyTimeout` | 30 s | The `SqlBulkCopy` timeout |
+| `Resilience` | `SqlServerConnectorResilience.Default` | Retries a batch after a transient failure; see [Resilience](#resilience) |
+
+Plus the [options every SQL sink has](sql-connectors.md#options-every-sink-has).
+
+## Attributes
+
+`[Column]` and `[IgnoreColumn]` from `NPipeline.Connectors.Attributes` work as in every connector. `[SqlServerColumn]`
+adds:
 
 ```csharp
-var config = new SqlServerConfiguration
+public sealed class Customer
 {
-    ConnectionString = "Server=localhost;Database=Sales;...",
-    WriteStrategy = SqlServerWriteStrategy.BulkCopy,
-    BulkCopyBatchSize = 5000,
-    EnableStreaming = true
-};
+    [SqlServerColumn("CustomerID", Identity = true)]
+    public int CustomerId { get; set; }
 
-var sink = new SqlServerSinkNode<Order>("connection-string", "dbo.Orders", configuration: config);
+    [SqlServerColumn("Code", DbType = SqlDbType.VarChar, Size = 10)]
+    public string Code { get; set; } = "";
+}
 ```
 
-## Configuration
+| Property | Description |
+| --- | --- |
+| `Name`, `Ignore` | As `[Column]` |
+| `Identity` | The column is generated by the database: read, but never written |
+| `DbType`, `Size` | The parameter's `SqlDbType` and size, instead of the connector's choice |
 
-### Connection
+## Connections
 
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `ConnectionString` | `string` | `""` | SQL Server connection string |
-| `Schema` | `string` | `"dbo"` | Default schema |
-| `CommandTimeout` | `int` | `30` | Command timeout (seconds) |
-| `ConnectionTimeout` | `int` | `15` | Connection timeout (seconds) |
-| `MinPoolSize` | `int` | `1` | Minimum connection pool size |
-| `MaxPoolSize` | `int` | `100` | Maximum connection pool size |
+A source or sink takes a connection string, an `mssql://` storage URI, or an `ISqlServerConnectionPool` of named
+connection strings (set `ConnectionName` to pick one). Connection strings are used as they are, so pool sizes,
+timeouts and encryption belong in them:
 
-### Write
+- `Encrypt` is `True`, `False`, `Strict` or `Optional`; keep `TrustServerCertificate=False` outside development.
+- `Application Name=orders-pipeline` identifies the pipeline's sessions in Activity Monitor, `sys.dm_exec_sessions` and
+  Extended Events.
 
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `WriteStrategy` | `SqlServerWriteStrategy` | `Batch` | `PerRow`, `Batch`, or `BulkCopy` |
-| `BatchSize` | `int` | `100` | Items per batch |
-| `MaxBatchSize` | `int` | `1000` | Maximum batch size |
-| `UseTransaction` | `bool` | `true` | Wrap writes in a transaction |
-| `UsePreparedStatements` | `bool` | `true` | Use prepared statements |
-
-### Bulk Copy
-
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `BulkCopyBatchSize` | `int` | `5000` | Rows per bulk copy batch |
-| `BulkCopyTimeout` | `int` | `300` | Bulk copy timeout (seconds) |
-| `BulkCopyNotifyAfter` | `int` | `1000` | Progress notification interval (rows) |
-| `EnableStreaming` | `bool` | `true` | Stream bulk copy data |
-
-### Upsert (MERGE)
-
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `UseUpsert` | `bool` | `false` | Enable `MERGE` upserts |
-| `UpsertKeyColumns` | `string[]?` | `null` | Key columns for MERGE matching |
-| `OnMergeAction` | `OnMergeAction` | `Update` | `Update`, `Ignore`, or `Delete` |
-
-### Error Handling
-
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `ContinueOnError` | `bool` | `false` | Continue on row-level errors |
-| `Resilience` | `Resilience` | `SqlServerConnectorResilience.Default` | How transient failures are retried; see [Resilience](#resilience) |
+`mssql://` URIs are described in [Connections](sql-connectors.md#connections).
 
 ## Resilience
 
-The sink retries transient failures with [NResilience](https://github.com/nresilience/NResilience). The `Resilience`
-property on `SqlServerConfiguration` configures it. The default, `SqlServerConnectorResilience.Default`, does the following:
+With `SqlTransactionMode.PerBatch` (the default), the sink retries a batch that failed transiently with
+[NResilience](https://github.com/nresilience/NResilience). The batch's transaction was rolled back, so a retry never
+writes a row twice. `SqlServerConnectorResilience.Default`:
 
 - Makes up to four attempts (three retries).
 - Retries timeouts (-2), network errors (53, 64, 121), deadlocks (1205), and Azure SQL unavailability (40613).
 - Treats Azure SQL throttling (40501, 10928, 10929, and 49918-49920) as throttling, which waits longer: backoff starts at 10 seconds.
 - Doesn't retry other errors, such as a constraint violation or a missing table.
 - Waits with exponential backoff and full jitter, from 1 second up to 30 seconds.
-- Has no attempt timeout and no deadline. The driver's own timeout bounds each attempt: `CommandTimeout` for rows and batches, and `BulkCopyTimeout` for bulk copy.
-  A long bulk write isn't cut off by a retry policy's timeout.
+- Has no attempt timeout and no deadline. The driver's timeout bounds each attempt: `CommandTimeout`, or
+  `BulkCopyTimeout` for bulk copy, so a long bulk load isn't cut off by a retry policy.
 
-Each write strategy retries one unit of work that commits all or nothing, so a retry never inserts rows that an
-earlier attempt committed:
-
-- `PerRow`: one `INSERT` per row.
-- `Batch`: one multi-row `INSERT` or `MERGE` statement per flush.
-- `BulkCopy`: one `SqlBulkCopy` per flush, inside a transaction the writer opens and commits. Without one,
-  `SqlBulkCopy` commits every `BulkCopyBatchSize` rows on its own, and a retry after a failure part-way through would
-  insert the committed rows again.
-
-With `DeliverySemantic.ExactlyOnce`, the sink wraps all writes in one transaction. A failure can abort that whole
-transaction, so the writers make one attempt and the sink rolls the transaction back. A batch that fails isn't
-written again when the writer is disposed.
-
-To change a setting, derive a policy with a `with` expression:
-
-```csharp
-var config = new SqlServerConfiguration
-{
-    Resilience = SqlServerConnectorResilience.Default with { Attempts = 6 },
-};
-```
-
-To turn retries off, use `Resilience.None`.
-
-The connector is the only layer that retries statements. SqlClient's configurable retry logic
-(`SqlConfigurableRetryFactory`) is off by default; leave it off, because two retrying layers multiply attempts. Retries
-aren't logged by the connector. To observe them, attach a listener: `SqlServerConnectorResilience.Default.WithListener(e => ...)`.
+A connection that a failure closed is reopened before the retry. To change a setting, derive a policy:
+`o => o with { Resilience = SqlServerConnectorResilience.Default with { Attempts = 6 } }`; `Resilience.None` turns
+retries off. Leave SqlClient's own retry logic (`SqlConfigurableRetryFactory`) off, because two retrying layers
+multiply attempts.
 
 ## Dependency Injection
 
 ```csharp
-services.AddSqlServerConnector(options =>
-{
-    options.DefaultConnectionString = "Server=localhost;Database=Sales;...";
-    options.DefaultConfiguration = new SqlServerConfiguration
-    {
-        WriteStrategy = SqlServerWriteStrategy.BulkCopy,
-        BulkCopyBatchSize = 5000
-    };
-});
-
-// Named connections for multi-database scenarios
+services.AddSqlServerConnector(options => options.DefaultConnectionString = "Server=localhost;Database=Sales;...");
 services.AddSqlServerConnection("reporting", "Server=reporting-db;...");
-services.AddSqlServerConnection("warehouse", "Server=warehouse-db;...");
 ```
 
-Registers `ISqlServerConnectionPool`, `SqlServerSourceNodeFactory`, and `SqlServerSinkNodeFactory`.
-
-## Attribute Mapping
-
-### Convention-Based
-
-C# `PascalCase` property names map directly to SQL Server `PascalCase` column names (no conversion).
-
-### `[Column]` / `[IgnoreColumn]` (Cross-Connector)
+Registers `ISqlServerConnectionPool`, `ISqlServerSourceNodeFactory` and `ISqlServerSinkNodeFactory`:
 
 ```csharp
-using NPipeline.Connectors.Attributes;
-
-public class Customer
-{
-    [Column("CustomerID")]
-    public int CustomerId { get; set; }
-
-    [IgnoreColumn]
-    public string FullName => $"{FirstName} {LastName}";
-}
+var source = sources.CreateSourceNode<Order>("SELECT * FROM dbo.Orders ORDER BY Id", o => o with { ConnectionName = "reporting" });
 ```
 
-### `[SqlServerColumn]` (Connector-Specific)
+## Analyzer
 
-Extends `[Column]` with SQL Server features:
-
-```csharp
-using NPipeline.Connectors.SqlServer.Mapping;
-
-public class Customer
-{
-    [SqlServerColumn("CustomerID", PrimaryKey = true, Identity = true)]
-    public int CustomerId { get; set; }
-
-    [SqlServerColumn("FirstName", DbType = SqlDbType.NVarChar, Size = 100)]
-    public string FirstName { get; set; } = "";
-
-    [SqlServerColumn("Email", DbType = SqlDbType.NVarChar, Size = 255)]
-    public string Email { get; set; } = "";
-}
-```
-
-| Property | Description |
-|----------|-------------|
-| `Name` | Column name in the database |
-| `DbType` | SQL Server data type (`SqlDbType`) |
-| `Size` | Size/length for character and numeric types |
-| `PrimaryKey` | Primary key (used for checkpointing) |
-| `Identity` | Auto-increment identity column |
-| `Ignore` | Skip mapping this property |
-
-Use common attributes for portable code; use `[SqlServerColumn]` when you need type, PK, or identity control.
-
-## Delivery Semantics
-
-| Semantic | Data Loss | Duplicates | Overhead | Use Case |
-|----------|-----------|------------|----------|----------|
-| `AtLeastOnce` (default) | No | Possible | Low | Idempotent operations |
-| `AtMostOnce` | Possible | No | Low | Telemetry, metrics |
-| `ExactlyOnce` | No | No | High | Financial transactions |
-
-```csharp
-var config = new SqlServerConfiguration
-{
-    DeliverySemantic = DeliverySemantic.ExactlyOnce,
-    UseTransaction = true,
-    CheckpointStrategy = CheckpointStrategy.Offset,
-    CheckpointStorage = new FileCheckpointStorage("checkpoints.json")
-};
-```
-
-## Checkpointing
-
-Checkpointing enables pipelines to resume from where they left off after a failure.
-
-| Strategy | Persistence | Description |
-|----------|-------------|-------------|
-| `None` (default) | - | No checkpointing; restart from beginning on failure |
-| `InMemory` | Process lifetime | Recover from transient failures within a single run |
-| `Offset` | External storage | Track position via monotonically increasing column |
-| `KeyBased` | External storage | Track processed items by composite keys |
-| `Cursor` | External storage | Track cursor position for iteration |
-| `CDC` | External storage | Track LSN for SQL Server Change Data Capture |
-
-### Offset Example
-
-```csharp
-var config = new SqlServerConfiguration
-{
-    CheckpointStrategy = CheckpointStrategy.Offset,
-    CheckpointOffsetColumn = "OrderId",
-    CheckpointStorage = new FileCheckpointStorage("checkpoints/orders.json")
-};
-
-var source = new SqlServerSourceNode<Order>(connectionString,
-    "SELECT * FROM Orders WHERE OrderId > @lastCheckpoint ORDER BY OrderId",
-    configuration: config);
-```
-
-### CDC Example
-
-```csharp
-var config = new SqlServerConfiguration
-{
-    CheckpointStrategy = CheckpointStrategy.CDC,
-    CdcCaptureInstance = "dbo_orders",
-    CheckpointStorage = new FileCheckpointStorage("checkpoints/cdc.json")
-};
-```
-
-Requires CDC enabled on the database and table:
-
-```sql
-EXEC sys.sp_cdc_enable_db;
-EXEC sys.sp_cdc_enable_table @source_schema = 'dbo', @source_name = 'orders', @role_name = NULL;
-```
-
-### Checkpoint Intervals
-
-```csharp
-config.CheckpointInterval = new CheckpointIntervalConfiguration
-{
-    RowCountInterval = 10_000,
-    TimeInterval = TimeSpan.FromMinutes(5)
-};
-```
-
-## Mapping
-
-| Property | Default | Description |
-|----------|---------|-------------|
-| `CaseInsensitiveMapping` | `true` | Match `OrderId`, `orderid`, `ORDERID` to same property |
-| `CacheMappingMetadata` | `true` | Cache mapping delegates per type (avoid repeated reflection) |
-| `ValidateIdentifiers` | `true` | Validate SQL identifiers to prevent injection |
-
-## Performance
-
-### Streaming
-
-```csharp
-var config = new SqlServerConfiguration { StreamResults = true, FetchSize = 1_000 };
-```
-
-Without streaming, the entire result set is loaded into memory. With streaming, rows are fetched in batches of `FetchSize`.
-
-| FetchSize | Best For |
-|-----------|----------|
-| 100–500 | Memory-constrained, wide rows |
-| 1,000–5,000 | Most workloads |
-| 5,000–10,000 | Maximum throughput, high-bandwidth |
-
-### Write Strategy Comparison
-
-| Strategy | Throughput | Latency | Error Isolation | Use Case |
-|----------|-----------|---------|-----------------|----------|
-| `PerRow` | Low | Low | High | Real-time, per-row errors |
-| `Batch` | High | Medium | Medium | ETL, balanced |
-| `BulkCopy` | Very High | High | Low | Bulk loads, data warehouse |
-
-### Batch Size Guidelines
-
-| Range | Best For |
-|-------|----------|
-| 100–500 | Real-time processing, low latency |
-| 500–1,000 | Balanced throughput and latency |
-| 1,000–5,000 | Bulk loading |
-
-**Note:** Effective batch size is capped by SQL Server's 2,100 parameter limit divided by the number of mapped columns.
-
-### Prepared Statements
-
-Enabled by default (`UsePreparedStatements = true`). Reduces query parsing overhead by 10–30% for repeated inserts.
-
-## Row-Level Error Handling
-
-```csharp
-var config = new SqlServerConfiguration
-{
-    RowErrorHandler = (exception, row) =>
-    {
-        Console.WriteLine($"Error on row {row?.Get<int>("OrderId")}: {exception.Message}");
-        return exception is FormatException; // true = skip row, false = re-throw
-    }
-};
-```
-
-## Best Practices
-
-1. **Use DI** with `AddSqlServerConnector` for production - centralizes connection management
-2. **Enable streaming** (`StreamResults = true`) for large result sets
-3. **Use BulkCopy** for bulk loading - significantly faster than Batch
-4. **Enable upsert** for idempotent writes to avoid duplicate handling
-5. **Validate identifiers** - never disable `ValidateIdentifiers` in production
-6. **Use prepared statements** for repeated query patterns
-7. **Configure checkpointing** for long-running pipelines
-8. **Tune batch size** based on latency/throughput requirements
-9. **Set `ApplicationName`** for monitoring in SQL Server Activity Monitor
+The `NPipeline.Connectors.SqlServer.Analyzers` package reports **NP9502** when a source checkpoints
+(`CheckpointStrategy.Offset` or `InMemory`) with a query that has no `ORDER BY`; see
+[Checkpoints](sql-connectors.md#checkpoints).
 
 ## Next Steps
 
-- [PostgreSQL Connector](postgres.md) - similar patterns for PostgreSQL
-- [MySQL Connector](mysql.md) - similar patterns for MySQL/MariaDB
-- [Dependency Injection](../guides/dependency-injection.md) - full DI integration guide
+- [SQL Connectors: Shared Behaviour](sql-connectors.md): mapping, row errors, transactions, upserts, checkpoints
+- [PostgreSQL Connector](postgres.md)
+- [Storage Providers](../storage-providers/index.md): `mssql://` URIs

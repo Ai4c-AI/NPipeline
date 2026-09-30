@@ -1,10 +1,6 @@
 using AwesomeAssertions;
-using FakeItEasy;
 using MySqlConnector;
-using NPipeline.Connectors.MySql.Configuration;
 using NPipeline.Connectors.MySql.Reliability;
-using NPipeline.Connectors.MySql.Writers;
-using NPipeline.StorageProviders.Abstractions;
 using NResilience;
 
 namespace NPipeline.Connectors.MySql.Tests.Reliability.Behavior;
@@ -15,16 +11,6 @@ namespace NPipeline.Connectors.MySql.Tests.Reliability.Behavior;
 /// </summary>
 public sealed class MySqlResilienceBehaviorTests
 {
-    // The shipped preset with near-zero backoff, so the tests barely wait between attempts.
-    private static readonly Resilience Fast = MySqlConnectorResilience.Default with
-    {
-        Backoff = MySqlConnectorResilience.Default.Backoff with
-        {
-            TransientBase = TimeSpan.FromMilliseconds(1),
-            ThrottledBase = TimeSpan.FromMilliseconds(1),
-        },
-    };
-
     [Fact]
     public void DefaultPreset_PreservesTheAttemptCountsAndDelaysOfTheSettingsItReplaces()
     {
@@ -67,129 +53,5 @@ public sealed class MySqlResilienceBehaviorTests
         classifier.ClassifyException(new InvalidOperationException("Bad mapping.")).Kind.Should().Be(VerdictKind.Permanent);
         classifier.ClassifyException(new ObjectDisposedException("MySqlConnection")).Kind.Should().Be(VerdictKind.Permanent);
         classifier.ClassifyException(new OperationCanceledException()).Kind.Should().Be(VerdictKind.Permanent);
-    }
-
-    [Fact]
-    public async Task PerRow_RetriesATransientFailureFourTimesThenThrows()
-    {
-        var connection = new ScriptedConnection((_, _) => MySqlExceptions.WithNumber(1213));
-        var writer = PerRowWriter(connection);
-
-        var act = () => writer.WriteAsync(new Row { Id = 1 });
-
-        _ = await act.Should().ThrowAsync<MySqlException>();
-        connection.Executed.Should().HaveCount(4);
-    }
-
-    [Fact]
-    public async Task PerRow_DoesNotRetryAPermanentFailure()
-    {
-        var connection = new ScriptedConnection((_, _) => MySqlExceptions.WithNumber(1062));
-        var writer = PerRowWriter(connection);
-
-        var act = () => writer.WriteAsync(new Row { Id = 1 });
-
-        _ = await act.Should().ThrowAsync<MySqlException>();
-        connection.Executed.Should().ContainSingle();
-    }
-
-    [Fact]
-    public async Task Batch_RetriesOnlyTheChunkThatFailed()
-    {
-        var connection = new ScriptedConnection((index, _) => index == 2
-            ? MySqlExceptions.WithNumber(1205)
-            : null);
-
-        var writer = BatchWriter(connection, 2);
-
-        await writer.WriteBatchAsync(Rows(6));
-
-        connection.Executed.Should().HaveCount(4);
-        CommittedIds(connection).Should().Equal(1, 2, 3, 4, 5, 6);
-    }
-
-    [Fact]
-    public async Task Batch_DoesNotResendAFailedChunkWhenDisposed()
-    {
-        var connection = new ScriptedConnection((_, _) => MySqlExceptions.WithNumber(1062));
-        var writer = BatchWriter(connection, 10);
-
-        var act = () => writer.WriteBatchAsync(Rows(3));
-        _ = await act.Should().ThrowAsync<MySqlException>();
-
-        await writer.DisposeAsync();
-
-        connection.Executed.Should().ContainSingle("the failure was reported; disposing must not quietly write the rows again");
-    }
-
-    [Fact]
-    public async Task Writers_MakeOneAttemptInsideATransactionTheyDoNotOwn()
-    {
-        // A deadlock (1213) rolls back the whole transaction in InnoDB, so a retry inside the sink's ExactlyOnce
-        // transaction would commit this statement without the ones before it. The failure goes to the transaction's owner.
-        var connection = new ScriptedConnection((_, _) => MySqlExceptions.WithNumber(1213))
-        {
-            CurrentTransaction = A.Fake<IDatabaseTransaction>(),
-        };
-
-        var perRow = () => PerRowWriter(connection).WriteAsync(new Row { Id = 1 });
-        _ = await perRow.Should().ThrowAsync<MySqlException>();
-
-        var batch = () => BatchWriter(connection, 10).WriteBatchAsync(Rows(2));
-        _ = await batch.Should().ThrowAsync<MySqlException>();
-
-        connection.Executed.Should().HaveCount(2);
-    }
-
-    [Fact]
-    public async Task PipelineCancellation_StopsWithoutAnotherAttempt()
-    {
-        using var cts = new CancellationTokenSource();
-
-        var connection = new ScriptedConnection((_, _) =>
-        {
-            cts.Cancel();
-            return MySqlExceptions.WithNumber(1213);
-        });
-
-        var writer = PerRowWriter(connection, MySqlConnectorResilience.Default);
-
-        var act = () => writer.WriteAsync(new Row { Id = 1 }, cts.Token);
-
-        _ = await act.Should().ThrowAsync<OperationCanceledException>();
-        connection.Executed.Should().ContainSingle();
-    }
-
-    [Fact]
-    public async Task ForeignCancellation_IsAFailureThatIsNotRetried()
-    {
-        var connection = new ScriptedConnection((_, _) => new OperationCanceledException("not the pipeline's token"));
-        var writer = PerRowWriter(connection);
-
-        var act = () => writer.WriteAsync(new Row { Id = 1 });
-
-        _ = await act.Should().ThrowAsync<OperationCanceledException>();
-        connection.Executed.Should().ContainSingle();
-    }
-
-    private static MySqlPerRowWriter<Row> PerRowWriter(IDatabaseConnection connection, Resilience? resilience = null) =>
-        new(connection, "rows", null, new MySqlConfiguration { Resilience = resilience ?? Fast });
-
-    private static MySqlBatchWriter<Row> BatchWriter(IDatabaseConnection connection, int batchSize) =>
-        new(connection, "rows", null, new MySqlConfiguration { Resilience = Fast, BatchSize = batchSize });
-
-    private static IEnumerable<Row> Rows(int count)
-    {
-        return Enumerable.Range(1, count).Select(i => new Row { Id = i });
-    }
-
-    private static IEnumerable<int> CommittedIds(ScriptedConnection connection)
-    {
-        return connection.Committed.SelectMany(c => c.Parameters).OfType<int>();
-    }
-
-    private sealed class Row
-    {
-        public int Id { get; set; }
     }
 }

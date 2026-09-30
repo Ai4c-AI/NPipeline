@@ -23,28 +23,20 @@ ensures consistent row ordering across checkpoint restarts. Without proper order
 #### Example
 
 ```csharp
-// ❌ Warning: Missing ORDER BY clause
-var source = new PostgresSourceNode<MyRecord>(
-    connectionString,
-    "SELECT id, name, created_at FROM my_table",
-    configuration: new PostgresConfiguration
-    {
-        CheckpointStrategy = CheckpointStrategy.Offset // Checkpointing enabled
-    }
-);
+// ⚠️ NP9501: checkpointing without ORDER BY
+var source = PostgresConnector.Source<MyRecord>(connectionString, "SELECT id, name FROM my_table",
+    o => o with { CheckpointStrategy = CheckpointStrategy.Offset, CheckpointStorage = storage });
 
-// ✅ Correct: Includes ORDER BY clause
-var source = new PostgresSourceNode<MyRecord>(
-    connectionString,
-    "SELECT id, name, created_at FROM my_table ORDER BY id",
-    configuration: new PostgresConfiguration
-    {
-        CheckpointStrategy = CheckpointStrategy.Offset
-    }
-);
+// ✅ A stable order on a unique key
+var ordered = PostgresConnector.Source<MyRecord>(connectionString, "SELECT id, name FROM my_table ORDER BY id",
+    o => o with { CheckpointStrategy = CheckpointStrategy.Offset, CheckpointStorage = storage });
 ```
 
-#### Why This Matters
+Both `CheckpointStrategy.Offset` and `InMemory` resume by skipping the rows already read, so both are checked. The
+analyzer recognises `PostgresConnector.Source(...)`, the dependency-injection factory's `CreateSourceNode(...)`, and options built
+with an object initializer.
+
+## Why This Matters
 
 Checkpointing tracks the position of processed rows to enable recovery from failures. Without a consistent `ORDER BY` clause:
 

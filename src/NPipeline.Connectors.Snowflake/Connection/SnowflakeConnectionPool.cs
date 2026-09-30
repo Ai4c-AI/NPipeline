@@ -10,7 +10,6 @@ namespace NPipeline.Connectors.Snowflake.Connection;
 /// </summary>
 public class SnowflakeConnectionPool : ISnowflakeConnectionPool
 {
-    private readonly SnowflakeConfiguration _configuration;
     private readonly string? _defaultConnectionString;
     private readonly ConcurrentDictionary<string, string> _namedConnectionStrings;
 
@@ -41,14 +40,12 @@ public class SnowflakeConnectionPool : ISnowflakeConnectionPool
         ArgumentNullException.ThrowIfNull(options);
 
         _namedConnectionStrings = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        _configuration = options.DefaultConfiguration ?? new SnowflakeConfiguration();
-        _configuration.ValidateConnectionSettings();
 
         var hasDefault = !string.IsNullOrWhiteSpace(options.DefaultConnectionString);
 
         if (hasDefault)
         {
-            _defaultConnectionString = BuildConnectionString(options.DefaultConnectionString, _configuration);
+            _defaultConnectionString = options.DefaultConnectionString;
             ConnectionString = _defaultConnectionString;
         }
 
@@ -57,7 +54,7 @@ public class SnowflakeConnectionPool : ISnowflakeConnectionPool
             if (string.IsNullOrWhiteSpace(kvp.Value))
                 throw new ArgumentException($"Connection string for '{kvp.Key}' cannot be empty.", nameof(options));
 
-            var connectionString = BuildConnectionString(kvp.Value, _configuration);
+            var connectionString = kvp.Value;
             _ = _namedConnectionStrings.TryAdd(kvp.Key, connectionString);
             ConnectionString ??= connectionString;
             _defaultConnectionString ??= connectionString;
@@ -125,33 +122,5 @@ public class SnowflakeConnectionPool : ISnowflakeConnectionPool
     {
         await Task.CompletedTask.ConfigureAwait(false);
         GC.SuppressFinalize(this);
-    }
-
-    private static string BuildConnectionString(string connectionString, SnowflakeConfiguration configuration)
-    {
-        // Snowflake connection strings are semicolon-delimited key=value pairs
-        // We enrich the provided connection string with configuration defaults
-        var parts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-        // Parse existing connection string
-        foreach (var segment in connectionString.Split(';', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var kvp = segment.Split('=', 2);
-
-            if (kvp.Length == 2)
-                parts[kvp[0].Trim()] = kvp[1].Trim();
-        }
-
-        // Apply configuration defaults only if not already present
-        if (!parts.ContainsKey("TIMEOUT") && configuration.ConnectionTimeout > 0)
-            parts["TIMEOUT"] = configuration.ConnectionTimeout.ToString();
-
-        if (!parts.ContainsKey("MAXPOOLSIZE") && configuration.MaxPoolSize > 0)
-            parts["MAXPOOLSIZE"] = configuration.MaxPoolSize.ToString();
-
-        if (!parts.ContainsKey("MINPOOLSIZE") && configuration.MinPoolSize >= 0)
-            parts["MINPOOLSIZE"] = configuration.MinPoolSize.ToString();
-
-        return string.Join(";", parts.Select(kvp => $"{kvp.Key}={kvp.Value}"));
     }
 }

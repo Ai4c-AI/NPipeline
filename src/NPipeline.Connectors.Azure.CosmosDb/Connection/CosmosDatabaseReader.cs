@@ -2,6 +2,7 @@ using Microsoft.Azure.Cosmos;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using NPipeline.StorageProviders.Abstractions;
+using NPipeline.Connectors.Mapping;
 
 namespace NPipeline.Connectors.Azure.CosmosDb.Connection;
 
@@ -148,12 +149,12 @@ internal sealed class CosmosDatabaseReader : IDatabaseReader
 
         try
         {
-            return (T?)Convert.ChangeType(value, underlyingType);
+            return (T?)ScalarConverter.Convert(value, underlyingType);
         }
-        catch (InvalidCastException)
+        catch (NPipeline.Connectors.Errors.FieldConversionException ex)
         {
             throw new InvalidCastException(
-                $"Cannot cast value of type '{value.GetType().Name}' to '{typeof(T).Name}' for column '{columnName}'.");
+                $"Cannot convert value of type '{value.GetType().Name}' to '{typeof(T).Name}' for column '{columnName}'.", ex);
         }
     }
 

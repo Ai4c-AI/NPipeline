@@ -6,7 +6,8 @@ using NPipeline.Connectors.Postgres.Connection;
 namespace NPipeline.Connectors.Postgres.DependencyInjection;
 
 /// <summary>
-///     Extension methods for configuring PostgreSQL connector in dependency injection.
+///     Extension methods for configuring the PostgreSQL connector in dependency injection. The methods share one
+///     <see cref="PostgresOptions" /> instance, so they can be called in any order.
 /// </summary>
 public static class PostgresServiceCollectionExtensions
 {
@@ -14,25 +15,31 @@ public static class PostgresServiceCollectionExtensions
     ///     Adds the PostgreSQL connector to the service collection.
     /// </summary>
     /// <param name="services">The service collection.</param>
-    /// <param name="configure">Optional configuration action.</param>
+    /// <param name="configure">Optional configuration action, applied to the options connections were already added to.</param>
     /// <returns>The service collection for chaining.</returns>
     public static IServiceCollection AddPostgresConnector(
         this IServiceCollection services,
-        Action<PostgresOptions>? configure = null)
+        Action<PostgresOptions>? configure = null) =>
+        services.AddPostgresConnector<PostgresOptions>(configure);
+
+    /// <summary>
+    ///     Adds the PostgreSQL connector to the service collection with custom options. Connections added before this call
+    ///     are carried over to the <typeparamref name="TOptions" /> instance.
+    /// </summary>
+    /// <typeparam name="TOptions">The options type.</typeparam>
+    /// <param name="services">The service collection.</param>
+    /// <param name="configure">Optional configuration action.</param>
+    /// <returns>The service collection for chaining.</returns>
+    public static IServiceCollection AddPostgresConnector<TOptions>(
+        this IServiceCollection services,
+        Action<TOptions>? configure = null)
+        where TOptions : PostgresOptions, new()
     {
-        var options = new PostgresOptions();
-        configure?.Invoke(options);
+        configure?.Invoke(Options<TOptions>(services));
 
-        services.TryAddSingleton(options);
-
-        services.TryAddSingleton<IPostgresConnectionPool>(sp =>
-        {
-            var opts = sp.GetRequiredService<PostgresOptions>();
-            return new PostgresConnectionPool(opts);
-        });
-
-        services.TryAddSingleton<PostgresSourceNodeFactory>();
-        services.TryAddSingleton<PostgresSinkNodeFactory>();
+        services.TryAddSingleton<IPostgresConnectionPool>(sp => new PostgresConnectionPool(sp.GetRequiredService<PostgresOptions>()));
+        services.TryAddSingleton<IPostgresSourceNodeFactory, PostgresSourceNodeFactory>();
+        services.TryAddSingleton<IPostgresSinkNodeFactory, PostgresSinkNodeFactory>();
 
         return services;
     }
@@ -49,12 +56,7 @@ public static class PostgresServiceCollectionExtensions
         string name,
         string connectionString)
     {
-        var options = services.FirstOrDefault(sd => sd.ServiceType == typeof(PostgresOptions))?.ImplementationInstance as PostgresOptions
-                      ?? new PostgresOptions();
-
-        options.AddOrUpdateConnection(name, connectionString);
-        services.TryAddSingleton(options);
-
+        Options<PostgresOptions>(services).AddOrUpdateConnection(name, connectionString);
         return services;
     }
 
@@ -68,12 +70,8 @@ public static class PostgresServiceCollectionExtensions
         this IServiceCollection services,
         string connectionString)
     {
-        var options = services.FirstOrDefault(sd => sd.ServiceType == typeof(PostgresOptions))?.ImplementationInstance as PostgresOptions
-                      ?? new PostgresOptions();
-
-        options.DefaultConnectionString = connectionString;
-        services.TryAddSingleton(options);
-
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+        Options<PostgresOptions>(services).DefaultConnectionString = connectionString;
         return services;
     }
 
@@ -89,8 +87,41 @@ public static class PostgresServiceCollectionExtensions
         string name,
         string connectionString)
     {
-        _ = services.AddKeyedSingleton<IPostgresConnectionPool>(name, (sp, key) => { return new PostgresConnectionPool(connectionString); });
+        _ = services.AddKeyedSingleton<IPostgresConnectionPool>(name, (_, _) => new PostgresConnectionPool(connectionString));
 
         return services;
+    }
+
+    /// <summary>
+    ///     The registered options, registering them first if needed. Options of a base type registered by an earlier call
+    ///     are replaced by <typeparamref name="TOptions" /> with their connections copied, so nothing an earlier call set is lost.
+    /// </summary>
+    private static TOptions Options<TOptions>(IServiceCollection services)
+        where TOptions : PostgresOptions, new()
+    {
+        var descriptor = services.FirstOrDefault(sd => sd.ServiceType == typeof(PostgresOptions));
+
+        if (descriptor?.ImplementationInstance is TOptions existing)
+            return existing;
+
+        if (descriptor is not null && descriptor.ImplementationInstance is not PostgresOptions)
+            throw new InvalidOperationException($"{nameof(PostgresOptions)} is registered with a factory or type; configure connections there instead.");
+
+        var options = new TOptions();
+
+        if (descriptor?.ImplementationInstance is PostgresOptions registered)
+        {
+            options.DefaultConnectionString = registered.DefaultConnectionString;
+
+            foreach (var (name, connectionString) in registered.NamedConnections)
+            {
+                options.AddOrUpdateConnection(name, connectionString);
+            }
+
+            _ = services.Remove(descriptor);
+        }
+
+        _ = services.AddSingleton<PostgresOptions>(options);
+        return options;
     }
 }

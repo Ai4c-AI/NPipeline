@@ -164,14 +164,33 @@ public sealed class RecordShape
         ];
     }
 
+    /// <summary>
+    ///     The member's <see cref="ColumnAttribute" />. A connector's subclass (such as <c>[SqlServerColumn]</c>) counts too;
+    ///     when a member has both, the shared attribute wins, as it does over a connector's unrelated attribute.
+    /// </summary>
+    private static ColumnAttribute? ColumnAttributeOf(MemberInfo member)
+    {
+        ColumnAttribute? derived = null;
+
+        foreach (var attribute in member.GetCustomAttributes<ColumnAttribute>(true))
+        {
+            if (attribute.GetType() == typeof(ColumnAttribute))
+                return attribute;
+
+            derived ??= attribute;
+        }
+
+        return derived;
+    }
+
     private static bool IsIgnored(MemberInfo member, RecordShapeOptions options) =>
         member.IsDefined(typeof(IgnoreColumnAttribute), true)
-        || member.GetCustomAttribute<ColumnAttribute>(true)?.Ignore == true
+        || ColumnAttributeOf(member)?.Ignore == true
         || options.IsIgnored?.Invoke(member) == true;
 
     private static (string Name, bool IsExplicit) ResolveColumnName(MemberInfo member, RecordShapeOptions options)
     {
-        if (member.GetCustomAttribute<ColumnAttribute>(true) is { Name: { Length: > 0 } attributeName })
+        if (ColumnAttributeOf(member) is { Name: { Length: > 0 } attributeName })
             return (attributeName, true);
 
         if (options.ColumnName?.Invoke(member) is { Length: > 0 } connectorName)

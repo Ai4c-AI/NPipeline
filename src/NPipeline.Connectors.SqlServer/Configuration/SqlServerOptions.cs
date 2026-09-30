@@ -16,10 +16,6 @@ public class SqlServerOptions
     /// </summary>
     public IDictionary<string, string> NamedConnections { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>
-    ///     Gets or sets the default configuration for SQL Server operations.
-    /// </summary>
-    public SqlServerConfiguration DefaultConfiguration { get; set; } = new();
 
     /// <summary>
     ///     Gets a connection string by name.

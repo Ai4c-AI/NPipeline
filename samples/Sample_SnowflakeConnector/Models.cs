@@ -8,10 +8,9 @@ namespace Sample_SnowflakeConnector;
 ///     Represents a customer record in the CUSTOMERS table.
 ///     Uses Snowflake-specific attributes with uppercase column names.
 /// </summary>
-[SnowflakeTable("CUSTOMERS", Schema = "PUBLIC")]
 public sealed class Customer
 {
-    [SnowflakeColumn("ID", PrimaryKey = true)]
+    [SnowflakeColumn("ID")]
     public int Id { get; set; }
 
     [SnowflakeColumn("FIRST_NAME")]
@@ -40,10 +39,9 @@ public sealed class Customer
 ///     Represents an order record in the ORDERS table.
 ///     Uses Snowflake-specific attributes with uppercase column names.
 /// </summary>
-[SnowflakeTable("ORDERS", Schema = "PUBLIC")]
 public sealed class Order
 {
-    [SnowflakeColumn("ORDER_ID", PrimaryKey = true)]
+    [SnowflakeColumn("ORDER_ID")]
     public int OrderId { get; set; }
 
     [SnowflakeColumn("CUSTOMER_ID")]
@@ -72,7 +70,6 @@ public sealed class Order
 ///     Represents an enriched customer record with order summary data.
 ///     Written to the ENRICHED_CUSTOMERS table.
 /// </summary>
-[SnowflakeTable("ENRICHED_CUSTOMERS", Schema = "PUBLIC")]
 public sealed class EnrichedCustomer
 {
     [SnowflakeColumn("CUSTOMER_ID")]

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using NPipeline.StorageProviders.Abstractions;
+using NPipeline.Connectors.Mapping;
 
 namespace NPipeline.Connectors.Azure.CosmosDb.Mapping;
 
@@ -317,7 +318,7 @@ public sealed class CosmosRow
 
             try
             {
-                value = (T?)Convert.ChangeType(dictValue, typeof(T));
+                value = ScalarConverter.Convert<T>(dictValue);
                 return true;
             }
             catch (InvalidCastException)
@@ -421,7 +422,7 @@ public sealed class CosmosRow
 
             try
             {
-                value = (T?)Convert.ChangeType(dictValue, typeof(T));
+                value = ScalarConverter.Convert<T>(dictValue);
                 return true;
             }
             catch (Exception ex) when (ex is InvalidCastException or FormatException or OverflowException)

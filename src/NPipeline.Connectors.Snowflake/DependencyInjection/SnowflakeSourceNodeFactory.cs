@@ -1,143 +1,47 @@
+using NPipeline.Connectors.Sql;
 using NPipeline.Connectors.Snowflake.Configuration;
 using NPipeline.Connectors.Snowflake.Connection;
-using NPipeline.Connectors.Snowflake.Mapping;
 using NPipeline.Connectors.Snowflake.Nodes;
 
 namespace NPipeline.Connectors.Snowflake.DependencyInjection;
 
-/// <summary>
-///     Factory interface for creating Snowflake source nodes with dependency injection support.
-/// </summary>
+/// <summary>Creates Snowflake sources on the registered connection pool.</summary>
 public interface ISnowflakeSourceNodeFactory
 {
-    /// <summary>
-    ///     Creates a Snowflake source node using the default connection.
-    /// </summary>
-    /// <typeparam name="T">The type of objects to read.</typeparam>
-    /// <param name="query">The SQL query to execute.</param>
-    /// <param name="configuration">Optional configuration. If null, defaults are used.</param>
-    /// <returns>A configured Snowflake source node.</returns>
-    SnowflakeSourceNode<T> CreateSourceNode<T>(
-        string query,
-        SnowflakeConfiguration? configuration = null)
-        where T : class;
+    /// <summary>A source that maps columns to <typeparamref name="T" />'s members by name.</summary>
+    /// <param name="query">The query.</param>
+    /// <param name="configure">Adjusts the default options; set <see cref="SnowflakeReadOptions.ConnectionName" /> for a named connection.</param>
+    SnowflakeSourceNode<T> CreateSourceNode<T>(string query, Func<SnowflakeReadOptions, SnowflakeReadOptions>? configure = null);
 
-    /// <summary>
-    ///     Creates a Snowflake source node with a custom mapper using the default connection.
-    /// </summary>
-    /// <typeparam name="T">The type of objects to read.</typeparam>
-    /// <param name="query">The SQL query to execute.</param>
-    /// <param name="customMapper">Optional custom row mapper function.</param>
-    /// <param name="configuration">Optional configuration. If null, defaults are used.</param>
-    /// <returns>A configured Snowflake source node.</returns>
-    SnowflakeSourceNode<T> CreateSourceNode<T>(
-        string query,
-        Func<SnowflakeRow, T>? customMapper,
-        SnowflakeConfiguration? configuration = null)
-        where T : class;
-
-    /// <summary>
-    ///     Creates a Snowflake source node using a named connection.
-    /// </summary>
-    /// <typeparam name="T">The type of objects to read.</typeparam>
-    /// <param name="query">The SQL query to execute.</param>
-    /// <param name="connectionName">The name of the connection to use.</param>
-    /// <param name="configuration">Optional configuration. If null, defaults are used.</param>
-    /// <returns>A configured Snowflake source node.</returns>
-    SnowflakeSourceNode<T> CreateSourceNode<T>(
-        string query,
-        string? connectionName,
-        SnowflakeConfiguration? configuration = null)
-        where T : class;
-
-    /// <summary>
-    ///     Creates a Snowflake source node using a named connection with a custom mapper.
-    /// </summary>
-    /// <typeparam name="T">The type of objects to read.</typeparam>
-    /// <param name="query">The SQL query to execute.</param>
-    /// <param name="connectionName">The name of the connection to use.</param>
-    /// <param name="customMapper">Optional custom row mapper function.</param>
-    /// <param name="configuration">Optional configuration. If null, defaults are used.</param>
-    /// <returns>A configured Snowflake source node.</returns>
-    SnowflakeSourceNode<T> CreateSourceNode<T>(
-        string query,
-        string? connectionName,
-        Func<SnowflakeRow, T>? customMapper,
-        SnowflakeConfiguration? configuration = null)
-        where T : class;
+    /// <summary>A source that builds each record from a <see cref="SqlRow" /> with <paramref name="map" />.</summary>
+    /// <param name="query">The query.</param>
+    /// <param name="map">Builds a record from a row.</param>
+    /// <param name="configure">Adjusts the default options.</param>
+    SnowflakeSourceNode<T> CreateSourceNode<T>(string query, Func<SqlRow, T> map, Func<SnowflakeReadOptions, SnowflakeReadOptions>? configure = null);
 }
 
-/// <summary>
-///     Factory for creating Snowflake source nodes with dependency injection support.
-/// </summary>
-public class SnowflakeSourceNodeFactory : ISnowflakeSourceNodeFactory
+/// <summary>Creates Snowflake sources on the registered connection pool.</summary>
+/// <param name="connectionPool">The pool.</param>
+public class SnowflakeSourceNodeFactory(ISnowflakeConnectionPool connectionPool) : ISnowflakeSourceNodeFactory
 {
-    private readonly ISnowflakeConnectionPool _connectionPool;
-
-    /// <summary>
-    ///     Initializes a new instance of the <see cref="SnowflakeSourceNodeFactory" /> class.
-    /// </summary>
-    /// <param name="connectionPool">The connection pool.</param>
-    public SnowflakeSourceNodeFactory(ISnowflakeConnectionPool connectionPool)
-    {
-        _connectionPool = connectionPool ?? throw new ArgumentNullException(nameof(connectionPool));
-    }
+    private readonly ISnowflakeConnectionPool _connectionPool = connectionPool ?? throw new ArgumentNullException(nameof(connectionPool));
 
     /// <inheritdoc />
-    public SnowflakeSourceNode<T> CreateSourceNode<T>(
-        string query,
-        SnowflakeConfiguration? configuration = null)
-        where T : class
-    {
-        ArgumentNullException.ThrowIfNull(query);
-
-        var config = configuration ?? new SnowflakeConfiguration();
-        return new SnowflakeSourceNode<T>(_connectionPool, query, config, null, config.ContinueOnError);
-    }
+    public SnowflakeSourceNode<T> CreateSourceNode<T>(string query, Func<SnowflakeReadOptions, SnowflakeReadOptions>? configure = null) =>
+        new(Options(query, configure));
 
     /// <inheritdoc />
-    public SnowflakeSourceNode<T> CreateSourceNode<T>(
-        string query,
-        Func<SnowflakeRow, T>? customMapper,
-        SnowflakeConfiguration? configuration = null)
-        where T : class
+    public SnowflakeSourceNode<T> CreateSourceNode<T>(string query, Func<SqlRow, T> map, Func<SnowflakeReadOptions, SnowflakeReadOptions>? configure = null) =>
+        new(Options(query, configure), map ?? throw new ArgumentNullException(nameof(map)));
+
+    private SnowflakeReadOptions Options(string query, Func<SnowflakeReadOptions, SnowflakeReadOptions>? configure)
     {
-        ArgumentNullException.ThrowIfNull(query);
+        var options = new SnowflakeReadOptions { ConnectionPool = _connectionPool, Query = query };
+        options = configure is null ? options : configure(options);
 
-        var config = configuration ?? new SnowflakeConfiguration();
-        return new SnowflakeSourceNode<T>(_connectionPool, query, customMapper, config, null, config.ContinueOnError);
-    }
+        if (options.ConnectionName is { Length: > 0 } name && !_connectionPool.HasNamedConnection(name))
+            throw new InvalidOperationException($"Named connection '{name}' not found.");
 
-    /// <inheritdoc />
-    public SnowflakeSourceNode<T> CreateSourceNode<T>(
-        string query,
-        string? connectionName,
-        SnowflakeConfiguration? configuration = null)
-        where T : class
-    {
-        ArgumentNullException.ThrowIfNull(query);
-
-        if (!string.IsNullOrWhiteSpace(connectionName) && !_connectionPool.HasNamedConnection(connectionName))
-            throw new InvalidOperationException($"Named connection '{connectionName}' not found.");
-
-        var config = configuration ?? new SnowflakeConfiguration();
-        return new SnowflakeSourceNode<T>(_connectionPool, query, config, null, config.ContinueOnError, connectionName);
-    }
-
-    /// <inheritdoc />
-    public SnowflakeSourceNode<T> CreateSourceNode<T>(
-        string query,
-        string? connectionName,
-        Func<SnowflakeRow, T>? customMapper,
-        SnowflakeConfiguration? configuration = null)
-        where T : class
-    {
-        ArgumentNullException.ThrowIfNull(query);
-
-        if (!string.IsNullOrWhiteSpace(connectionName) && !_connectionPool.HasNamedConnection(connectionName))
-            throw new InvalidOperationException($"Named connection '{connectionName}' not found.");
-
-        var config = configuration ?? new SnowflakeConfiguration();
-        return new SnowflakeSourceNode<T>(_connectionPool, query, customMapper, config, null, config.ContinueOnError, connectionName);
+        return options;
     }
 }

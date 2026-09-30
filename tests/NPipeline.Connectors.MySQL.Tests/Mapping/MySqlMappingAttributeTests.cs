@@ -56,34 +56,6 @@ public class MySqlMappingAttributeTests
 
     #endregion
 
-    #region MySqlTableAttribute Tests
-
-    [Fact]
-    public void MySqlTableAttribute_WithName_ShouldSetName()
-    {
-        // Act
-        var attribute = new MySqlTableAttribute("test_table");
-
-        // Assert
-        _ = attribute.Name.Should().Be("test_table");
-    }
-
-    [Fact]
-    public void MySqlTableAttribute_WithEmptyName_ShouldThrowArgumentException()
-    {
-        // Act & Assert
-        _ = Assert.Throws<ArgumentException>(() => new MySqlTableAttribute(string.Empty));
-    }
-
-    [Fact]
-    public void MySqlTableAttribute_WithWhitespaceName_ShouldThrowArgumentException()
-    {
-        // Act & Assert
-        _ = Assert.Throws<ArgumentException>(() => new MySqlTableAttribute("   "));
-    }
-
-    #endregion
-
     #region MySqlColumnAttribute Tests
 
     [Fact]
@@ -215,14 +187,12 @@ public class MySqlMappingAttributeTests
         public DateTime CreatedAt { get; set; }
     }
 
-    [MySqlTable("custom_table_name")]
     private sealed class PocoWithCustomTableName
     {
         public int Id { get; set; }
         public string Name { get; set; } = string.Empty;
     }
 
-    [MySqlTable("products")]
     private sealed class PocoWithAutoIncrement
     {
         [MySqlColumn("id", AutoIncrement = true)]

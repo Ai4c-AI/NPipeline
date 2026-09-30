@@ -17,12 +17,14 @@ public class MySqlTestContainerFixture : IAsyncLifetime
             .WithDatabase("npipeline_test")
             .WithUsername("root")
             .WithPassword("root")
+            .WithCommand("--local-infile=1")
             .WithReuse(true)
             .WithLabel("npipeline-test", "mysql-integration")
             .Build();
     }
 
-    public string ConnectionString => _container.GetConnectionString();
+    // Bulk loads send the file from the client, which the client must allow too.
+    public string ConnectionString => _container.GetConnectionString() + ";AllowLoadLocalInfile=true";
 
     public async Task InitializeAsync()
     {

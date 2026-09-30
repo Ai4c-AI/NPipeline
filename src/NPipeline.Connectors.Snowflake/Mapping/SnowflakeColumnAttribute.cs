@@ -52,10 +52,6 @@ public sealed class SnowflakeColumnAttribute : ColumnAttribute
     /// </summary>
     public int? SizeNullable { get; private set; }
 
-    /// <summary>
-    ///     Gets or sets a value indicating whether the column participates in the primary key.
-    /// </summary>
-    public bool PrimaryKey { get; set; }
 
     /// <summary>
     ///     Gets or sets a value indicating whether the column is an identity (AUTOINCREMENT) column.

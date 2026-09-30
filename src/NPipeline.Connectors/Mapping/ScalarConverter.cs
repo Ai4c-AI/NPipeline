@@ -41,6 +41,27 @@ public static class ScalarConverter
         return (T)ConvertCore(value, target, provider ?? CultureInfo.InvariantCulture);
     }
 
+    /// <summary>
+    ///     Converts <paramref name="value" /> to <paramref name="targetType" /> as <see cref="Convert{T}" /> does, for callers
+    ///     that only know the type at run time. <c>null</c> is returned for a nullable or reference type, and fails for a
+    ///     non-nullable value type.
+    /// </summary>
+    /// <exception cref="FieldConversionException">The value does not convert.</exception>
+    public static object? Convert(object? value, Type targetType, IFormatProvider? provider = null)
+    {
+        ArgumentNullException.ThrowIfNull(targetType);
+
+        if (value is null or DBNull)
+        {
+            return !targetType.IsValueType || Nullable.GetUnderlyingType(targetType) is not null
+                ? null
+                : throw new FieldConversionException(targetType, null, "the value is missing");
+        }
+
+        var target = Nullable.GetUnderlyingType(targetType) ?? targetType;
+        return target.IsInstanceOfType(value) ? value : ConvertCore(value, target, provider ?? CultureInfo.InvariantCulture);
+    }
+
     private static object ConvertCore(object value, Type target, IFormatProvider provider)
     {
         switch (value)
@@ -51,6 +72,13 @@ public static class ScalarConverter
                 return ParseText(memory.ToString(), target, provider);
             case ReadOnlyMemory<byte> bytes when target == typeof(byte[]):
                 return bytes.ToArray();
+            case Stream stream when target == typeof(byte[]):
+                // Some providers return binary columns as a stream (DuckDB's BLOB).
+                using (var copy = new MemoryStream())
+                {
+                    stream.CopyTo(copy);
+                    return copy.ToArray();
+                }
         }
 
         if (target == typeof(string))

@@ -6,7 +6,7 @@ namespace NPipeline.Connectors.MySql.Reliability;
 
 /// <summary>
 ///     Resilience presets for the MySQL connector. Assign one to
-///     <see cref="Configuration.MySqlConfiguration.Resilience" />, or derive your own with a <c>with</c> expression.
+///     <see cref="Configuration.MySqlWriteOptions.Resilience" />, or derive your own with a <c>with</c> expression.
 /// </summary>
 /// <remarks>
 ///     <para>
@@ -20,8 +20,8 @@ namespace NPipeline.Connectors.MySql.Reliability;
 ///     </para>
 ///     <para>
 ///         The presets have no attempt timeout and no deadline. Each attempt is bounded by the driver's own timeout
-///         instead: <see cref="Configuration.MySqlConfiguration.CommandTimeout" /> for rows and batches, and
-///         <see cref="Configuration.MySqlConfiguration.BulkLoadTimeout" /> for bulk loads. A timeout set on the policy
+///         instead: <see cref="NPipeline.Connectors.Sql.SqlNodeOptions.CommandTimeout" /> for rows and batches, and
+///         the same timeout for bulk loads. A timeout set on the policy
 ///         applies to every write strategy, bulk load included.
 ///     </para>
 /// </remarks>

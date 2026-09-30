@@ -1,5 +1,4 @@
 using Microsoft.Data.SqlClient;
-using NPipeline.Connectors.SqlServer.Nodes;
 using NPipeline.Connectors.SqlServer.Tests.Fixtures;
 using NPipeline.StorageProviders.Models;
 
@@ -79,8 +78,8 @@ public sealed class SqlServerStorageUriIntegrationTests
 
             // Create source nodes using the same pipeline code but different URIs
             var query = $"SELECT id, name, value FROM [{tableName}]";
-            var localSource = new SqlServerSourceNode<TestRecord>(localUri, query);
-            var cloudSource = new SqlServerSourceNode<TestRecord>(cloudUri, query);
+            var localSource = SqlServerConnector.Source<TestRecord>(localUri, query);
+            var cloudSource = SqlServerConnector.Source<TestRecord>(cloudUri, query);
 
             // Act & Assert - Verify both nodes can be created and configured
             Assert.NotNull(localSource);
@@ -257,7 +256,7 @@ public sealed class SqlServerStorageUriIntegrationTests
 
                 // Create source node with encryption configuration
                 var query = $"SELECT id, name, value FROM [{tableName}]";
-                var source = new SqlServerSourceNode<TestRecord>(uri, query);
+                var source = SqlServerConnector.Source<TestRecord>(uri, query);
 
                 Assert.NotNull(source);
             }

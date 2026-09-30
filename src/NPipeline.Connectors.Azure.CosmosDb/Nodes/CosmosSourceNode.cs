@@ -10,6 +10,7 @@ using NPipeline.Connectors.Nodes;
 using NPipeline.StorageProviders;
 using NPipeline.StorageProviders.Abstractions;
 using NPipeline.StorageProviders.Models;
+using NPipeline.Connectors.Mapping;
 
 namespace NPipeline.Connectors.Azure.CosmosDb.Nodes;
 
@@ -401,7 +402,7 @@ public class CosmosSourceNode<T> : DatabaseSourceNode<IDatabaseReader, T>
 
         return underlyingType.IsInstanceOfType(value)
             ? value
-            : Convert.ChangeType(value, underlyingType);
+            : ScalarConverter.Convert(value, underlyingType);
     }
 
     private static IReadOnlyList<PropertyBinding> BuildBindings()

@@ -3,9 +3,9 @@ using System.Globalization;
 using System.Text;
 using Npgsql;
 using NPipeline.Connectors.Configuration;
+using NPipeline.Connectors.Postgres;
 using NPipeline.Connectors.Postgres.Configuration;
 using NPipeline.Connectors.Postgres.Mapping;
-using NPipeline.Connectors.Postgres.Nodes;
 using NPipeline.DataFlow.DataStreams;
 using NPipeline.Pipeline;
 
@@ -371,24 +371,12 @@ public sealed class PostgresConnectorPipeline
     /// </summary>
     private async Task<int> ProcessCustomersAsync(CancellationToken cancellationToken)
     {
-        var sourceConfig = new PostgresConfiguration
-        {
-            ConnectionString = _connectionString,
-        };
-
         var sql =
             "SELECT customer_id, first_name, last_name, email, phone, address, city, state, postal_code, country, registration_date, status FROM customers ORDER BY customer_id";
 
-        var sourceNode = new PostgresSourceNode<Customer>(_connectionString, sql, configuration: sourceConfig);
+        var sourceNode = PostgresConnector.Source<Customer>(_connectionString, sql);
 
-        var sinkConfig = new PostgresConfiguration
-        {
-            ConnectionString = _connectionString,
-            WriteStrategy = PostgresWriteStrategy.Batch,
-            BatchSize = 100,
-        };
-
-        var sinkNode = new PostgresSinkNode<Customer>(_connectionString, "customers_copy", configuration: sinkConfig);
+        var sinkNode = PostgresConnector.Sink<Customer>(_connectionString, "customers_copy", o => o with { BatchSize = 100 });
         var context = new PipelineContext();
 
         var count = 0;
@@ -407,24 +395,12 @@ public sealed class PostgresConnectorPipeline
     /// </summary>
     private async Task<int> ProcessProductsAsync(CancellationToken cancellationToken)
     {
-        var sourceConfig = new PostgresConfiguration
-        {
-            ConnectionString = _connectionString,
-        };
-
         var sql =
             "SELECT product_id, product_name, sku, description, category, price, cost, stock_quantity, reorder_level, is_active, created_at, updated_at FROM products ORDER BY product_id";
 
-        var sourceNode = new PostgresSourceNode<Product>(_connectionString, sql, configuration: sourceConfig);
+        var sourceNode = PostgresConnector.Source<Product>(_connectionString, sql);
 
-        var sinkConfig = new PostgresConfiguration
-        {
-            ConnectionString = _connectionString,
-            WriteStrategy = PostgresWriteStrategy.Batch,
-            BatchSize = 50,
-        };
-
-        var sinkNode = new PostgresSinkNode<Product>(_connectionString, "products_copy", configuration: sinkConfig);
+        var sinkNode = PostgresConnector.Sink<Product>(_connectionString, "products_copy", o => o with { BatchSize = 50 });
         var context = new PipelineContext();
 
         var count = 0;
@@ -495,14 +471,7 @@ public sealed class PostgresConnectorPipeline
         }
 
         // Write summaries to database
-        var sinkConfig = new PostgresConfiguration
-        {
-            ConnectionString = _connectionString,
-            WriteStrategy = PostgresWriteStrategy.Batch,
-            BatchSize = 10,
-        };
-
-        var sinkNode = new PostgresSinkNode<OrderSummary>(_connectionString, "order_summaries", configuration: sinkConfig);
+        var sinkNode = PostgresConnector.Sink<OrderSummary>(_connectionString, "order_summaries", o => o with { BatchSize = 10 });
         var context = new PipelineContext();
 
         // Create a data pipe from the list
@@ -554,17 +523,12 @@ public sealed class PostgresConnectorPipeline
     /// </summary>
     private async Task DemonstrateInMemoryCheckpointingAsync(CancellationToken cancellationToken)
     {
-        var config = new PostgresConfiguration
-        {
-            ConnectionString = _connectionString,
-            CheckpointStrategy = CheckpointStrategy.InMemory,
-            StreamResults = true,
-        };
-
         var sql = "SELECT id, name, value, category, created_at FROM checkpoint_test ORDER BY id";
 
+        // In-memory checkpoints belong to the source node, so the same node resumes where it stopped.
+        var source = PostgresConnector.Source<CheckpointTestRecord>(_connectionString, sql, o => o with { CheckpointStrategy = CheckpointStrategy.InMemory });
         var interruptedContext = new PipelineContext();
-        var interruptedSource = new PostgresSourceNode<CheckpointTestRecord>(_connectionString, sql, configuration: config);
+        var interruptedSource = source;
 
         var interruptedCount = 0;
 
@@ -580,7 +544,7 @@ public sealed class PostgresConnectorPipeline
         }
 
         var resumeContext = new PipelineContext();
-        var resumeSource = new PostgresSourceNode<CheckpointTestRecord>(_connectionString, sql, configuration: config);
+        var resumeSource = source;
 
         var resumedCount = 0;
 
@@ -597,24 +561,14 @@ public sealed class PostgresConnectorPipeline
     /// </summary>
     private async Task<long> TestWriteStrategyAsync(string tableName, PostgresWriteStrategy strategy, int batchSize, CancellationToken cancellationToken)
     {
-        var sourceConfig = new PostgresConfiguration
-        {
-            ConnectionString = _connectionString,
-        };
-
         var sql = $"SELECT id, name, value, category, created_at FROM {tableName} ORDER BY id";
-        var sourceNode = new PostgresSourceNode<TestRecord>(_connectionString, sql, configuration: sourceConfig);
+        var sourceNode = PostgresConnector.Source<TestRecord>(_connectionString, sql);
 
-        var sinkConfig = new PostgresConfiguration
+        var sinkNode = PostgresConnector.Sink<TestRecord>(_connectionString, tableName + "_result", o => o with
         {
-            ConnectionString = _connectionString,
             WriteStrategy = strategy,
-            BatchSize = batchSize > 0
-                ? batchSize
-                : 100,
-        };
-
-        var sinkNode = new PostgresSinkNode<TestRecord>(_connectionString, tableName + "_result", strategy, configuration: sinkConfig);
+            BatchSize = batchSize > 0 ? batchSize : 100,
+        });
         var context = new PipelineContext();
 
         var stopwatch = Stopwatch.StartNew();
@@ -636,10 +590,9 @@ public sealed class PostgresConnectorPipeline
     /// <summary>
     ///     Test record for write strategy demonstration.
     /// </summary>
-    [PostgresTable("write_test")]
     private sealed class TestRecord
     {
-        [PostgresColumn("id", PrimaryKey = true)]
+        [PostgresColumn("id")]
         public int Id { get; set; }
 
         [PostgresColumn("name")]

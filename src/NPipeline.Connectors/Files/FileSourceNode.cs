@@ -45,40 +45,18 @@ public sealed class FileReadContext
     /// <param name="exception">Why it failed. A <see cref="FieldMappingException" /> supplies the field.</param>
     /// <param name="rawRecord">The raw record or value, if the format has one; it is truncated to the configured excerpt length.</param>
     /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
-    public async ValueTask HandleRowErrorAsync(long recordNumber, Exception exception, string? rawRecord = null, CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(exception);
-
-        var field = (exception as FieldMappingException)?.Column;
-        var error = new RowError(Source, recordNumber, field, Excerpt(rawRecord), exception);
-        var action = _options.RowErrorHandler?.Invoke(error) ?? RowErrorAction.Fail;
-
-        ConnectorDiagnostics.RecordRowError(_connector, Uri.Scheme.Value, action.ToString().ToLowerInvariant());
-
-        switch (action)
-        {
-            case RowErrorAction.Skip:
-                return;
-            case RowErrorAction.DeadLetter:
-                var failure = new ConnectorRecordFailure(error.Source, error.RecordNumber, error.Field, error.RawExcerpt);
-                await _deadLetters.SendAsync(failure, exception, cancellationToken).ConfigureAwait(false);
-                return;
-            default:
-                throw new RecordMappingException(error);
-        }
-    }
-
-    private string? Excerpt(string? raw)
-    {
-        var length = _options.RawExcerptLength;
-
-        if (raw is null || length == 0)
-            return null;
-
-        return raw.Length <= length
-            ? raw
-            : string.Concat(raw.AsSpan(0, length), "…");
-    }
+    public ValueTask HandleRowErrorAsync(long recordNumber, Exception exception, string? rawRecord = null, CancellationToken cancellationToken = default) =>
+        RowErrorDispatch.HandleAsync(
+            _options.RowErrorHandler,
+            _options.RawExcerptLength,
+            _deadLetters,
+            _connector,
+            Uri.Scheme.Value,
+            Source,
+            recordNumber,
+            exception,
+            rawRecord,
+            cancellationToken);
 }
 
 /// <summary>

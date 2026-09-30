@@ -1,110 +1,33 @@
 using NPipeline.Connectors.MySql.Configuration;
 using NPipeline.Connectors.MySql.Connection;
 using NPipeline.Connectors.MySql.Nodes;
-using NPipeline.StorageProviders.Models;
 
 namespace NPipeline.Connectors.MySql.DependencyInjection;
 
-/// <summary>
-///     Factory interface for creating <see cref="MySqlSinkNode{T}" /> instances with DI support.
-/// </summary>
+/// <summary>Creates MySQL sinks on the registered connection pool.</summary>
 public interface IMySqlSinkNodeFactory
 {
-    /// <summary>Creates a sink node using the default connection.</summary>
-    MySqlSinkNode<T> CreateSinkNode<T>(
-        string tableName,
-        MySqlConfiguration? configuration = null)
-        where T : class;
-
-    /// <summary>Creates a sink node with a custom mapper using the default connection.</summary>
-    MySqlSinkNode<T> CreateSinkNode<T>(
-        string tableName,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper,
-        MySqlConfiguration? configuration = null)
-        where T : class;
-
-    /// <summary>Creates a sink node using a named connection.</summary>
-    MySqlSinkNode<T> CreateSinkNode<T>(
-        string tableName,
-        string? connectionName,
-        MySqlConfiguration? configuration = null)
-        where T : class;
-
-    /// <summary>Creates a sink node using a named connection with a custom mapper.</summary>
-    MySqlSinkNode<T> CreateSinkNode<T>(
-        string tableName,
-        string? connectionName,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper,
-        MySqlConfiguration? configuration = null)
-        where T : class;
+    /// <summary>A sink that writes <typeparamref name="T" />'s readable members to <paramref name="table" />.</summary>
+    /// <param name="table">The table.</param>
+    /// <param name="configure">Adjusts the default options; set <see cref="MySqlWriteOptions.ConnectionName" /> for a named connection.</param>
+    MySqlSinkNode<T> CreateSinkNode<T>(string table, Func<MySqlWriteOptions, MySqlWriteOptions>? configure = null);
 }
 
-/// <summary>
-///     Default implementation of <see cref="IMySqlSinkNodeFactory" />.
-/// </summary>
-public class MySqlSinkNodeFactory : IMySqlSinkNodeFactory
+/// <summary>Creates MySQL sinks on the registered connection pool.</summary>
+/// <param name="connectionPool">The pool.</param>
+public class MySqlSinkNodeFactory(IMySqlConnectionPool connectionPool) : IMySqlSinkNodeFactory
 {
-    private readonly IMySqlConnectionPool _connectionPool;
-
-    /// <summary>Initialises a new <see cref="MySqlSinkNodeFactory" />.</summary>
-    public MySqlSinkNodeFactory(IMySqlConnectionPool connectionPool)
-    {
-        _connectionPool = connectionPool ?? throw new ArgumentNullException(nameof(connectionPool));
-    }
+    private readonly IMySqlConnectionPool _connectionPool = connectionPool ?? throw new ArgumentNullException(nameof(connectionPool));
 
     /// <inheritdoc />
-    public MySqlSinkNode<T> CreateSinkNode<T>(
-        string tableName,
-        MySqlConfiguration? configuration = null)
-        where T : class
+    public MySqlSinkNode<T> CreateSinkNode<T>(string table, Func<MySqlWriteOptions, MySqlWriteOptions>? configure = null)
     {
-        ArgumentNullException.ThrowIfNull(tableName);
-        var config = configuration ?? new MySqlConfiguration();
-        return new MySqlSinkNode<T>(_connectionPool, tableName, config);
-    }
+        var options = new MySqlWriteOptions { ConnectionPool = _connectionPool, Table = table };
+        options = configure is null ? options : configure(options);
 
-    /// <inheritdoc />
-    public MySqlSinkNode<T> CreateSinkNode<T>(
-        string tableName,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper,
-        MySqlConfiguration? configuration = null)
-        where T : class
-    {
-        ArgumentNullException.ThrowIfNull(tableName);
-        var config = configuration ?? new MySqlConfiguration();
-        return new MySqlSinkNode<T>(_connectionPool, tableName, config, customMapper);
-    }
+        if (options.ConnectionName is { Length: > 0 } name && !_connectionPool.HasNamedConnection(name))
+            throw new InvalidOperationException($"Named connection '{name}' not found.");
 
-    /// <inheritdoc />
-    public MySqlSinkNode<T> CreateSinkNode<T>(
-        string tableName,
-        string? connectionName,
-        MySqlConfiguration? configuration = null)
-        where T : class
-    {
-        ArgumentNullException.ThrowIfNull(tableName);
-
-        if (!string.IsNullOrWhiteSpace(connectionName) && !_connectionPool.HasNamedConnection(connectionName))
-            throw new InvalidOperationException($"Named connection '{connectionName}' not found.");
-
-        var config = configuration ?? new MySqlConfiguration();
-        return new MySqlSinkNode<T>(_connectionPool, tableName, config, null, connectionName);
-    }
-
-    /// <inheritdoc />
-    public MySqlSinkNode<T> CreateSinkNode<T>(
-        string tableName,
-        string? connectionName,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper,
-        MySqlConfiguration? configuration = null)
-        where T : class
-    {
-        ArgumentNullException.ThrowIfNull(tableName);
-
-        if (!string.IsNullOrWhiteSpace(connectionName) && !_connectionPool.HasNamedConnection(connectionName))
-            throw new InvalidOperationException($"Named connection '{connectionName}' not found.");
-
-        var config = configuration ?? new MySqlConfiguration();
-        return new MySqlSinkNode<T>(_connectionPool, tableName, config, customMapper, connectionName);
+        return new MySqlSinkNode<T>(options);
     }
 }

@@ -1,10 +1,10 @@
 using Microsoft.Data.SqlClient;
 using NPipeline.Connectors.SqlServer.Configuration;
-using NPipeline.Connectors.SqlServer.Nodes;
+using NPipeline.Connectors.Sql;
+using NPipeline.Connectors.SqlServer;
 using NPipeline.Connectors.SqlServer.Reliability;
 using NPipeline.DataFlow.DataStreams;
 using NPipeline.Pipeline;
-using NPipeline.StorageProviders.Models;
 
 namespace Sample_SqlServerConnector;
 
@@ -271,27 +271,20 @@ public sealed class SqlServerConnectorPipeline
             },
         };
 
-        // Configure sink with PerRow write strategy
-        var configuration = new SqlServerConfiguration
+        // One statement per row, all in one transaction. The CustomerID identity column is left out of the insert.
+        var sinkNode = SqlServerConnector.Sink<Customer>(_connectionString, "Customers", o => o with
         {
-            WriteStrategy = SqlServerWriteStrategy.PerRow,
-            UseTransaction = true,
-            CommandTimeout = 30,
             Schema = "Sales",
-        };
-
-        // Create sink node
-        var sinkNode = new SqlServerSinkNode<Customer>(
-            _connectionString,
-            "Customers",
-            configuration);
+            WriteStrategy = SqlServerWriteStrategy.PerRow,
+            Transaction = SqlTransactionMode.WholeRun,
+        });
 
         Console.WriteLine($"Writing {customers.Count} customers using PerRow strategy...");
 
         // Write customers
         var startTime = DateTime.Now;
         var dataStream = new InMemoryDataStream<Customer>(customers);
-        await sinkNode.ConsumeAsync(dataStream, null!, cancellationToken);
+        await sinkNode.ConsumeAsync(dataStream, PipelineContext.CreateDefault(), cancellationToken);
         var elapsed = DateTime.Now - startTime;
 
         Console.WriteLine($"✓ PerRow write completed in {elapsed.TotalMilliseconds:F2}ms");
@@ -326,35 +319,23 @@ public sealed class SqlServerConnectorPipeline
             });
         }
 
-        // Configure sink with Batch write strategy
-        var configuration = new SqlServerConfiguration
-        {
-            WriteStrategy = SqlServerWriteStrategy.Batch,
-            BatchSize = 10, // Batch every 10 rows
-            UseTransaction = true,
-            CommandTimeout = 30,
-            Schema = "Sales",
-        };
-
-        // Create sink node
-        var sinkNode = new SqlServerSinkNode<Order>(
-            _connectionString,
-            "Orders",
-            configuration);
+        // Multi-row INSERT statements, ten rows per batch; each batch commits in its own transaction.
+        const int batchSize = 10;
+        var sinkNode = SqlServerConnector.Sink<Order>(_connectionString, "Orders", o => o with { Schema = "Sales", BatchSize = batchSize });
 
         Console.WriteLine($"Writing {orders.Count} orders using Batch strategy...");
-        Console.WriteLine($"  - Batch size: {configuration.BatchSize}");
+        Console.WriteLine($"  - Batch size: {batchSize}");
 
         // Write orders
         var startTime = DateTime.Now;
         var dataStream = new InMemoryDataStream<Order>(orders);
-        await sinkNode.ConsumeAsync(dataStream, null!, cancellationToken);
+        await sinkNode.ConsumeAsync(dataStream, PipelineContext.CreateDefault(), cancellationToken);
         var elapsed = DateTime.Now - startTime;
 
         Console.WriteLine($"✓ Batch write completed in {elapsed.TotalMilliseconds:F2}ms");
         Console.WriteLine("  - Strategy: Batch (batched inserts)");
         Console.WriteLine("  - Transaction: Enabled");
-        Console.WriteLine($"  - Batches processed: {Math.Ceiling((double)orders.Count / configuration.BatchSize)}");
+        Console.WriteLine($"  - Batches processed: {Math.Ceiling((double)orders.Count / batchSize)}");
     }
 
     /// <summary>
@@ -366,20 +347,10 @@ public sealed class SqlServerConnectorPipeline
         Console.WriteLine("----------------------------------------------");
 
         // Read customers using attribute-based mapping
-        var sourceConfiguration = new SqlServerConfiguration
-        {
-            StreamResults = true,
-            CommandTimeout = 30,
-        };
-
-        var sourceNode = new SqlServerSourceNode<Customer>(
-            _connectionString,
-            "SELECT * FROM Sales.Customers ORDER BY CustomerID",
-            sourceConfiguration);
+        var sourceNode = SqlServerConnector.Source<Customer>(_connectionString, "SELECT * FROM Sales.Customers ORDER BY CustomerID");
 
         Console.WriteLine("Reading customers with attribute-based mapping...");
-        Console.WriteLine("  - SqlServerTable: Customers (Schema: Sales)");
-        Console.WriteLine("  - SqlServerColumn: CustomerID (PrimaryKey, Identity)");
+        Console.WriteLine("  - SqlServerColumn: CustomerID (Identity)");
         Console.WriteLine("  - SqlServerColumn: FirstName (DbType: NVarChar, Size: 100)");
         Console.WriteLine("  - Column: LastName (common attribute)");
         Console.WriteLine("  - Column: Email (common attribute)");
@@ -390,7 +361,7 @@ public sealed class SqlServerConnectorPipeline
 
         var customers = new List<Customer>();
 
-        await foreach (var customer in sourceNode.OpenStream(null!, cancellationToken))
+        await foreach (var customer in sourceNode.OpenStream(PipelineContext.CreateDefault(), cancellationToken))
         {
             customers.Add(customer);
             Console.WriteLine($"  - Read: {customer.FullName} (ID: {customer.CustomerId}, Email: {customer.Email})");
@@ -418,20 +389,8 @@ public sealed class SqlServerConnectorPipeline
             new() { ProductName = "Desk Chair", Category = "Furniture", Price = 199.99m, StockQuantity = 30 },
         };
 
-        // Configure sink with Batch write strategy
-        var configuration = new SqlServerConfiguration
-        {
-            WriteStrategy = SqlServerWriteStrategy.Batch,
-            BatchSize = 10,
-            UseTransaction = true,
-            Schema = "Sales",
-        };
-
-        // Create sink node (no table attribute, uses convention)
-        var sinkNode = new SqlServerSinkNode<Product>(
-            _connectionString,
-            "Products",
-            configuration);
+        // No attributes: members map to columns of the same name.
+        var sinkNode = SqlServerConnector.Sink<Product>(_connectionString, "Products", o => o with { Schema = "Sales" });
 
         Console.WriteLine("Writing products with convention-based mapping...");
         Console.WriteLine("  - No attributes used on Product class");
@@ -441,17 +400,14 @@ public sealed class SqlServerConnectorPipeline
 
         // Write products
         var dataStream = new InMemoryDataStream<Product>(products);
-        await sinkNode.ConsumeAsync(dataStream, null!, cancellationToken);
+        await sinkNode.ConsumeAsync(dataStream, PipelineContext.CreateDefault(), cancellationToken);
 
         // Read products to verify convention-based mapping
-        var sourceNode = new SqlServerSourceNode<Product>(
-            _connectionString,
-            "SELECT * FROM Sales.Products ORDER BY ProductID",
-            new SqlServerConfiguration());
+        var sourceNode = SqlServerConnector.Source<Product>(_connectionString, "SELECT * FROM Sales.Products ORDER BY ProductID");
 
         var readProducts = new List<Product>();
 
-        await foreach (var product in sourceNode.OpenStream(null!, cancellationToken))
+        await foreach (var product in sourceNode.OpenStream(PipelineContext.CreateDefault(), cancellationToken))
         {
             readProducts.Add(product);
             Console.WriteLine($"  - Read: {product.ProductName} (Category: {product.Category}, Price: ${product.Price:F2}, Stock: {product.StockQuantity})");
@@ -470,16 +426,16 @@ public sealed class SqlServerConnectorPipeline
         Console.WriteLine("Step 6: Demonstrating Custom Mappers");
         Console.WriteLine("---------------------------------------");
 
-        // Create custom mapper function
-        Func<Order, IEnumerable<DatabaseParameter>> customMapper = order =>
-        [
-            new DatabaseParameter("@CustomerID", order.CustomerId),
-            new DatabaseParameter("@OrderDate", order.OrderDate),
-            new DatabaseParameter("@TotalAmount", order.TotalAmount),
-            new DatabaseParameter("@Status", "Custom-" + order.Status), // Custom transformation
-            new DatabaseParameter("@ShippingAddress", order.ShippingAddress ?? "N/A"),
-            new DatabaseParameter("@Notes", "Custom mapper: " + (order.Notes ?? "No notes")),
-        ];
+        // Shape each record before it is written; in a pipeline this is a transform node in front of the sink.
+        static Order Prepare(Order order) => new()
+        {
+            CustomerId = order.CustomerId,
+            OrderDate = order.OrderDate,
+            TotalAmount = order.TotalAmount,
+            Status = "Custom-" + order.Status,
+            ShippingAddress = order.ShippingAddress ?? "N/A",
+            Notes = "Custom mapper: " + (order.Notes ?? "No notes"),
+        };
 
         // Create sample orders with custom mapper
         var orders = new List<Order>
@@ -504,21 +460,7 @@ public sealed class SqlServerConnectorPipeline
             },
         };
 
-        // Configure sink with custom mapper
-        var configuration = new SqlServerConfiguration
-        {
-            WriteStrategy = SqlServerWriteStrategy.Batch,
-            BatchSize = 10,
-            UseTransaction = true,
-            Schema = "Sales",
-        };
-
-        // Create sink node with custom mapper
-        var sinkNode = new SqlServerSinkNode<Order>(
-            _connectionString,
-            "Orders",
-            configuration,
-            customMapper);
+        var sinkNode = SqlServerConnector.Sink<Order>(_connectionString, "Orders", o => o with { Schema = "Sales" });
 
         Console.WriteLine("Writing orders with custom mapper...");
         Console.WriteLine("  - Custom mapper function transforms data before writing");
@@ -527,18 +469,18 @@ public sealed class SqlServerConnectorPipeline
         Console.WriteLine("  - Default shipping address set to 'N/A' if null");
 
         // Write orders with custom mapper
-        var dataStream = new InMemoryDataStream<Order>(orders);
-        await sinkNode.ConsumeAsync(dataStream, null!, cancellationToken);
+        var dataStream = new InMemoryDataStream<Order>(orders.Select(Prepare).ToList());
+        await sinkNode.ConsumeAsync(dataStream, PipelineContext.CreateDefault(), cancellationToken);
 
-        // Read orders to verify custom mapper
-        var sourceNode = new SqlServerSourceNode<Order>(
+        // Read orders back with a manual mapper over SqlRow
+        var sourceNode = SqlServerConnector.Source(
             _connectionString,
-            "SELECT TOP 2 * FROM Sales.Orders ORDER BY OrderID DESC",
-            new SqlServerConfiguration());
+            "SELECT TOP 2 OrderID, Status, Notes FROM Sales.Orders ORDER BY OrderID DESC",
+            row => (Id: row.Get<int>("OrderID"), Status: row.Get<string>("Status"), Notes: row.GetOrDefault<string?>("Notes", null)));
 
-        await foreach (var order in sourceNode.OpenStream(null!, cancellationToken))
+        await foreach (var order in sourceNode.OpenStream(PipelineContext.CreateDefault(), cancellationToken))
         {
-            Console.WriteLine($"  - Read: Order {order.OrderId} (Status: {order.Status}, Notes: {order.Notes})");
+            Console.WriteLine($"  - Read: Order {order.Id} (Status: {order.Status}, Notes: {order.Notes})");
         }
 
         Console.WriteLine("✓ Custom mapper completed successfully");
@@ -554,27 +496,21 @@ public sealed class SqlServerConnectorPipeline
         Console.WriteLine("-------------------------------------------------");
 
         // Read customers and their orders
-        var sourceNode = new SqlServerSourceNode<Customer>(
-            _connectionString,
-            "SELECT * FROM Sales.Customers ORDER BY CustomerID",
-            new SqlServerConfiguration());
+        var sourceNode = SqlServerConnector.Source<Customer>(_connectionString, "SELECT * FROM Sales.Customers ORDER BY CustomerID");
 
         var customers = new List<Customer>();
 
-        await foreach (var customer in sourceNode.OpenStream(null!, cancellationToken))
+        await foreach (var customer in sourceNode.OpenStream(PipelineContext.CreateDefault(), cancellationToken))
         {
             customers.Add(customer);
         }
 
         // Read orders
-        var ordersSourceNode = new SqlServerSourceNode<Order>(
-            _connectionString,
-            "SELECT * FROM Sales.Orders ORDER BY OrderID",
-            new SqlServerConfiguration());
+        var ordersSourceNode = SqlServerConnector.Source<Order>(_connectionString, "SELECT * FROM Sales.Orders ORDER BY OrderID");
 
         var orders = new List<Order>();
 
-        await foreach (var order in ordersSourceNode.OpenStream(null!, cancellationToken))
+        await foreach (var order in ordersSourceNode.OpenStream(PipelineContext.CreateDefault(), cancellationToken))
         {
             orders.Add(order);
         }
@@ -631,21 +567,10 @@ public sealed class SqlServerConnectorPipeline
         }).ToList();
 
         // Write enriched customers
-        var configuration = new SqlServerConfiguration
-        {
-            WriteStrategy = SqlServerWriteStrategy.Batch,
-            BatchSize = 10,
-            UseTransaction = true,
-            Schema = "Analytics",
-        };
-
-        var sinkNode = new SqlServerSinkNode<EnrichedCustomer>(
-            _connectionString,
-            "EnrichedCustomers",
-            configuration);
+        var sinkNode = SqlServerConnector.Sink<EnrichedCustomer>(_connectionString, "EnrichedCustomers", o => o with { Schema = "Analytics" });
 
         var dataStream = new InMemoryDataStream<EnrichedCustomer>(enrichedCustomers);
-        await sinkNode.ConsumeAsync(dataStream, null!, cancellationToken);
+        await sinkNode.ConsumeAsync(dataStream, PipelineContext.CreateDefault(), cancellationToken);
 
         // Display enriched customers
         foreach (var enriched in enrichedCustomers)
@@ -673,62 +598,48 @@ public sealed class SqlServerConnectorPipeline
             new() { CustomerId = 2, OrderDate = DateTime.Now, TotalAmount = 300.00m, Status = "Test" },
         };
 
-        // Configure sink with error handling
-        var configuration = new SqlServerConfiguration
+        // Each batch (here one row) is its own transaction; transient errors are retried, a foreign key violation is not.
+        var sinkNode = SqlServerConnector.Sink<Order>(_connectionString, "Orders", o => o with
         {
-            WriteStrategy = SqlServerWriteStrategy.PerRow,
-            UseTransaction = false, // Disable transaction to allow partial success
-            Resilience = SqlServerConnectorResilience.Default, // Four attempts for transient errors; a foreign key violation is not retried
-            ContinueOnError = false, // Stop on first error
             Schema = "Sales",
-        };
-
-        var sinkNode = new SqlServerSinkNode<Order>(
-            _connectionString,
-            "Orders",
-            configuration);
+            WriteStrategy = SqlServerWriteStrategy.PerRow,
+            BatchSize = 1,
+            Resilience = SqlServerConnectorResilience.Default,
+        });
 
         Console.WriteLine("Attempting to write orders with error handling...");
         Console.WriteLine("  - Order 1: Valid customer ID (1)");
         Console.WriteLine("  - Order 2: Invalid customer ID (999) - will fail");
         Console.WriteLine("  - Order 3: Valid customer ID (2)");
-        Console.WriteLine("  - ContinueOnError: false (stop on first error)");
-        Console.WriteLine("  - Resilience: SqlServerConnectorResilience.Default (four attempts, transient errors only)");
+        Console.WriteLine("  - Transaction: PerBatch, so order 1 stays written when order 2 fails");
 
         try
         {
             var dataStream = new InMemoryDataStream<Order>(orders);
-            await sinkNode.ConsumeAsync(dataStream, null!, cancellationToken);
+            await sinkNode.ConsumeAsync(dataStream, PipelineContext.CreateDefault(), cancellationToken);
             Console.WriteLine("✓ All orders written successfully (unexpected)");
         }
         catch (Exception ex)
         {
             Console.WriteLine($"✓ Error handling demonstrated: {ex.Message}");
-            Console.WriteLine("  - The pipeline stopped on the first error as configured");
+            Console.WriteLine("  - The write stopped at the failed batch; set FailedBatches = DeadLetter in a pipeline to route it aside instead");
         }
 
-        // Demonstrate ContinueOnError = true
-        configuration.ContinueOnError = true;
-
-        sinkNode = new SqlServerSinkNode<Order>(
-            _connectionString,
-            "Orders",
-            configuration);
+        // With a whole-run transaction, the failure undoes every row.
+        sinkNode = SqlServerConnector.Sink<Order>(_connectionString, "Orders", o => o with { Schema = "Sales", Transaction = SqlTransactionMode.WholeRun });
 
         Console.WriteLine();
-        Console.WriteLine("Retrying with ContinueOnError = true...");
-        Console.WriteLine("  - This will skip the invalid order and continue");
+        Console.WriteLine("Retrying with Transaction = WholeRun...");
+        Console.WriteLine("  - The invalid order rolls back the valid ones too");
 
         try
         {
             var dataStream = new InMemoryDataStream<Order>(orders);
-            await sinkNode.ConsumeAsync(dataStream, null!, cancellationToken);
-            Console.WriteLine("✓ Error handling with ContinueOnError completed");
-            Console.WriteLine("  - Valid orders were written despite the invalid order");
+            await sinkNode.ConsumeAsync(dataStream, PipelineContext.CreateDefault(), cancellationToken);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"✓ Error: {ex.Message}");
+            Console.WriteLine($"✓ Nothing was written: {ex.Message}");
         }
 
         Console.WriteLine("✓ Error handling demonstration completed");

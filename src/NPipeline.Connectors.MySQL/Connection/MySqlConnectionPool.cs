@@ -1,7 +1,5 @@
 using MySqlConnector;
 using NPipeline.Connectors.MySql.Configuration;
-using NPipeline.Connectors.MySql.Exceptions;
-using MySqlException = MySqlConnector.MySqlException;
 
 namespace NPipeline.Connectors.MySql.Connection;
 
@@ -19,7 +17,7 @@ internal sealed class MySqlConnectionPool : IMySqlConnectionPool
     /// </summary>
     public MySqlConnectionPool(string connectionString)
     {
-        ConnectionString = BuildConnectionString(connectionString, null);
+        ConnectionString = connectionString;
         _namedConnectionStrings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     }
 
@@ -31,23 +29,21 @@ internal sealed class MySqlConnectionPool : IMySqlConnectionPool
         ConnectionString = null;
 
         _namedConnectionStrings = namedConnections
-            .ToDictionary(kvp => kvp.Key, kvp => BuildConnectionString(kvp.Value, null),
+            .ToDictionary(kvp => kvp.Key, kvp => kvp.Value,
                 StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>
     ///     Creates a pool from a <see cref="MySqlOptions" /> instance, injecting configuration overrides.
     /// </summary>
-    public MySqlConnectionPool(MySqlOptions options, MySqlConfiguration? configuration = null)
+    public MySqlConnectionPool(MySqlOptions options)
     {
-        ConnectionString = options.DefaultConnectionString is not null
-            ? BuildConnectionString(options.DefaultConnectionString, configuration)
-            : null;
+        ConnectionString = string.IsNullOrWhiteSpace(options.DefaultConnectionString) ? null : options.DefaultConnectionString;
 
         _namedConnectionStrings = options.NamedConnections
             .ToDictionary(
                 kvp => kvp.Key,
-                kvp => BuildConnectionString(kvp.Value, configuration),
+                kvp => kvp.Value,
                 StringComparer.OrdinalIgnoreCase);
     }
 
@@ -61,8 +57,7 @@ internal sealed class MySqlConnectionPool : IMySqlConnectionPool
 
         if (ConnectionString is null)
         {
-            throw new MySqlConnectionException(
-                "No default connection string is configured. Use a named connection instead.");
+            throw new InvalidOperationException("No default connection string is configured. Use a named connection instead.");
         }
 
         var connection = new MySqlConnection(ConnectionString);
@@ -78,8 +73,7 @@ internal sealed class MySqlConnectionPool : IMySqlConnectionPool
 
         if (!_namedConnectionStrings.TryGetValue(name, out var cs))
         {
-            throw new MySqlConnectionException(
-                $"No connection with name '{name}' is configured.");
+            throw new InvalidOperationException($"No connection with name '{name}' is configured.");
         }
 
         var connection = new MySqlConnection(cs);
@@ -112,51 +106,11 @@ internal sealed class MySqlConnectionPool : IMySqlConnectionPool
         {
             await connection.OpenAsync(ct).ConfigureAwait(false);
         }
-        catch (MySqlException ex)
+        catch
         {
-            await connection.DisposeAsync().ConfigureAwait(false);
-
-            throw MySqlExceptionFactory.CreateConnection(
-                "Failed to open a MySQL connection.", ex);
-        }
-        catch (OperationCanceledException)
-        {
+            // The driver's exception is rethrown as it is, so the resilience classifier can judge it.
             await connection.DisposeAsync().ConfigureAwait(false);
             throw;
         }
-    }
-
-    /// <summary>
-    ///     Builds a connection string by overlaying <see cref="MySqlConfiguration" /> settings
-    ///     on top of the raw connection string supplied by the user.
-    /// </summary>
-    private static string BuildConnectionString(string rawConnectionString,
-        MySqlConfiguration? cfg)
-    {
-        var builder = new MySqlConnectionStringBuilder(rawConnectionString);
-
-        if (cfg is null)
-            return builder.ConnectionString;
-
-        if (!string.IsNullOrWhiteSpace(cfg.DefaultDatabase))
-            builder.Database = cfg.DefaultDatabase;
-
-        if (!string.IsNullOrWhiteSpace(cfg.CharacterSet))
-            builder.CharacterSet = cfg.CharacterSet;
-
-        if (cfg.ConnectionTimeout > 0)
-            builder.ConnectionTimeout = (uint)cfg.ConnectionTimeout;
-
-        if (cfg.MinPoolSize > 0)
-            builder.MinimumPoolSize = (uint)cfg.MinPoolSize;
-
-        if (cfg.MaxPoolSize > 0)
-            builder.MaximumPoolSize = (uint)cfg.MaxPoolSize;
-
-        builder.AllowUserVariables = cfg.AllowUserVariables;
-        builder.ConvertZeroDateTime = cfg.ConvertZeroDateTime;
-        builder.AllowLoadLocalInfile = cfg.AllowLoadLocalInfile;
-
-        return builder.ConnectionString;
     }
 }

@@ -46,7 +46,13 @@ public static class PostgresTransientErrorDetector
     /// </summary>
     /// <param name="sqlState">The PostgreSQL SQL state code.</param>
     /// <returns>True if SQL state is transient; otherwise, false.</returns>
-    public static bool IsTransientSqlState(string sqlState) => !string.IsNullOrWhiteSpace(sqlState) && TransientErrorCodes.Contains(sqlState);
+    public static bool IsTransientSqlState(string sqlState) =>
+        !string.IsNullOrWhiteSpace(sqlState)
+        && (TransientErrorCodes.Contains(sqlState)
+
+            // Class 08 (connection exceptions) and class 53 (insufficient resources) are transient as a whole.
+            || sqlState.StartsWith("08", StringComparison.Ordinal)
+            || sqlState.StartsWith("53", StringComparison.Ordinal));
 
     /// <summary>
     ///     Determines if a SQL state code means the server is refusing work until load drops, so the client should back off

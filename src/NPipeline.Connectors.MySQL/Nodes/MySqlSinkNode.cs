@@ -1,212 +1,73 @@
-using NPipeline.Connectors.Configuration;
+using System.Data.Common;
+using MySqlConnector;
+using NPipeline.Connectors.Sql;
 using NPipeline.Connectors.MySql.Configuration;
-using NPipeline.Connectors.MySql.Connection;
 using NPipeline.Connectors.MySql.Writers;
-using NPipeline.Connectors.Nodes;
-using NPipeline.StorageProviders;
 using NPipeline.StorageProviders.Abstractions;
-using NPipeline.StorageProviders.Models;
-using NPipeline.StorageProviders.Utilities;
 
 namespace NPipeline.Connectors.MySql.Nodes;
 
 /// <summary>
-///     MySQL sink node for writing data to a MySQL database table.
+///     Writes records to a MySQL table: with multi-row statements, one statement per row, or a bulk load, as
+///     <see cref="MySqlWriteOptions.WriteStrategy" /> says. Create one with <see cref="MySqlNodes" />.
 /// </summary>
-/// <typeparam name="T">The type of objects consumed by the sink.</typeparam>
-public class MySqlSinkNode<T> : DatabaseSinkNode<T>, IAsyncDisposable
+/// <remarks>
+///     Members marked <c>[MySqlColumn(AutoIncrement = true)]</c> are read but not written. Upserts use
+///     <c>INSERT … ON DUPLICATE KEY UPDATE</c>, which matches on the table's primary key and unique indexes.
+/// </remarks>
+/// <typeparam name="T">The record type.</typeparam>
+public sealed class MySqlSinkNode<T> : SqlSinkNode<T>
 {
-    private static readonly Lazy<IStorageResolver> DefaultResolver = new(
-        () => MySqlStorageResolverFactory.CreateResolver(),
-        LazyThreadSafetyMode.ExecutionAndPublication);
+    private static readonly Lazy<IStorageResolver> Resolver = new(MySqlStorageResolverFactory.CreateResolver);
 
-    private readonly MySqlConfiguration _configuration;
-    private readonly string? _connectionName;
-    private readonly IMySqlConnectionPool? _connectionPool;
-    private readonly bool _ownsConnectionPool;
-    private readonly Func<T, IEnumerable<DatabaseParameter>>? _parameterMapper;
-    private readonly IStorageProvider? _storageProvider;
-    private readonly IStorageResolver? _storageResolver;
-    private readonly StorageUri? _storageUri;
-    private readonly string _tableName;
-    private readonly MySqlWriteStrategy _writeStrategy;
+    private readonly MySqlWriteOptions _options;
 
-    /// <summary>
-    ///     Initialises a <see cref="MySqlSinkNode{T}" /> from a connection string.
-    /// </summary>
-    public MySqlSinkNode(
-        string connectionString,
-        string tableName,
-        MySqlConfiguration? configuration = null,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper = null)
+    /// <summary>Creates a sink that writes <typeparamref name="T" />'s readable members as columns.</summary>
+    /// <exception cref="NotSupportedException">A member is not a single value.</exception>
+    public MySqlSinkNode(MySqlWriteOptions options)
+        : base(options, MySqlDialect.Instance, MySqlShape.Write((options ?? throw new ArgumentNullException(nameof(options))).Naming))
     {
-        ArgumentNullException.ThrowIfNull(connectionString);
-        ArgumentNullException.ThrowIfNull(tableName);
-
-        _configuration = configuration ?? new MySqlConfiguration();
-        _configuration.Validate();
-        _connectionPool = new MySqlConnectionPool(connectionString);
-        _ownsConnectionPool = true;
-        _tableName = tableName;
-        _writeStrategy = _configuration.WriteStrategy;
-        _parameterMapper = customMapper;
-        _connectionName = null;
-
-        if (_configuration.ValidateIdentifiers)
-            DatabaseIdentifierValidator.ValidateIdentifier(_tableName, nameof(_tableName));
-    }
-
-    /// <summary>
-    ///     Initialises a <see cref="MySqlSinkNode{T}" /> from a shared connection pool.
-    /// </summary>
-    public MySqlSinkNode(
-        IMySqlConnectionPool connectionPool,
-        string tableName,
-        MySqlConfiguration? configuration = null,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper = null,
-        string? connectionName = null)
-    {
-        ArgumentNullException.ThrowIfNull(connectionPool);
-        ArgumentNullException.ThrowIfNull(tableName);
-
-        _configuration = configuration ?? new MySqlConfiguration();
-        _configuration.Validate();
-        _connectionPool = connectionPool;
-        _tableName = tableName;
-        _writeStrategy = _configuration.WriteStrategy;
-        _parameterMapper = customMapper;
-
-        _connectionName = string.IsNullOrWhiteSpace(connectionName)
-            ? null
-            : connectionName;
-
-        if (_configuration.ValidateIdentifiers)
-            DatabaseIdentifierValidator.ValidateIdentifier(_tableName, nameof(_tableName));
-    }
-
-    /// <summary>
-    ///     Initialises a <see cref="MySqlSinkNode{T}" /> from a <see cref="StorageUri" />.
-    /// </summary>
-    public MySqlSinkNode(
-        StorageUri uri,
-        string tableName,
-        MySqlWriteStrategy writeStrategy = MySqlWriteStrategy.Batch,
-        IStorageResolver? resolver = null,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper = null,
-        MySqlConfiguration? configuration = null)
-    {
-        ArgumentNullException.ThrowIfNull(uri);
-        ArgumentNullException.ThrowIfNull(tableName);
-
-        _storageUri = uri;
-        _storageResolver = resolver;
-        _tableName = tableName;
-        _writeStrategy = writeStrategy;
-        _parameterMapper = customMapper;
-        _configuration = configuration ?? new MySqlConfiguration();
-        _configuration.Validate();
-        _connectionName = null;
-
-        if (_configuration.ValidateIdentifiers)
-            DatabaseIdentifierValidator.ValidateIdentifier(_tableName, nameof(_tableName));
-    }
-
-    /// <summary>
-    ///     Initialises a <see cref="MySqlSinkNode{T}" /> from an explicit <see cref="IStorageProvider" /> and
-    ///     <see cref="StorageUri" />.
-    /// </summary>
-    public MySqlSinkNode(
-        IStorageProvider provider,
-        StorageUri uri,
-        string tableName,
-        MySqlWriteStrategy writeStrategy = MySqlWriteStrategy.Batch,
-        Func<T, IEnumerable<DatabaseParameter>>? customMapper = null,
-        MySqlConfiguration? configuration = null)
-    {
-        ArgumentNullException.ThrowIfNull(provider);
-        ArgumentNullException.ThrowIfNull(uri);
-        ArgumentNullException.ThrowIfNull(tableName);
-
-        _storageProvider = provider;
-        _storageUri = uri;
-        _tableName = tableName;
-        _writeStrategy = writeStrategy;
-        _parameterMapper = customMapper;
-        _configuration = configuration ?? new MySqlConfiguration();
-        _configuration.Validate();
-        _connectionName = null;
-
-        if (_configuration.ValidateIdentifiers)
-            DatabaseIdentifierValidator.ValidateIdentifier(_tableName, nameof(_tableName));
+        _options = options;
     }
 
     /// <inheritdoc />
-    protected override bool UseTransaction => _configuration.UseTransaction;
+    protected override IStorageResolver DefaultResolver => Resolver.Value;
 
     /// <inheritdoc />
-    protected override int BatchSize => _configuration.BatchSize;
+    protected override DbConnection CreateConnection(string connectionString) => new MySqlConnection(connectionString);
 
     /// <inheritdoc />
-    protected override DeliverySemantic DeliverySemantic => _configuration.DeliverySemantic;
+    protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken) =>
+        _options.ConnectionPool is { } pool
+            ? _options.ConnectionName is { Length: > 0 } name
+                ? await pool.GetConnectionAsync(name, cancellationToken).ConfigureAwait(false)
+                : await pool.GetConnectionAsync(cancellationToken).ConfigureAwait(false)
+            : await base.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
-    protected override CheckpointStrategy CheckpointStrategy => _configuration.CheckpointStrategy;
-
-    /// <inheritdoc />
-    protected override bool ContinueOnError => _configuration.ContinueOnError;
-
-    /// <summary>
-    ///     Disposes the connection pool, but only when this node created it: an injected pool belongs to its caller.
-    /// </summary>
-    public async ValueTask DisposeAsync()
+    protected override SqlWriter<T> CreateWriter() => _options.WriteStrategy switch
     {
-        GC.SuppressFinalize(this);
-
-        if (_ownsConnectionPool && _connectionPool is not null)
-            await _connectionPool.DisposeAsync().ConfigureAwait(false);
-    }
+        MySqlWriteStrategy.PerRow => new SqlPerRowWriter<T>(Target),
+        MySqlWriteStrategy.BulkLoad => new MySqlBulkLoadWriter<T>(Target),
+        _ => new SqlBatchWriter<T>(Target),
+    };
 
     /// <inheritdoc />
-    protected override async Task<IDatabaseConnection> GetConnectionAsync(
-        CancellationToken cancellationToken)
+    protected override async Task ExecuteAsync(DbConnection connection, Func<CancellationToken, Task> write, CancellationToken cancellationToken)
     {
-        if (_storageUri is not null)
+        var attempt = 0;
+
+        _ = await _options.Resilience.RunAsync(async ct =>
         {
-            var provider = _storageProvider ?? StorageProviderFactory.GetProviderOrThrow(
-                _storageResolver ?? DefaultResolver.Value,
-                _storageUri);
+            // A connection-level failure closes the connection; reopen it so the retry has somewhere to run.
+            if (attempt++ > 0 && connection.State != System.Data.ConnectionState.Open)
+            {
+                await connection.CloseAsync().ConfigureAwait(false);
+                await connection.OpenAsync(ct).ConfigureAwait(false);
+            }
 
-            if (provider is IDatabaseStorageProvider db)
-                return await db.GetConnectionAsync(_storageUri, cancellationToken).ConfigureAwait(false);
-
-            throw new InvalidOperationException(
-                $"Storage provider must implement {nameof(IDatabaseStorageProvider)} to use StorageUri.");
-        }
-
-        var connection = _connectionName is { Length: > 0 }
-            ? await _connectionPool!.GetConnectionAsync(_connectionName, cancellationToken).ConfigureAwait(false)
-            : await _connectionPool!.GetConnectionAsync(cancellationToken).ConfigureAwait(false);
-
-        return new MySqlDatabaseConnection(connection);
-    }
-
-    /// <inheritdoc />
-    protected override Task<IDatabaseWriter<T>> CreateWriterAsync(
-        IDatabaseConnection connection,
-        CancellationToken cancellationToken)
-    {
-        IDatabaseWriter<T> writer = _writeStrategy switch
-        {
-            MySqlWriteStrategy.PerRow =>
-                new MySqlPerRowWriter<T>(connection, _tableName, _parameterMapper, _configuration),
-            MySqlWriteStrategy.Batch =>
-                new MySqlBatchWriter<T>(connection, _tableName, _parameterMapper, _configuration),
-            MySqlWriteStrategy.BulkLoad =>
-                new MySqlBulkLoadWriter<T>(connection, _tableName, _parameterMapper, _configuration),
-            _ => throw new NotSupportedException(
-                $"Write strategy '{_writeStrategy}' is not supported."),
-        };
-
-        return Task.FromResult(writer);
+            await write(ct).ConfigureAwait(false);
+            return true;
+        }, cancellationToken).ConfigureAwait(false);
     }
 }

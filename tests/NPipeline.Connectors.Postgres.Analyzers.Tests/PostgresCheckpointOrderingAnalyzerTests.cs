@@ -1,433 +1,139 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Diagnostics;
 using NPipeline.Connectors.Configuration;
-using NPipeline.Connectors.Postgres.Nodes;
+using NPipeline.Connectors.Sql;
 using NPipeline.Nodes;
 
 namespace NPipeline.Connectors.Postgres.Analyzers.Tests;
 
-/// <summary>
-///     Tests for PostgresCheckpointOrderingAnalyzer.
-/// </summary>
 public sealed class PostgresCheckpointOrderingAnalyzerTests
 {
-    [Fact]
-    public void ShouldDetectMissingOrderByWithCheckpointingEnabled()
-    {
-        var code = """
-                   using NPipeline.Connectors.Postgres.Configuration;
-                   using NPipeline.Connectors.Postgres.Nodes;
-                   using NPipeline.Connectors.Configuration;
+    private const string Usings = """
+                                  using NPipeline.Connectors.Postgres;
+                                  using NPipeline.Connectors.Postgres.Configuration;
+                                  using NPipeline.Connectors.Postgres.DependencyInjection;
+                                  using NPipeline.Connectors.Configuration;
 
-                   public class TestPipeline
-                   {
-                       public void CreateSource()
-                       {
-                           var source = new PostgresSourceNode<MyRecord>(
-                               "Host=localhost;Database=test",
-                               "SELECT id, name FROM my_table",
-                               configuration: new PostgresConfiguration
+                                  public class MyRecord { public int Id { get; set; } }
+
+                                  """;
+
+    [Theory]
+    [InlineData("Offset")]
+    [InlineData("InMemory")]
+    public void Warns_when_a_checkpointing_factory_source_has_no_order_by(string strategy) =>
+        Assert.True(Warns($$"""
+                            public class P
+                            {
+                                public void Create() =>
+                                    PostgresConnector.Source<MyRecord>("cs", "SELECT id FROM t", o => o with { CheckpointStrategy = CheckpointStrategy.{{strategy}} });
+                            }
+                            """));
+
+    [Fact]
+    public void Does_not_warn_with_an_order_by_in_any_case()
+    {
+        Assert.False(Warns("""
+                           public class P
+                           {
+                               public void Create() =>
+                                   PostgresConnector.Source<MyRecord>("cs", "SELECT id FROM t order  by id", o => o with { CheckpointStrategy = CheckpointStrategy.Offset });
+                           }
+                           """));
+    }
+
+    [Fact]
+    public void Does_not_warn_without_checkpointing()
+    {
+        Assert.False(Warns("""
+                           public class P
+                           {
+                               public void Create()
                                {
-                                   CheckpointStrategy = CheckpointStrategy.Offset
+                                   PostgresConnector.Source<MyRecord>("cs", "SELECT id FROM t");
+                                   PostgresConnector.Source<MyRecord>("cs", "SELECT id FROM t", o => o with { CheckpointStrategy = CheckpointStrategy.None });
                                }
-                           );
-                       }
-                   }
-
-                   public class MyRecord { public int Id { get; set; } public string Name { get; set; } }
-                   """;
-
-        var diagnostics = GetDiagnostics(code);
-
-        var hasDiagnostic = diagnostics.Any(d => d.Id == PostgresCheckpointOrderingAnalyzer.PostgresCheckpointOrderingId);
-        Assert.True(hasDiagnostic, "Analyzer should detect missing ORDER BY clause with checkpointing enabled");
+                           }
+                           """));
     }
 
     [Fact]
-    public void ShouldNotTriggerWhenCheckpointingIsDisabled()
+    public void Resolves_a_constant_query()
     {
-        var code = """
-                   using NPipeline.Connectors.Postgres.Configuration;
-                   using NPipeline.Connectors.Postgres.Nodes;
-                   using NPipeline.Connectors.Configuration;
+        Assert.True(Warns("""
+                          public class P
+                          {
+                              private const string Query = "SELECT id FROM t";
 
-                   public class TestPipeline
-                   {
-                       public void CreateSource()
-                       {
-                           var source = new PostgresSourceNode<MyRecord>(
-                               "Host=localhost;Database=test",
-                               "SELECT id, name FROM my_table",
-                               configuration: new PostgresConfiguration
-                               {
-                                   CheckpointStrategy = CheckpointStrategy.None
-                               }
-                           );
-                       }
-                   }
-
-                   public class MyRecord { public int Id { get; set; } public string Name { get; set; } }
-                   """;
-
-        var diagnostics = GetDiagnostics(code);
-
-        var hasDiagnostic = diagnostics.Any(d => d.Id == PostgresCheckpointOrderingAnalyzer.PostgresCheckpointOrderingId);
-        Assert.False(hasDiagnostic, "Analyzer should not trigger when checkpointing is disabled");
+                              public void Create() =>
+                                  PostgresConnector.Source<MyRecord>("cs", Query, o => o with { CheckpointStrategy = CheckpointStrategy.Offset });
+                          }
+                          """));
     }
 
     [Fact]
-    public void ShouldNotTriggerWhenOrderByIsPresent()
+    public void Skips_interpolated_queries()
     {
-        var code = """
-                   using NPipeline.Connectors.Postgres.Configuration;
-                   using NPipeline.Connectors.Postgres.Nodes;
-                   using NPipeline.Connectors.Configuration;
-
-                   public class TestPipeline
-                   {
-                       public void CreateSource()
-                       {
-                           var source = new PostgresSourceNode<MyRecord>(
-                               "Host=localhost;Database=test",
-                               "SELECT id, name FROM my_table ORDER BY id",
-                               configuration: new PostgresConfiguration
-                               {
-                                   CheckpointStrategy = CheckpointStrategy.Offset
-                               }
-                           );
-                       }
-                   }
-
-                   public class MyRecord { public int Id { get; set; } public string Name { get; set; } }
-                   """;
-
-        var diagnostics = GetDiagnostics(code);
-
-        var hasDiagnostic = diagnostics.Any(d => d.Id == PostgresCheckpointOrderingAnalyzer.PostgresCheckpointOrderingId);
-        Assert.False(hasDiagnostic, "Analyzer should not trigger when ORDER BY clause is present");
+        Assert.False(Warns("""
+                           public class P
+                           {
+                               public void Create(string table) =>
+                                   PostgresConnector.Source<MyRecord>("cs", $"SELECT id FROM {table}", o => o with { CheckpointStrategy = CheckpointStrategy.Offset });
+                           }
+                           """));
     }
 
     [Fact]
-    public void ShouldNotTriggerForInMemoryCheckpointing()
+    public void Warns_for_options_built_directly()
     {
-        var code = """
-                   using NPipeline.Connectors.Postgres.Configuration;
-                   using NPipeline.Connectors.Postgres.Nodes;
-                   using NPipeline.Connectors.Configuration;
-
-                   public class TestPipeline
-                   {
-                       public void CreateSource()
-                       {
-                           var source = new PostgresSourceNode<MyRecord>(
-                               "Host=localhost;Database=test",
-                               "SELECT id, name FROM my_table",
-                               configuration: new PostgresConfiguration
-                               {
-                                   CheckpointStrategy = CheckpointStrategy.InMemory
-                               }
-                           );
-                       }
-                   }
-
-                   public class MyRecord { public int Id { get; set; } public string Name { get; set; } }
-                   """;
-
-        var diagnostics = GetDiagnostics(code);
-
-        var hasDiagnostic = diagnostics.Any(d => d.Id == PostgresCheckpointOrderingAnalyzer.PostgresCheckpointOrderingId);
-        Assert.False(hasDiagnostic, "Analyzer should not trigger for InMemory checkpointing");
+        Assert.True(Warns("""
+                          public class P
+                          {
+                              public void Create() =>
+                                  _ = new PostgresReadOptions { ConnectionString = "cs", Query = "SELECT id FROM t", CheckpointStrategy = CheckpointStrategy.Offset };
+                          }
+                          """));
     }
 
     [Fact]
-    public void ShouldDetectMissingOrderByWithKeyBasedCheckpointing()
+    public void Warns_for_the_dependency_injection_factory()
     {
-        var code = """
-                   using NPipeline.Connectors.Postgres.Configuration;
-                   using NPipeline.Connectors.Postgres.Nodes;
-                   using NPipeline.Connectors.Configuration;
-
-                   public class TestPipeline
-                   {
-                       public void CreateSource()
-                       {
-                           var source = new PostgresSourceNode<MyRecord>(
-                               "Host=localhost;Database=test",
-                               "SELECT id, name FROM my_table",
-                               configuration: new PostgresConfiguration
-                               {
-                                   CheckpointStrategy = CheckpointStrategy.KeyBased
-                               }
-                           );
-                       }
-                   }
-
-                   public class MyRecord { public int Id { get; set; } public string Name { get; set; } }
-                   """;
-
-        var diagnostics = GetDiagnostics(code);
-
-        var hasDiagnostic = diagnostics.Any(d => d.Id == PostgresCheckpointOrderingAnalyzer.PostgresCheckpointOrderingId);
-        Assert.True(hasDiagnostic, "Analyzer should detect missing ORDER BY with KeyBased checkpointing");
+        Assert.True(Warns("""
+                          public class P
+                          {
+                              public void Create(IPostgresSourceNodeFactory factory) =>
+                                  factory.CreateSourceNode<MyRecord>("SELECT id FROM t", o => o with { CheckpointStrategy = CheckpointStrategy.InMemory });
+                          }
+                          """));
     }
 
     [Fact]
-    public void ShouldDetectMissingOrderByWithCursorCheckpointing()
+    public void Has_the_documented_id() => Assert.Equal("NP9501", PostgresCheckpointOrderingAnalyzer.PostgresCheckpointOrderingId);
+
+    private static bool Warns(string code) =>
+        Diagnostics(Usings + code).Any(d => d.Id == PostgresCheckpointOrderingAnalyzer.PostgresCheckpointOrderingId);
+
+    private static IEnumerable<Diagnostic> Diagnostics(string code)
     {
-        var code = """
-                   using NPipeline.Connectors.Postgres.Configuration;
-                   using NPipeline.Connectors.Postgres.Nodes;
-                   using NPipeline.Connectors.Configuration;
+        var runtime = Path.GetDirectoryName(typeof(object).Assembly.Location)!;
 
-                   public class TestPipeline
-                   {
-                       public void CreateSource()
-                       {
-                           var source = new PostgresSourceNode<MyRecord>(
-                               "Host=localhost;Database=test",
-                               "SELECT id, name FROM my_table",
-                               configuration: new PostgresConfiguration
-                               {
-                                   CheckpointStrategy = CheckpointStrategy.Cursor
-                               }
-                           );
-                       }
-                   }
-
-                   public class MyRecord { public int Id { get; set; } public string Name { get; set; } }
-                   """;
-
-        var diagnostics = GetDiagnostics(code);
-
-        var hasDiagnostic = diagnostics.Any(d => d.Id == PostgresCheckpointOrderingAnalyzer.PostgresCheckpointOrderingId);
-        Assert.True(hasDiagnostic, "Analyzer should detect missing ORDER BY with Cursor checkpointing");
-    }
-
-    [Fact]
-    public void ShouldNotTriggerForInterpolatedStrings()
-    {
-        var code = """
-                   using NPipeline.Connectors.Postgres.Configuration;
-                   using NPipeline.Connectors.Postgres.Nodes;
-                   using NPipeline.Connectors.Configuration;
-
-                   public class TestPipeline
-                   {
-                       public void CreateSource(string tableName)
-                       {
-                           var source = new PostgresSourceNode<MyRecord>(
-                               "Host=localhost;Database=test",
-                               $"SELECT id, name FROM {tableName}",
-                               configuration: new PostgresConfiguration
-                               {
-                                   CheckpointStrategy = CheckpointStrategy.Offset
-                               }
-                           );
-                       }
-                   }
-
-                   public class MyRecord { public int Id { get; set; } public string Name { get; set; } }
-                   """;
-
-        var diagnostics = GetDiagnostics(code);
-
-        var hasDiagnostic = diagnostics.Any(d => d.Id == PostgresCheckpointOrderingAnalyzer.PostgresCheckpointOrderingId);
-        Assert.False(hasDiagnostic, "Analyzer should not trigger for interpolated strings (cannot analyze)");
-    }
-
-    [Fact]
-    public void ShouldNotTriggerWhenConfigurationIsNull()
-    {
-        var code = """
-                   using NPipeline.Connectors.Postgres.Nodes;
-
-                   public class TestPipeline
-                   {
-                       public void CreateSource()
-                       {
-                           var source = new PostgresSourceNode<MyRecord>(
-                               "Host=localhost;Database=test",
-                               "SELECT id, name FROM my_table",
-                               configuration: null
-                           );
-                       }
-                   }
-
-                   public class MyRecord { public int Id { get; set; } public string Name { get; set; } }
-                   """;
-
-        var diagnostics = GetDiagnostics(code);
-
-        var hasDiagnostic = diagnostics.Any(d => d.Id == PostgresCheckpointOrderingAnalyzer.PostgresCheckpointOrderingId);
-        Assert.False(hasDiagnostic, "Analyzer should not trigger when configuration is null");
-    }
-
-    [Fact]
-    public void ShouldDetectOrderByInCaseInsensitiveManner()
-    {
-        var code = """
-                   using NPipeline.Connectors.Postgres.Configuration;
-                   using NPipeline.Connectors.Postgres.Nodes;
-                   using NPipeline.Connectors.Configuration;
-
-                   public class TestPipeline
-                   {
-                       public void CreateSource()
-                       {
-                           var source = new PostgresSourceNode<MyRecord>(
-                               "Host=localhost;Database=test",
-                               "SELECT id, name FROM my_table order by id",
-                               configuration: new PostgresConfiguration
-                               {
-                                   CheckpointStrategy = CheckpointStrategy.Offset
-                               }
-                           );
-                       }
-                   }
-
-                   public class MyRecord { public int Id { get; set; } public string Name { get; set; } }
-                   """;
-
-        var diagnostics = GetDiagnostics(code);
-
-        var hasDiagnostic = diagnostics.Any(d => d.Id == PostgresCheckpointOrderingAnalyzer.PostgresCheckpointOrderingId);
-        Assert.False(hasDiagnostic, "Analyzer should recognize ORDER BY in lowercase");
-    }
-
-    [Fact]
-    public void ShouldNotAnalyzeNonPostgresSourceNode()
-    {
-        var code = """
-                   public class TestSource
-                   {
-                       public void CreateSource()
-                       {
-                           var source = new object();
-                       }
-                   }
-                   """;
-
-        var diagnostics = GetDiagnostics(code);
-
-        var hasDiagnostic = diagnostics.Any(d => d.Id == PostgresCheckpointOrderingAnalyzer.PostgresCheckpointOrderingId);
-        Assert.False(hasDiagnostic, "Analyzer should not analyze non-PostgresSourceNode types");
-    }
-
-    [Fact]
-    public void AnalyzerShouldHaveCorrectDiagnosticId()
-    {
-        var analyzer = new PostgresCheckpointOrderingAnalyzer();
-        var supportedDiagnostics = analyzer.SupportedDiagnostics;
-
-        Assert.Single(supportedDiagnostics);
-        var diagnostic = Assert.Single(supportedDiagnostics);
-        Assert.Equal(PostgresCheckpointOrderingAnalyzer.PostgresCheckpointOrderingId, diagnostic.Id);
-    }
-
-    [Fact]
-    public void ShouldDetectMissingOrderByWithDirectCheckpointStrategy()
-    {
-        var code = """
-                   using NPipeline.Connectors.Postgres.Configuration;
-                   using NPipeline.Connectors.Postgres.Nodes;
-                   using NPipeline.Connectors.Configuration;
-
-                   public class TestPipeline
-                   {
-                       public void CreateSource()
-                       {
-                           var source = new PostgresSourceNode<MyRecord>(
-                               "Host=localhost;Database=test",
-                               "SELECT id, name FROM my_table",
-                               configuration: new PostgresConfiguration
-                               {
-                                   CheckpointStrategy = CheckpointStrategy.Offset
-                               }
-                           );
-                       }
-                   }
-
-                   public class MyRecord { public int Id { get; set; } public string Name { get; set; } }
-                   """;
-
-        var diagnostics = GetDiagnostics(code);
-
-        var hasDiagnostic = diagnostics.Any(d => d.Id == PostgresCheckpointOrderingAnalyzer.PostgresCheckpointOrderingId);
-        Assert.True(hasDiagnostic, "Analyzer should detect missing ORDER BY with Offset checkpointing");
-    }
-
-    [Fact]
-    public void ShouldDetectMissingOrderByWithOrderByInSubquery()
-    {
-        var code = """
-                   using NPipeline.Connectors.Postgres.Configuration;
-                   using NPipeline.Connectors.Postgres.Nodes;
-                   using NPipeline.Connectors.Configuration;
-
-                   public class TestPipeline
-                   {
-                       public void CreateSource()
-                       {
-                           var source = new PostgresSourceNode<MyRecord>(
-                               "Host=localhost;Database=test",
-                               "SELECT * FROM (SELECT id, name FROM my_table ORDER BY id) AS subq",
-                               configuration: new PostgresConfiguration
-                               {
-                                   CheckpointStrategy = CheckpointStrategy.Offset
-                               }
-                           );
-                       }
-                   }
-
-                   public class MyRecord { public int Id { get; set; } public string Name { get; set; } }
-                   """;
-
-        var diagnostics = GetDiagnostics(code);
-
-        var hasDiagnostic = diagnostics.Any(d => d.Id == PostgresCheckpointOrderingAnalyzer.PostgresCheckpointOrderingId);
-
-        // The analyzer uses a simple regex that will find ORDER BY anywhere in the query
-        Assert.False(hasDiagnostic, "Analyzer should recognize ORDER BY in subquery");
-    }
-
-    private static IEnumerable<Diagnostic> GetDiagnostics(string code)
-    {
-        var syntaxTree = CSharpSyntaxTree.ParseText(code);
-
-        // Find System.Runtime assembly location
-        var runtimeAssemblyPath = typeof(object).Assembly.Location;
-        var runtimeDir = Path.GetDirectoryName(runtimeAssemblyPath);
-        var systemRuntimePath = Path.Combine(runtimeDir ?? "", "System.Runtime.dll");
-
-        var references = new[]
-        {
+        MetadataReference[] references =
+        [
             MetadataReference.CreateFromFile(typeof(object).Assembly.Location),
             MetadataReference.CreateFromFile(typeof(Enumerable).Assembly.Location),
-            MetadataReference.CreateFromFile(typeof(DiagnosticAnalyzer).Assembly.Location),
-            MetadataReference.CreateFromFile(typeof(PostgresCheckpointOrderingAnalyzer).Assembly.Location),
-            MetadataReference.CreateFromFile(typeof(PostgresSourceNode<>).Assembly.Location),
+            MetadataReference.CreateFromFile(Path.Combine(runtime, "System.Runtime.dll")),
+            MetadataReference.CreateFromFile(Path.Combine(runtime, "System.Data.Common.dll")),
+            MetadataReference.CreateFromFile(typeof(PostgresConnector).Assembly.Location),
+            MetadataReference.CreateFromFile(typeof(SqlSourceOptions).Assembly.Location),
             MetadataReference.CreateFromFile(typeof(SourceNode<>).Assembly.Location),
             MetadataReference.CreateFromFile(typeof(CheckpointStrategy).Assembly.Location),
-            MetadataReference.CreateFromFile(systemRuntimePath),
-        };
+            MetadataReference.CreateFromFile(typeof(NPipeline.StorageProviders.Models.StorageUri).Assembly.Location),
+        ];
 
-        var compilation = CSharpCompilation.Create("TestAssembly")
-            .AddReferences(references)
-            .AddSyntaxTrees(syntaxTree);
+        var compilation = CSharpCompilation.Create("Test", [CSharpSyntaxTree.ParseText(code)], references,
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
 
-        // Check for compilation errors
-        var compilationDiagnostics = compilation.GetDiagnostics();
-
-        // Debug: Check what types the semantic model can find
-        var semanticModel = compilation.GetSemanticModel(syntaxTree);
-        var objectCreations = syntaxTree.GetRoot().DescendantNodes().OfType<ObjectCreationExpressionSyntax>();
-
-        var analyzer = new PostgresCheckpointOrderingAnalyzer();
-        var compilation2 = compilation.WithAnalyzers([analyzer]);
-        var diagnostics = compilation2.GetAnalyzerDiagnosticsAsync().Result;
-
-        return diagnostics;
+        return compilation.WithAnalyzers([new PostgresCheckpointOrderingAnalyzer()]).GetAnalyzerDiagnosticsAsync().Result;
     }
 }

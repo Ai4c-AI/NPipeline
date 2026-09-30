@@ -6,7 +6,7 @@ namespace NPipeline.Connectors.SqlServer.Reliability;
 
 /// <summary>
 ///     Resilience presets for the SQL Server connector. Assign one to
-///     <see cref="Configuration.SqlServerConfiguration.Resilience" />, or derive your own with a <c>with</c> expression.
+///     <see cref="Configuration.SqlServerWriteOptions.Resilience" />, or derive your own with a <c>with</c> expression.
 /// </summary>
 /// <remarks>
 ///     <para>
@@ -18,8 +18,8 @@ namespace NPipeline.Connectors.SqlServer.Reliability;
 ///     </para>
 ///     <para>
 ///         The presets have no attempt timeout and no deadline. Each attempt is bounded by the driver's own timeout
-///         instead: <see cref="Configuration.SqlServerConfiguration.CommandTimeout" /> for rows and batches, and
-///         <see cref="Configuration.SqlServerConfiguration.BulkCopyTimeout" /> for bulk copy. A timeout set on the policy
+///         instead: <see cref="NPipeline.Connectors.Sql.SqlNodeOptions.CommandTimeout" /> for rows and batches, and
+///         <see cref="Configuration.SqlServerWriteOptions.BulkCopyTimeout" /> for bulk copy. A timeout set on the policy
 ///         applies to every write strategy, bulk copy included.
 ///     </para>
 /// </remarks>

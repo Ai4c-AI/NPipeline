@@ -1,5 +1,4 @@
 using Npgsql;
-using NPipeline.Connectors.Postgres.Nodes;
 using NPipeline.Connectors.Postgres.Tests.Fixtures;
 using NPipeline.StorageProviders.Models;
 
@@ -71,8 +70,8 @@ public class PostgresStorageUriIntegrationTests(PostgresTestContainerFixture fix
 
             // Create source nodes using the same pipeline code but different URIs
             var query = $"SELECT id, name, value FROM {tableName}";
-            var localSource = new PostgresSourceNode<TestRecord>(localUri, query);
-            var cloudSource = new PostgresSourceNode<TestRecord>(cloudUri, query);
+            var localSource = PostgresConnector.Source<TestRecord>(localUri, query);
+            var cloudSource = PostgresConnector.Source<TestRecord>(cloudUri, query);
 
             // Act & Assert - Verify both nodes can be created and configured
             Assert.NotNull(localSource);
@@ -246,7 +245,7 @@ public class PostgresStorageUriIntegrationTests(PostgresTestContainerFixture fix
 
                 // Create source node with SSL configuration
                 var query = $"SELECT id, name, value FROM {tableName}";
-                var source = new PostgresSourceNode<TestRecord>(uri, query);
+                var source = PostgresConnector.Source<TestRecord>(uri, query);
 
                 Assert.NotNull(source);
             }

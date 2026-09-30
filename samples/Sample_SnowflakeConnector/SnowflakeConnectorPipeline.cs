@@ -1,5 +1,6 @@
 using NPipeline.Connectors.Snowflake.Configuration;
-using NPipeline.Connectors.Snowflake.Nodes;
+using NPipeline.Connectors.Snowflake;
+using NPipeline.Connectors.Sql;
 using NPipeline.DataFlow.DataStreams;
 using NPipeline.Pipeline;
 using Snowflake.Data.Client;
@@ -246,25 +247,18 @@ public sealed class SnowflakeConnectorPipeline
             },
         };
 
-        var configuration = new SnowflakeConfiguration
+        var sinkNode = SnowflakeConnector.Sink<Customer>(_connectionString, "CUSTOMERS", o => o with
         {
-            WriteStrategy = SnowflakeWriteStrategy.Batch,
-            BatchSize = 10,
-            UseTransaction = true,
-            CommandTimeout = 60,
             Schema = "PUBLIC",
-        };
-
-        var sinkNode = new SnowflakeSinkNode<Customer>(
-            _connectionString,
-            "CUSTOMERS",
-            configuration);
+            BatchSize = 10,
+            CommandTimeout = 60,
+        });
 
         Console.WriteLine($"  Writing {customers.Count} customers using Batch strategy...");
 
         var startTime = DateTime.Now;
         var dataStream = new InMemoryDataStream<Customer>(customers);
-        await sinkNode.ConsumeAsync(dataStream, null!, cancellationToken);
+        await sinkNode.ConsumeAsync(dataStream, PipelineContext.CreateDefault(), cancellationToken);
         var elapsed = DateTime.Now - startTime;
 
         Console.WriteLine($"  ✓ Inserted {customers.Count} customers in {elapsed.TotalSeconds:F2}s");
@@ -311,24 +305,19 @@ public sealed class SnowflakeConnectorPipeline
             },
         };
 
-        var configuration = new SnowflakeConfiguration
+        var sinkNode = SnowflakeConnector.Sink<Order>(_connectionString, "ORDERS", o => o with
         {
-            WriteStrategy = SnowflakeWriteStrategy.PerRow,
-            UseTransaction = true,
-            CommandTimeout = 60,
             Schema = "PUBLIC",
-        };
-
-        var sinkNode = new SnowflakeSinkNode<Order>(
-            _connectionString,
-            "ORDERS",
-            configuration);
+            WriteStrategy = SnowflakeWriteStrategy.PerRow,
+            Transaction = SqlTransactionMode.WholeRun,
+            CommandTimeout = 60,
+        });
 
         Console.WriteLine($"  Writing {orders.Count} orders using PerRow strategy...");
 
         var startTime = DateTime.Now;
         var dataStream = new InMemoryDataStream<Order>(orders);
-        await sinkNode.ConsumeAsync(dataStream, null!, cancellationToken);
+        await sinkNode.ConsumeAsync(dataStream, PipelineContext.CreateDefault(), cancellationToken);
         var elapsed = DateTime.Now - startTime;
 
         Console.WriteLine($"  ✓ Inserted {orders.Count} orders in {elapsed.TotalSeconds:F2}s");
@@ -363,27 +352,20 @@ public sealed class SnowflakeConnectorPipeline
             });
         }
 
-        var configuration = new SnowflakeConfiguration
+        // A gzipped CSV file per batch, PUT to the user stage (~) and loaded with COPY INTO, then purged.
+        var sinkNode = SnowflakeConnector.Sink<Order>(_connectionString, "ORDERS", o => o with
         {
-            WriteStrategy = SnowflakeWriteStrategy.StagedCopy,
-            StageName = "~", // User stage
-            FileFormat = "CSV",
-            CopyCompression = "GZIP",
-            PurgeAfterCopy = true,
-            CommandTimeout = 120,
             Schema = "PUBLIC",
-        };
-
-        var sinkNode = new SnowflakeSinkNode<Order>(
-            _connectionString,
-            "ORDERS",
-            configuration);
+            WriteStrategy = SnowflakeWriteStrategy.StagedCopy,
+            Stage = "~",
+            CommandTimeout = 120,
+        });
 
         Console.WriteLine($"  Bulk loading {orders.Count} orders using PUT + COPY INTO...");
 
         var startTime = DateTime.Now;
         var dataStream = new InMemoryDataStream<Order>(orders);
-        await sinkNode.ConsumeAsync(dataStream, null!, cancellationToken);
+        await sinkNode.ConsumeAsync(dataStream, PipelineContext.CreateDefault(), cancellationToken);
         var elapsed = DateTime.Now - startTime;
 
         Console.WriteLine($"  ✓ Loaded {orders.Count} orders via PUT+COPY in {elapsed.TotalSeconds:F2}s");
@@ -401,27 +383,17 @@ public sealed class SnowflakeConnectorPipeline
         Console.WriteLine("Step 5: Reading and transforming customers...");
         Console.WriteLine("----------------------------------------------");
 
-        var sourceConfiguration = new SnowflakeConfiguration
-        {
-            StreamResults = true,
-            CommandTimeout = 60,
-        };
-
-        var sourceNode = new SnowflakeSourceNode<Customer>(
-            _connectionString,
-            "SELECT * FROM PUBLIC.CUSTOMERS ORDER BY ID",
-            sourceConfiguration);
+        var sourceNode = SnowflakeConnector.Source<Customer>(_connectionString, "SELECT * FROM PUBLIC.CUSTOMERS ORDER BY ID", o => o with { CommandTimeout = 60 });
 
         Console.WriteLine("  Reading customers with attribute-based mapping...");
-        Console.WriteLine("    - SnowflakeTable: CUSTOMERS (Schema: PUBLIC)");
-        Console.WriteLine("    - SnowflakeColumn: ID (PrimaryKey)");
+        Console.WriteLine("    - SnowflakeColumn: ID");
         Console.WriteLine("    - SnowflakeColumn: FIRST_NAME, LAST_NAME, EMAIL, PHONE_NUMBER");
         Console.WriteLine("    - SnowflakeColumn: CREATED_AT (TIMESTAMP_NTZ)");
         Console.WriteLine("    - IgnoreColumn: FullName (computed property)");
 
         var customers = new List<Customer>();
 
-        await foreach (var customer in sourceNode.OpenStream(null!, cancellationToken))
+        await foreach (var customer in sourceNode.OpenStream(PipelineContext.CreateDefault(), cancellationToken))
         {
             customers.Add(customer);
             Console.WriteLine($"    - Read: {customer.FullName} (ID: {customer.Id}, Email: {customer.Email})");
@@ -438,36 +410,27 @@ public sealed class SnowflakeConnectorPipeline
         Console.WriteLine("Step 6: Querying order summaries...");
         Console.WriteLine("------------------------------------");
 
-        var sourceConfiguration = new SnowflakeConfiguration
-        {
-            StreamResults = true,
-            CommandTimeout = 60,
-        };
-
         // Use a JOIN query to aggregate order data per customer
         var query = @"
             SELECT
-                c.ID AS CUSTOMERID,
-                c.FIRST_NAME || ' ' || c.LAST_NAME AS CUSTOMERNAME,
-                COUNT(o.ORDER_ID) AS TOTALORDERS,
-                COALESCE(SUM(o.AMOUNT), 0) AS TOTALAMOUNT
+                c.ID AS CUSTOMER_ID,
+                c.FIRST_NAME || ' ' || c.LAST_NAME AS CUSTOMER_NAME,
+                COUNT(o.ORDER_ID) AS TOTAL_ORDERS,
+                COALESCE(SUM(o.AMOUNT), 0) AS TOTAL_AMOUNT
             FROM PUBLIC.CUSTOMERS c
             LEFT JOIN PUBLIC.ORDERS o ON c.ID = o.CUSTOMER_ID
             GROUP BY c.ID, c.FIRST_NAME, c.LAST_NAME
-            ORDER BY TOTALAMOUNT DESC";
+            ORDER BY TOTAL_AMOUNT DESC";
 
-        var sourceNode = new SnowflakeSourceNode<OrderSummary>(
-            _connectionString,
-            query,
-            sourceConfiguration);
+        var sourceNode = SnowflakeConnector.Source<OrderSummary>(_connectionString, query, o => o with { CommandTimeout = 60 });
 
         Console.WriteLine("  Reading order summaries with convention-based mapping...");
         Console.WriteLine("    - No attributes used on OrderSummary class");
-        Console.WriteLine("    - Property names map to Snowflake column aliases (case-insensitive)");
+        Console.WriteLine("    - Property names map to UPPER_SNAKE column aliases (CustomerId -> CUSTOMER_ID)");
 
         var summaries = new List<OrderSummary>();
 
-        await foreach (var summary in sourceNode.OpenStream(null!, cancellationToken))
+        await foreach (var summary in sourceNode.OpenStream(PipelineContext.CreateDefault(), cancellationToken))
         {
             summaries.Add(summary);
             Console.WriteLine($"    - {summary.CustomerName}: {summary.TotalOrders} orders, ${summary.TotalAmount:N2}");
@@ -534,30 +497,22 @@ public sealed class SnowflakeConnectorPipeline
             },
         };
 
-        var configuration = new SnowflakeConfiguration
+        var sinkNode = SnowflakeConnector.Sink<EnrichedCustomer>(_connectionString, "ENRICHED_CUSTOMERS", o => o with
         {
-            WriteStrategy = SnowflakeWriteStrategy.Batch,
-            UseUpsert = true,
-            OnMergeAction = OnMergeAction.Update,
-            UseTransaction = true,
-            CommandTimeout = 60,
             Schema = "PUBLIC",
-        };
-
-        var sinkNode = new SnowflakeSinkNode<EnrichedCustomer>(
-            _connectionString,
-            "ENRICHED_CUSTOMERS",
-            configuration);
+            Upsert = SqlUpsert.On("CUSTOMER_ID"),
+            CommandTimeout = 60,
+        });
 
         Console.WriteLine($"  Merging {enrichedCustomers.Count} enriched customer records...");
 
         var startTime = DateTime.Now;
         var dataStream = new InMemoryDataStream<EnrichedCustomer>(enrichedCustomers);
-        await sinkNode.ConsumeAsync(dataStream, null!, cancellationToken);
+        await sinkNode.ConsumeAsync(dataStream, PipelineContext.CreateDefault(), cancellationToken);
         var elapsed = DateTime.Now - startTime;
 
         Console.WriteLine($"  ✓ Merged {enrichedCustomers.Count} customer updates in {elapsed.TotalSeconds:F2}s");
-        Console.WriteLine("    - Strategy: Batch with UseUpsert (MERGE INTO)");
+        Console.WriteLine("    - Strategy: Batch with an upsert on CUSTOMER_ID (MERGE INTO)");
         Console.WriteLine("    - On match: Update all non-key columns");
     }
 

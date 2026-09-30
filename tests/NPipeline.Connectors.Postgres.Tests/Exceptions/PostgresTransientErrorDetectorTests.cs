@@ -71,17 +71,17 @@ public class PostgresTransientErrorDetectorTests
     }
 
     [Fact]
-    public void IsTransientSqlState_WithConnectionDoesNotExist_ReturnsFalse()
+    public void IsTransientSqlState_WithConnectionDoesNotExist_ReturnsTrue()
     {
         // Arrange
-        const string sqlState = "08003"; // Connection does not exist (not in TransientErrorCodes)
+        const string sqlState = "08003"; // Connection does not exist: class 08, connection exceptions
 
         // Act
         var result = PostgresTransientErrorDetector.IsTransientSqlState(sqlState);
 
         // Assert
-        // Note: "08003" is not in TransientErrorCodes set
-        _ = result.Should().BeFalse();
+        // Every class 08 state is transient: the connection is reopened and the batch retried.
+        _ = result.Should().BeTrue();
     }
 
     [Fact]

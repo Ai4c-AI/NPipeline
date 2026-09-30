@@ -1,143 +1,47 @@
+using NPipeline.Connectors.Sql;
 using NPipeline.Connectors.SqlServer.Configuration;
 using NPipeline.Connectors.SqlServer.Connection;
-using NPipeline.Connectors.SqlServer.Mapping;
 using NPipeline.Connectors.SqlServer.Nodes;
 
 namespace NPipeline.Connectors.SqlServer.DependencyInjection;
 
-/// <summary>
-///     Factory interface for creating SQL Server source nodes with dependency injection support.
-/// </summary>
+/// <summary>Creates SQL Server sources on the registered connection pool.</summary>
 public interface ISqlServerSourceNodeFactory
 {
-    /// <summary>
-    ///     Creates a SQL Server source node using the default connection.
-    /// </summary>
-    /// <typeparam name="T">The type of objects to read.</typeparam>
-    /// <param name="query">The SQL query to execute.</param>
-    /// <param name="configuration">Optional configuration. If null, defaults are used.</param>
-    /// <returns>A configured SQL Server source node.</returns>
-    SqlServerSourceNode<T> CreateSourceNode<T>(
-        string query,
-        SqlServerConfiguration? configuration = null)
-        where T : class;
+    /// <summary>A source that maps columns to <typeparamref name="T" />'s members by name.</summary>
+    /// <param name="query">The query.</param>
+    /// <param name="configure">Adjusts the default options; set <see cref="SqlServerReadOptions.ConnectionName" /> for a named connection.</param>
+    SqlServerSourceNode<T> CreateSourceNode<T>(string query, Func<SqlServerReadOptions, SqlServerReadOptions>? configure = null);
 
-    /// <summary>
-    ///     Creates a SQL Server source node with a custom mapper using the default connection.
-    /// </summary>
-    /// <typeparam name="T">The type of objects to read.</typeparam>
-    /// <param name="query">The SQL query to execute.</param>
-    /// <param name="customMapper">Optional custom row mapper function.</param>
-    /// <param name="configuration">Optional configuration. If null, defaults are used.</param>
-    /// <returns>A configured SQL Server source node.</returns>
-    SqlServerSourceNode<T> CreateSourceNode<T>(
-        string query,
-        Func<SqlServerRow, T>? customMapper,
-        SqlServerConfiguration? configuration = null)
-        where T : class;
-
-    /// <summary>
-    ///     Creates a SQL Server source node using a named connection.
-    /// </summary>
-    /// <typeparam name="T">The type of objects to read.</typeparam>
-    /// <param name="query">The SQL query to execute.</param>
-    /// <param name="connectionName">The name of the connection to use.</param>
-    /// <param name="configuration">Optional configuration. If null, defaults are used.</param>
-    /// <returns>A configured SQL Server source node.</returns>
-    SqlServerSourceNode<T> CreateSourceNode<T>(
-        string query,
-        string? connectionName,
-        SqlServerConfiguration? configuration = null)
-        where T : class;
-
-    /// <summary>
-    ///     Creates a SQL Server source node using a named connection with a custom mapper.
-    /// </summary>
-    /// <typeparam name="T">The type of objects to read.</typeparam>
-    /// <param name="query">The SQL query to execute.</param>
-    /// <param name="connectionName">The name of the connection to use.</param>
-    /// <param name="customMapper">Optional custom row mapper function.</param>
-    /// <param name="configuration">Optional configuration. If null, defaults are used.</param>
-    /// <returns>A configured SQL Server source node.</returns>
-    SqlServerSourceNode<T> CreateSourceNode<T>(
-        string query,
-        string? connectionName,
-        Func<SqlServerRow, T>? customMapper,
-        SqlServerConfiguration? configuration = null)
-        where T : class;
+    /// <summary>A source that builds each record from a <see cref="SqlRow" /> with <paramref name="map" />.</summary>
+    /// <param name="query">The query.</param>
+    /// <param name="map">Builds a record from a row.</param>
+    /// <param name="configure">Adjusts the default options.</param>
+    SqlServerSourceNode<T> CreateSourceNode<T>(string query, Func<SqlRow, T> map, Func<SqlServerReadOptions, SqlServerReadOptions>? configure = null);
 }
 
-/// <summary>
-///     Factory for creating SQL Server source nodes with dependency injection support.
-/// </summary>
-public class SqlServerSourceNodeFactory : ISqlServerSourceNodeFactory
+/// <summary>Creates SQL Server sources on the registered connection pool.</summary>
+/// <param name="connectionPool">The pool.</param>
+public class SqlServerSourceNodeFactory(ISqlServerConnectionPool connectionPool) : ISqlServerSourceNodeFactory
 {
-    private readonly ISqlServerConnectionPool _connectionPool;
-
-    /// <summary>
-    ///     Initializes a new instance of the <see cref="SqlServerSourceNodeFactory" /> class.
-    /// </summary>
-    /// <param name="connectionPool">The connection pool.</param>
-    public SqlServerSourceNodeFactory(ISqlServerConnectionPool connectionPool)
-    {
-        _connectionPool = connectionPool ?? throw new ArgumentNullException(nameof(connectionPool));
-    }
+    private readonly ISqlServerConnectionPool _connectionPool = connectionPool ?? throw new ArgumentNullException(nameof(connectionPool));
 
     /// <inheritdoc />
-    public SqlServerSourceNode<T> CreateSourceNode<T>(
-        string query,
-        SqlServerConfiguration? configuration = null)
-        where T : class
-    {
-        ArgumentNullException.ThrowIfNull(query);
-
-        var config = configuration ?? new SqlServerConfiguration();
-        return new SqlServerSourceNode<T>(_connectionPool, query, config, null, config.ContinueOnError);
-    }
+    public SqlServerSourceNode<T> CreateSourceNode<T>(string query, Func<SqlServerReadOptions, SqlServerReadOptions>? configure = null) =>
+        new(Options(query, configure));
 
     /// <inheritdoc />
-    public SqlServerSourceNode<T> CreateSourceNode<T>(
-        string query,
-        Func<SqlServerRow, T>? customMapper,
-        SqlServerConfiguration? configuration = null)
-        where T : class
+    public SqlServerSourceNode<T> CreateSourceNode<T>(string query, Func<SqlRow, T> map, Func<SqlServerReadOptions, SqlServerReadOptions>? configure = null) =>
+        new(Options(query, configure), map ?? throw new ArgumentNullException(nameof(map)));
+
+    private SqlServerReadOptions Options(string query, Func<SqlServerReadOptions, SqlServerReadOptions>? configure)
     {
-        ArgumentNullException.ThrowIfNull(query);
+        var options = new SqlServerReadOptions { ConnectionPool = _connectionPool, Query = query };
+        options = configure is null ? options : configure(options);
 
-        var config = configuration ?? new SqlServerConfiguration();
-        return new SqlServerSourceNode<T>(_connectionPool, query, customMapper, config, null, config.ContinueOnError);
-    }
+        if (options.ConnectionName is { Length: > 0 } name && _connectionPool is SqlServerConnectionPool pool && !pool.HasNamedConnection(name))
+            throw new InvalidOperationException($"Named connection '{name}' not found.");
 
-    /// <inheritdoc />
-    public SqlServerSourceNode<T> CreateSourceNode<T>(
-        string query,
-        string? connectionName,
-        SqlServerConfiguration? configuration = null)
-        where T : class
-    {
-        ArgumentNullException.ThrowIfNull(query);
-
-        if (!string.IsNullOrWhiteSpace(connectionName) && !_connectionPool.HasNamedConnection(connectionName))
-            throw new InvalidOperationException($"Named connection '{connectionName}' not found.");
-
-        var config = configuration ?? new SqlServerConfiguration();
-        return new SqlServerSourceNode<T>(_connectionPool, query, config, null, config.ContinueOnError, connectionName);
-    }
-
-    /// <inheritdoc />
-    public SqlServerSourceNode<T> CreateSourceNode<T>(
-        string query,
-        string? connectionName,
-        Func<SqlServerRow, T>? customMapper,
-        SqlServerConfiguration? configuration = null)
-        where T : class
-    {
-        ArgumentNullException.ThrowIfNull(query);
-
-        if (!string.IsNullOrWhiteSpace(connectionName) && !_connectionPool.HasNamedConnection(connectionName))
-            throw new InvalidOperationException($"Named connection '{connectionName}' not found.");
-
-        var config = configuration ?? new SqlServerConfiguration();
-        return new SqlServerSourceNode<T>(_connectionPool, query, customMapper, config, null, config.ContinueOnError, connectionName);
+        return options;
     }
 }

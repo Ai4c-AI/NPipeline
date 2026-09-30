@@ -1,12 +1,15 @@
 ---
 title: "MySQL Connector"
-description: "Read from and write to MySQL and MariaDB databases with batch inserts, bulk load, and upserts."
+description: "Read from and write to MySQL and MariaDB with multi-row inserts, bulk loads and ON DUPLICATE KEY upserts."
 order: 10
 ---
 
 # MySQL Connector
 
-The `NPipeline.Connectors.MySQL` package provides source and sink nodes for MySQL and MariaDB. Supports connection pooling, batch inserts, high-performance `LOAD DATA LOCAL INFILE`, and `ON DUPLICATE KEY` upserts.
+The `NPipeline.Connectors.MySQL` package reads MySQL and MariaDB queries into records and writes records to tables,
+with multi-row `INSERT` statements, one statement per row, or `LOAD DATA LOCAL INFILE`, and upserts with
+`ON DUPLICATE KEY UPDATE`. Mapping, row errors, transactions, failed batches and checkpoints work as in every SQL
+connector; see [SQL Connectors: Shared Behaviour](sql-connectors.md).
 
 ## Installation
 
@@ -14,264 +17,96 @@ The `NPipeline.Connectors.MySQL` package provides source and sink nodes for MySQ
 dotnet add package NPipeline.Connectors.MySQL
 ```
 
-**Dependencies:** [MySqlConnector](https://www.nuget.org/packages/MySqlConnector) 2.x
+**Dependencies:** [MySqlConnector](https://www.nuget.org/packages/MySqlConnector), `NPipeline.Connectors`
 
-## Source Node - `MySqlSourceNode<T>`
+## Reading
 
-### Constructors
-
-```csharp
-// Connection string + query
-public MySqlSourceNode(
-    string connectionString, string query,
-    MySqlConfiguration? configuration = null)
-
-// With custom mapper
-public MySqlSourceNode(
-    string connectionString, string query,
-    Func<MySqlRow, T>? customMapper = null,
-    MySqlConfiguration? configuration = null)
-
-// Connection pool (recommended for DI)
-public MySqlSourceNode(
-    IMySqlConnectionPool connectionPool, string query,
-    MySqlConfiguration? configuration = null,
-    DatabaseParameter[]? parameters = null,
-    bool continueOnError = false,
-    string? connectionName = null)
-```
-
-## Sink Node - `MySqlSinkNode<T>`
-
-| Strategy | Description | Best For |
-|----------|-------------|----------|
-| `PerRow` | Individual `INSERT` per item | Small volumes |
-| `Batch` (default) | Batched `INSERT` statements | Most workloads |
-| `BulkLoad` | `LOAD DATA LOCAL INFILE` | Maximum throughput |
-
-### Constructors
+The factory is `MySqlNodes`, not `MySqlConnector`, because the driver already uses that name for its namespace.
 
 ```csharp
-// Connection string
-public MySqlSinkNode(
-    string connectionString, string tableName,
-    MySqlConfiguration? configuration = null,
-    Func<T, IEnumerable<DatabaseParameter>>? customMapper = null)
+public sealed record Product(int Id, string Name, decimal Price);
 
-// Connection pool (recommended for DI)
-public MySqlSinkNode(
-    IMySqlConnectionPool connectionPool, string tableName,
-    MySqlConfiguration? configuration = null,
-    Func<T, IEnumerable<DatabaseParameter>>? customMapper = null,
-    string? connectionName = null)
+var source = MySqlNodes.Source<Product>(connectionString, "SELECT Id, Name, Price FROM products ORDER BY Id");
+builder.AddSource(source, "products");
 ```
 
-## Configuration
+Members map to columns of the same name, case-insensitively. Parameters are bound by name (`@since`).
 
-### Connection
+## Writing
 
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `ConnectionString` | `string` | `""` | MySQL connection string |
-| `CommandTimeout` | `int` | `30` | Command timeout (seconds) |
-| `ConnectionTimeout` | `int` | `15` | Connection timeout (seconds) |
-| `DefaultDatabase` | `string?` | `null` | Default database name |
-| `CharacterSet` | `string` | `"utf8mb4"` | Connection character set |
-| `ConvertZeroDateTime` | `bool` | `true` | Convert zero dates to `DateTime.MinValue` |
-| `MinPoolSize` | `int` | `1` | Minimum pool size |
-| `MaxPoolSize` | `int` | `100` | Maximum pool size |
+```csharp
+var sink = MySqlNodes.Sink<Product>(connectionString, "products", o => o with { WriteStrategy = MySqlWriteStrategy.BulkLoad });
+builder.AddSink(sink, "products-out");
+```
 
-### Write
+| `WriteStrategy` | Writes | Notes |
+| --- | --- | --- |
+| `Batch` (default) | Multi-row `INSERT` statements | |
+| `PerRow` | One statement per row | Slowest |
+| `BulkLoad` | `LOAD DATA LOCAL INFILE` through `MySqlBulkCopy` | Fastest; needs `AllowLoadLocalInfile=true` in the connection string and `local_infile` on the server; inserts only |
 
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `WriteStrategy` | `MySqlWriteStrategy` | `Batch` | `PerRow`, `Batch`, or `BulkLoad` |
-| `BatchSize` | `int` | `100` | Items per batch |
-| `MaxBatchSize` | `int` | `1000` | Maximum batch size |
-| `UseTransaction` | `bool` | `true` | Wrap writes in a transaction |
-| `UsePreparedStatements` | `bool` | `true` | Use prepared statements |
+`LOAD DATA` turns a value it cannot store (a string too long for its column, a date out of range) into a warning and
+stores something else. The bulk writer fails the batch when the load reports a warning, so a changed value never lands
+silently.
 
-### Bulk Load
+### Upserts
 
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `AllowLoadLocalInfile` | `bool` | `false` | Enable `LOAD DATA LOCAL INFILE` (must also be enabled on the MySQL server) |
-| `BulkLoadBatchSize` | `int` | `5000` | Rows per bulk load batch |
-| `BulkLoadTimeout` | `int` | `300` | Bulk load timeout (seconds) |
-| `FieldTerminator` | `char` | `','` | Field separator |
-| `LineTerminator` | `char` | `'\n'` | Line separator |
+`Upsert = SqlUpsert.On("Id")` writes `INSERT … ON DUPLICATE KEY UPDATE col = VALUES(col)`, which works on MySQL 8 and
+MariaDB. MySQL matches a row on the table's primary key and unique indexes, whichever it collides with; the keys decide
+which columns are left alone on update. `SqlUpsertAction.Ignore` keeps existing rows with a no-op update (not
+`INSERT IGNORE`, which would also hide other errors).
 
-### Upsert
+### Write options
 
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `UseUpsert` | `bool` | `false` | Enable `ON DUPLICATE KEY` |
-| `UpsertKeyColumns` | `string[]` | `[]` | Key columns for conflict detection |
-| `OnDuplicateKeyAction` | `OnDuplicateKeyAction` | `Update` | `Update`, `Ignore`, or `Replace` |
+| Option | Default | Description |
+| --- | --- | --- |
+| `WriteStrategy` | `Batch` | See above |
+| `Resilience` | `MySqlConnectorResilience.Default` | Retries a batch after a transient failure; see [Resilience](#resilience) |
 
-### Error Handling
+Plus the [options every SQL sink has](sql-connectors.md#options-every-sink-has).
 
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `ContinueOnError` | `bool` | `false` | Continue on row-level errors |
-| `Resilience` | `Resilience` | `MySqlConnectorResilience.Default` | How transient failures are retried; see [Resilience](#resilience) |
+## Attributes
+
+`[Column]` and `[IgnoreColumn]` work as in every connector. `[MySqlColumn(AutoIncrement = true)]` marks a column the
+database generates: it is read, but never written.
+
+## Connections
+
+A source or sink takes a connection string, a `mysql://` or `mariadb://` storage URI (see
+[Connections](sql-connectors.md#connections)), or an `IMySqlConnectionPool` of named connection strings (set
+`ConnectionName` to pick one). Connection strings are used as they are. MySqlConnector works with MySQL 8 and
+MariaDB 10.5 and later.
+
+MySQL can store the zero date `0000-00-00`, which has no .NET value, so reading one is a row error. Add
+`ConvertZeroDateTime=True` to the connection string to read it as `DateTime.MinValue`, or `AllowZeroDateTime=True` to
+read it as a `MySqlDateTime`.
 
 ## Resilience
 
-The sink retries transient failures with [NResilience](https://github.com/nresilience/NResilience). The `Resilience`
-property on `MySqlConfiguration` configures it. The default, `MySqlConnectorResilience.Default`, does the following:
+Sources retry connecting and running the query; sinks retry a batch whose `PerBatch` transaction was rolled back. Both
+use `Resilience`, whose default `MySqlConnectorResilience.Default`:
 
 - Makes up to four attempts (three retries).
 - Retries lock wait timeouts (1205), deadlocks (1213), and lost connections (2006, 2013).
 - Treats too many connections (1040 and 1203) as throttling, which waits longer: backoff starts at 5 seconds.
 - Doesn't retry other errors, such as a duplicate key or a missing table.
 - Waits with exponential backoff and full jitter, from 2 seconds up to 30 seconds.
-- Has no attempt timeout and no deadline. The driver's own timeout bounds each attempt: `CommandTimeout` for rows and batches, and `BulkLoadTimeout` for bulk loads.
-  A long bulk write isn't cut off by a retry policy's timeout.
+- Has no attempt timeout and no deadline; the command timeout bounds each attempt.
 
-Each write strategy retries one unit of work that commits all or nothing, so a retry never inserts rows that an
-earlier attempt committed:
-
-- `PerRow`: one `INSERT` per row.
-- `Batch`: one multi-row statement per flush.
-- `BulkLoad`: one `LOAD DATA LOCAL INFILE` per flush.
-
-Each unit commits all or nothing on a transactional engine such as InnoDB. Non-transactional engines such as MyISAM keep the rows a failed statement wrote, so a retry can insert them again. For such tables, turn retries off with `Resilience.None`.
-
-With `DeliverySemantic.ExactlyOnce`, the sink wraps all writes in one transaction. A failure can abort that whole
-transaction, so the writers make one attempt and the sink rolls the transaction back. A batch that fails isn't
-written again when the writer is disposed.
-
-To change a setting, derive a policy with a `with` expression:
-
-```csharp
-var config = new MySqlConfiguration
-{
-    Resilience = MySqlConnectorResilience.Default with { Attempts = 6 },
-};
-```
-
-To turn retries off, use `Resilience.None`.
-
-The connector is the only layer that retries; MySqlConnector doesn't retry commands. Retries aren't logged by the
-connector. To observe them, attach a listener: `MySqlConnectorResilience.Default.WithListener(e => ...)`.
+A retry is safe because the batch's transaction rolled back, which only a transactional engine such as InnoDB does.
+MyISAM and other non-transactional engines keep the rows a failed batch wrote, so a retry can write them twice, and a
+batch split into several statements can land partly. For such tables, turn retries off with `Resilience.None`.
 
 ## Dependency Injection
 
 ```csharp
-services.AddMySqlConnector(options =>
-{
-    options.DefaultConnectionString = "Server=localhost;Database=mydb;User=app;Password=secret;";
-    options.DefaultConfiguration = new MySqlConfiguration
-    {
-        CharacterSet = "utf8mb4",
-        WriteStrategy = MySqlWriteStrategy.Batch,
-        BatchSize = 500
-    };
-});
-
-services.AddMySqlConnection("replica", "Server=replica-db;...");
+services.AddMySqlConnector(options => options.DefaultConnectionString = "Server=localhost;Database=shop;...");
+services.AddMySqlConnection("reporting", "Server=reporting-db;...");
 ```
 
-## Attribute Mapping
-
-### Convention-Based
-
-C# `PascalCase` maps to MySQL `snake_case` column names:
-
-- `CustomerId` → `customer_id`
-
-### `[Column]` / `[IgnoreColumn]` (Cross-Connector)
-
-```csharp
-using NPipeline.Connectors.Attributes;
-
-public class Customer
-{
-    [Column("customer_id")]
-    public int CustomerId { get; set; }
-
-    [IgnoreColumn]
-    public string FullName => $"{FirstName} {LastName}";
-}
-```
-
-### `[MySqlColumn]` (Connector-Specific)
-
-```csharp
-using NPipeline.Connectors.MySQL.Mapping;
-
-public class Customer
-{
-    [MySqlColumn("customer_id", PrimaryKey = true)]
-    public int CustomerId { get; set; }
-
-    [MySqlColumn("email", DbType = MySqlDbType.VarChar, Size = 255)]
-    public string Email { get; set; } = "";
-}
-```
-
-## Delivery Semantics
-
-| Semantic | Data Loss | Duplicates | Overhead |
-|----------|-----------|------------|----------|
-| `AtLeastOnce` (default) | No | Possible | Low |
-| `AtMostOnce` | Possible | No | Low |
-| `ExactlyOnce` | No | No | High |
-
-## Checkpointing
-
-| Strategy | Description |
-|----------|-------------|
-| `None` (default) | No checkpointing |
-| `InMemory` | Transient recovery within single run |
-| `Offset` | Track position via monotonic column |
-| `KeyBased` | Track by composite keys |
-| `Cursor` | Cursor position tracking |
-
-```csharp
-var config = new MySqlConfiguration
-{
-    CheckpointStrategy = CheckpointStrategy.Offset,
-    CheckpointOffsetColumn = "id",
-    CheckpointStorage = new FileCheckpointStorage("checkpoints/mysql.json")
-};
-```
-
-## Performance
-
-### Write Strategy Comparison
-
-| Strategy | Throughput | Latency | Use Case |
-|----------|-----------|---------|----------|
-| `PerRow` | Low | Low | Real-time, per-row errors |
-| `Batch` | High | Medium | Most workloads |
-| `BulkLoad` | Very High | High | Bulk loads |
-
-### Bulk Load
-
-Requires `AllowLoadLocalInfile = true` both in the connector config and on the MySQL server (`local_infile = ON`).
-
-### Mapping
-
-| Property | Default | Description |
-|----------|---------|-------------|
-| `CaseInsensitiveMapping` | `true` | Case-insensitive column matching |
-| `CacheMappingMetadata` | `true` | Cache mapping delegates per type |
-| `ValidateIdentifiers` | `true` | Validate identifiers to prevent injection |
-| `UsePreparedStatements` | `true` | Reduce query parsing overhead |
-
-## Best Practices
-
-1. **Use DI** with `AddMySqlConnector` for production
-2. **Use `BulkLoad`** for maximum throughput (requires `AllowLoadLocalInfile`)
-3. **Enable upsert** with `ON DUPLICATE KEY` for idempotent writes
-4. **Set `CharacterSet = "utf8mb4"`** for full Unicode support
-5. **Use prepared statements** for repeated query patterns
-6. **Configure checkpointing** for long-running pipelines
+Registers `IMySqlConnectionPool`, `IMySqlSourceNodeFactory` and `IMySqlSinkNodeFactory`.
 
 ## Next Steps
 
-- [PostgreSQL Connector](postgres.md) - similar patterns for PostgreSQL
-- [SQL Server Connector](sqlserver.md) - similar patterns for SQL Server
-- [Dependency Injection](../guides/dependency-injection.md) - full DI integration guide
+- [SQL Connectors: Shared Behaviour](sql-connectors.md)
+- [Storage Providers](../storage-providers/index.md): `mysql://` URIs

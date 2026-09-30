@@ -1,30 +1,16 @@
 using AwesomeAssertions;
-using FakeItEasy;
 using Microsoft.Data.SqlClient;
-using NPipeline.Connectors.SqlServer.Configuration;
 using NPipeline.Connectors.SqlServer.Reliability;
-using NPipeline.Connectors.SqlServer.Writers;
-using NPipeline.StorageProviders.Abstractions;
 using NResilience;
 
 namespace NPipeline.Connectors.SqlServer.Tests.Reliability.Behavior;
 
 /// <summary>
 ///     Behavior tests for the SQL Server connector's NResilience policy (SQL1 and X1 in <c>plans/resilience-improvements.md</c>).
-///     They assert what reached the database, not what is configured.
+///     The retries themselves are tested on the shared SQL sink.
 /// </summary>
 public sealed class SqlServerResilienceBehaviorTests
 {
-    // The shipped preset with near-zero backoff, so the tests barely wait between attempts.
-    private static readonly Resilience Fast = SqlServerConnectorResilience.Default with
-    {
-        Backoff = SqlServerConnectorResilience.Default.Backoff with
-        {
-            TransientBase = TimeSpan.FromMilliseconds(1),
-            ThrottledBase = TimeSpan.FromMilliseconds(1),
-        },
-    };
-
     [Fact]
     public void DefaultPreset_PreservesTheAttemptCountsAndDelaysOfTheSettingsItReplaces()
     {
@@ -87,169 +73,5 @@ public sealed class SqlServerResilienceBehaviorTests
 
         // An OperationCanceledException the pipeline did not ask for is a failure, not something to retry.
         classifier.ClassifyException(new OperationCanceledException()).Kind.Should().Be(VerdictKind.Permanent);
-    }
-
-    [Fact]
-    public async Task PerRow_RetriesATransientFailureFourTimesThenThrows()
-    {
-        var connection = new ScriptedConnection((_, _) => new TimeoutException("injected"));
-        var writer = PerRowWriter(connection);
-
-        var act = () => writer.WriteAsync(new Row { Id = 1 });
-
-        _ = await act.Should().ThrowAsync<TimeoutException>();
-        connection.Executed.Should().HaveCount(4);
-    }
-
-    [Fact]
-    public async Task PerRow_RecoversWhenARetrySucceeds_WritingTheRowOnce()
-    {
-        var connection = new ScriptedConnection((index, _) => index == 0
-            ? SqlExceptions.WithNumber(1205)
-            : null);
-
-        var writer = PerRowWriter(connection);
-
-        await writer.WriteAsync(new Row { Id = 7 });
-
-        connection.Executed.Should().HaveCount(2);
-        connection.Committed.Should().ContainSingle().Which.Parameters.Should().Contain(7);
-    }
-
-    [Fact]
-    public async Task PerRow_DoesNotRetryAPermanentFailure()
-    {
-        var connection = new ScriptedConnection((_, _) => SqlExceptions.WithNumber(2627));
-        var writer = PerRowWriter(connection);
-
-        var act = () => writer.WriteAsync(new Row { Id = 1 });
-
-        _ = await act.Should().ThrowAsync<SqlException>();
-        connection.Executed.Should().ContainSingle();
-    }
-
-    [Fact]
-    public async Task PerRow_ReopensAConnectionTheFailureClosedBeforeRetrying()
-    {
-        ScriptedConnection connection = null!;
-
-        connection = new ScriptedConnection((index, _) =>
-        {
-            if (index > 0)
-                return null;
-
-            connection.IsOpen = false;
-            return SqlExceptions.WithNumber(64);
-        });
-
-        var writer = PerRowWriter(connection);
-
-        await writer.WriteAsync(new Row { Id = 1 });
-
-        connection.Opens.Should().Be(1);
-        connection.Committed.Should().ContainSingle();
-    }
-
-    [Fact]
-    public async Task Batch_RetriesOnlyTheChunkThatFailed()
-    {
-        // Three chunks of two rows. The third fails once: the first two are already committed and must not be sent again.
-        var connection = new ScriptedConnection((index, _) => index == 2
-            ? new TimeoutException("injected")
-            : null);
-
-        var writer = BatchWriter(connection, 2);
-
-        await writer.WriteBatchAsync(Rows(6));
-
-        connection.Executed.Should().HaveCount(4);
-        CommittedIds(connection).Should().Equal(1, 2, 3, 4, 5, 6);
-    }
-
-    [Fact]
-    public async Task Batch_DoesNotResendAFailedChunkWhenDisposed()
-    {
-        var connection = new ScriptedConnection((_, _) => SqlExceptions.WithNumber(2627));
-        var writer = BatchWriter(connection, 10);
-
-        var act = () => writer.WriteBatchAsync(Rows(3));
-        _ = await act.Should().ThrowAsync<SqlException>();
-
-        await writer.DisposeAsync();
-
-        connection.Executed.Should().ContainSingle("the failure was reported; disposing must not quietly write the rows again");
-    }
-
-    [Fact]
-    public async Task Writers_MakeOneAttemptInsideATransactionTheyDoNotOwn()
-    {
-        // ExactlyOnce: the sink's transaction may already have been rolled back by the failure (a deadlock does that), so a
-        // retry would commit this statement without the ones before it. The failure goes to the transaction's owner.
-        var connection = new ScriptedConnection((_, _) => SqlExceptions.WithNumber(1205))
-        {
-            CurrentTransaction = A.Fake<IDatabaseTransaction>(),
-        };
-
-        var perRow = () => PerRowWriter(connection).WriteAsync(new Row { Id = 1 });
-        _ = await perRow.Should().ThrowAsync<SqlException>();
-
-        var batch = () => BatchWriter(connection, 10).WriteBatchAsync(Rows(2));
-        _ = await batch.Should().ThrowAsync<SqlException>();
-
-        connection.Executed.Should().HaveCount(2);
-    }
-
-    [Fact]
-    public async Task PipelineCancellation_StopsWithoutAnotherAttempt()
-    {
-        using var cts = new CancellationTokenSource();
-
-        var connection = new ScriptedConnection((_, _) =>
-        {
-            cts.Cancel();
-            return new TimeoutException("injected");
-        });
-
-        var writer = PerRowWriter(connection, SqlServerConnectorResilience.Default);
-
-        var act = () => writer.WriteAsync(new Row { Id = 1 }, cts.Token);
-
-        _ = await act.Should().ThrowAsync<OperationCanceledException>();
-        connection.Executed.Should().ContainSingle();
-    }
-
-    [Fact]
-    public async Task ForeignCancellation_IsAFailureThatIsNotRetried()
-    {
-        var connection = new ScriptedConnection((_, _) => new OperationCanceledException("not the pipeline's token"));
-        var writer = PerRowWriter(connection);
-
-        var act = () => writer.WriteAsync(new Row { Id = 1 });
-
-        _ = await act.Should().ThrowAsync<OperationCanceledException>();
-        connection.Executed.Should().ContainSingle();
-    }
-
-    private static SqlServerPerRowWriter<Row> PerRowWriter(IDatabaseConnection connection, Resilience? resilience = null) =>
-        new(connection, "dbo", "rows", null,
-            new SqlServerConfiguration { Resilience = resilience ?? Fast });
-
-    private static SqlServerBatchWriter<Row> BatchWriter(IDatabaseConnection connection, int batchSize) =>
-        new(connection, "dbo", "rows", null,
-            new SqlServerConfiguration { Resilience = Fast, BatchSize = batchSize });
-
-    private static IEnumerable<Row> Rows(int count)
-    {
-        return Enumerable.Range(1, count).Select(i => new Row { Id = i });
-    }
-
-    private static IEnumerable<int> CommittedIds(ScriptedConnection connection)
-    {
-        return connection.Committed.SelectMany(c => c.Parameters).OfType<int>();
-    }
-
-    private sealed class Row
-    {
-        public int Id { get; set; }
     }
 }

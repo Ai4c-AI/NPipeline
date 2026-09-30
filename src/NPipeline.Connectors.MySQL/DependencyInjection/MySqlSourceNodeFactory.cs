@@ -1,110 +1,47 @@
+using NPipeline.Connectors.Sql;
 using NPipeline.Connectors.MySql.Configuration;
 using NPipeline.Connectors.MySql.Connection;
-using NPipeline.Connectors.MySql.Mapping;
 using NPipeline.Connectors.MySql.Nodes;
 
 namespace NPipeline.Connectors.MySql.DependencyInjection;
 
-/// <summary>
-///     Factory interface for creating <see cref="MySqlSourceNode{T}" /> instances with DI support.
-/// </summary>
+/// <summary>Creates MySQL sources on the registered connection pool.</summary>
 public interface IMySqlSourceNodeFactory
 {
-    /// <summary>Creates a source node using the default connection.</summary>
-    MySqlSourceNode<T> CreateSourceNode<T>(
-        string query,
-        MySqlConfiguration? configuration = null)
-        where T : class;
+    /// <summary>A source that maps columns to <typeparamref name="T" />'s members by name.</summary>
+    /// <param name="query">The query.</param>
+    /// <param name="configure">Adjusts the default options; set <see cref="MySqlReadOptions.ConnectionName" /> for a named connection.</param>
+    MySqlSourceNode<T> CreateSourceNode<T>(string query, Func<MySqlReadOptions, MySqlReadOptions>? configure = null);
 
-    /// <summary>Creates a source node with a custom mapper using the default connection.</summary>
-    MySqlSourceNode<T> CreateSourceNode<T>(
-        string query,
-        Func<MySqlRow, T>? customMapper,
-        MySqlConfiguration? configuration = null)
-        where T : class;
-
-    /// <summary>Creates a source node using a named connection.</summary>
-    MySqlSourceNode<T> CreateSourceNode<T>(
-        string query,
-        string? connectionName,
-        MySqlConfiguration? configuration = null)
-        where T : class;
-
-    /// <summary>Creates a source node using a named connection with a custom mapper.</summary>
-    MySqlSourceNode<T> CreateSourceNode<T>(
-        string query,
-        string? connectionName,
-        Func<MySqlRow, T>? customMapper,
-        MySqlConfiguration? configuration = null)
-        where T : class;
+    /// <summary>A source that builds each record from a <see cref="SqlRow" /> with <paramref name="map" />.</summary>
+    /// <param name="query">The query.</param>
+    /// <param name="map">Builds a record from a row.</param>
+    /// <param name="configure">Adjusts the default options.</param>
+    MySqlSourceNode<T> CreateSourceNode<T>(string query, Func<SqlRow, T> map, Func<MySqlReadOptions, MySqlReadOptions>? configure = null);
 }
 
-/// <summary>
-///     Default implementation of <see cref="IMySqlSourceNodeFactory" />.
-/// </summary>
-public class MySqlSourceNodeFactory : IMySqlSourceNodeFactory
+/// <summary>Creates MySQL sources on the registered connection pool.</summary>
+/// <param name="connectionPool">The pool.</param>
+public class MySqlSourceNodeFactory(IMySqlConnectionPool connectionPool) : IMySqlSourceNodeFactory
 {
-    private readonly IMySqlConnectionPool _connectionPool;
-
-    /// <summary>Initialises a new <see cref="MySqlSourceNodeFactory" />.</summary>
-    public MySqlSourceNodeFactory(IMySqlConnectionPool connectionPool)
-    {
-        _connectionPool = connectionPool ?? throw new ArgumentNullException(nameof(connectionPool));
-    }
+    private readonly IMySqlConnectionPool _connectionPool = connectionPool ?? throw new ArgumentNullException(nameof(connectionPool));
 
     /// <inheritdoc />
-    public MySqlSourceNode<T> CreateSourceNode<T>(
-        string query,
-        MySqlConfiguration? configuration = null)
-        where T : class
-    {
-        ArgumentNullException.ThrowIfNull(query);
-        var config = configuration ?? new MySqlConfiguration();
-        return new MySqlSourceNode<T>(_connectionPool, query, config, null, config.ContinueOnError);
-    }
+    public MySqlSourceNode<T> CreateSourceNode<T>(string query, Func<MySqlReadOptions, MySqlReadOptions>? configure = null) =>
+        new(Options(query, configure));
 
     /// <inheritdoc />
-    public MySqlSourceNode<T> CreateSourceNode<T>(
-        string query,
-        Func<MySqlRow, T>? customMapper,
-        MySqlConfiguration? configuration = null)
-        where T : class
+    public MySqlSourceNode<T> CreateSourceNode<T>(string query, Func<SqlRow, T> map, Func<MySqlReadOptions, MySqlReadOptions>? configure = null) =>
+        new(Options(query, configure), map ?? throw new ArgumentNullException(nameof(map)));
+
+    private MySqlReadOptions Options(string query, Func<MySqlReadOptions, MySqlReadOptions>? configure)
     {
-        ArgumentNullException.ThrowIfNull(query);
-        var config = configuration ?? new MySqlConfiguration();
-        return new MySqlSourceNode<T>(_connectionPool, query, customMapper, config, null, config.ContinueOnError);
-    }
+        var options = new MySqlReadOptions { ConnectionPool = _connectionPool, Query = query };
+        options = configure is null ? options : configure(options);
 
-    /// <inheritdoc />
-    public MySqlSourceNode<T> CreateSourceNode<T>(
-        string query,
-        string? connectionName,
-        MySqlConfiguration? configuration = null)
-        where T : class
-    {
-        ArgumentNullException.ThrowIfNull(query);
+        if (options.ConnectionName is { Length: > 0 } name && !_connectionPool.HasNamedConnection(name))
+            throw new InvalidOperationException($"Named connection '{name}' not found.");
 
-        if (!string.IsNullOrWhiteSpace(connectionName) && !_connectionPool.HasNamedConnection(connectionName))
-            throw new InvalidOperationException($"Named connection '{connectionName}' not found.");
-
-        var config = configuration ?? new MySqlConfiguration();
-        return new MySqlSourceNode<T>(_connectionPool, query, config, null, config.ContinueOnError, connectionName);
-    }
-
-    /// <inheritdoc />
-    public MySqlSourceNode<T> CreateSourceNode<T>(
-        string query,
-        string? connectionName,
-        Func<MySqlRow, T>? customMapper,
-        MySqlConfiguration? configuration = null)
-        where T : class
-    {
-        ArgumentNullException.ThrowIfNull(query);
-
-        if (!string.IsNullOrWhiteSpace(connectionName) && !_connectionPool.HasNamedConnection(connectionName))
-            throw new InvalidOperationException($"Named connection '{connectionName}' not found.");
-
-        var config = configuration ?? new MySqlConfiguration();
-        return new MySqlSourceNode<T>(_connectionPool, query, customMapper, config, null, config.ContinueOnError, connectionName);
+        return options;
     }
 }

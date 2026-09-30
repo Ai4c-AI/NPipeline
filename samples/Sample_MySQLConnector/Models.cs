@@ -7,7 +7,6 @@ namespace Sample_MySQLConnector;
 ///     Represents a product entity with MySQL-specific mapping attributes.
 ///     Demonstrates the use of MySqlTable, MySqlColumn, Column, and IgnoreColumn attributes.
 /// </summary>
-[MySqlTable("products")]
 public sealed class Product
 {
     /// <summary>
@@ -71,7 +70,6 @@ public sealed class Product
 ///     Represents an order event entity with MySQL-specific mapping attributes.
 ///     Demonstrates upsert patterns using ON DUPLICATE KEY UPDATE.
 /// </summary>
-[MySqlTable("order_events")]
 public sealed class OrderEvent
 {
     /// <summary>

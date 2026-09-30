@@ -36,7 +36,8 @@ public sealed class DuckDBColumnAttribute : Attribute
     public bool Ignore { get; init; }
 
     /// <summary>
-    ///     Mark this column as part of the primary key (used for upsert support with the SQL write strategy).
+    ///     Makes this column part of the primary key of a table the sink creates (<c>AutoCreateTable</c>). Without any, a
+    ///     created table's primary key is the upsert keys.
     /// </summary>
-    public bool PrimaryKey { get; set; }
+    public bool PrimaryKey { get; init; }
 }

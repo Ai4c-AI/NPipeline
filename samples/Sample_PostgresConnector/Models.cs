@@ -6,11 +6,10 @@ namespace Sample_PostgresConnector;
 ///     Customer model representing a customer record in the database.
 ///     Demonstrates convention-based mapping with snake_case column names.
 /// </summary>
-[PostgresTable("customers")]
 public class Customer
 {
     /// <summary>Gets or sets the customer identifier.</summary>
-    [PostgresColumn("customer_id", PrimaryKey = true)]
+    [PostgresColumn("customer_id")]
     public int CustomerId { get; set; }
 
     /// <summary>Gets or sets the customer's first name.</summary>
@@ -65,11 +64,10 @@ public class Customer
 ///     Product model representing a product in the catalog.
 ///     Demonstrates attribute-based mapping with custom column names.
 /// </summary>
-[PostgresTable("products")]
 public class Product
 {
     /// <summary>Gets or sets the product identifier.</summary>
-    [PostgresColumn("product_id", PrimaryKey = true)]
+    [PostgresColumn("product_id")]
     public int ProductId { get; set; }
 
     /// <summary>Gets or sets the product name.</summary>
@@ -126,11 +124,10 @@ public class Product
 ///     Order model representing a customer order.
 ///     Demonstrates relationship mapping with foreign keys.
 /// </summary>
-[PostgresTable("orders")]
 public class Order
 {
     /// <summary>Gets or sets the order identifier.</summary>
-    [PostgresColumn("order_id", PrimaryKey = true)]
+    [PostgresColumn("order_id")]
     public int OrderId { get; set; }
 
     /// <summary>Gets or sets the customer identifier (foreign key).</summary>
@@ -202,11 +199,10 @@ public class Order
 ///     OrderItem model representing items within an order.
 ///     Demonstrates many-to-one relationship with orders and products.
 /// </summary>
-[PostgresTable("order_items")]
 public class OrderItem
 {
     /// <summary>Gets or sets the order item identifier.</summary>
-    [PostgresColumn("order_item_id", PrimaryKey = true)]
+    [PostgresColumn("order_item_id")]
     public int OrderItemId { get; set; }
 
     /// <summary>Gets or sets the order identifier (foreign key).</summary>
@@ -245,11 +241,10 @@ public class OrderItem
 ///     OrderSummary model for reporting and analytics.
 ///     Demonstrates computed fields and aggregation patterns.
 /// </summary>
-[PostgresTable("order_summaries")]
 public class OrderSummary
 {
     /// <summary>Gets or sets the summary identifier.</summary>
-    [PostgresColumn("summary_id", PrimaryKey = true)]
+    [PostgresColumn("summary_id")]
     public int SummaryId { get; set; }
 
     /// <summary>Gets or sets the order identifier.</summary>

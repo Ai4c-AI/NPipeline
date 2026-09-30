@@ -1,13 +1,12 @@
-using Npgsql;
 using NPipeline.Connectors.Postgres.Exceptions;
+using Npgsql;
 using NResilience;
-using PostgresException = NPipeline.Connectors.Postgres.Exceptions.PostgresException;
 
 namespace NPipeline.Connectors.Postgres.Reliability;
 
 /// <summary>
 ///     Resilience presets for the PostgreSQL connector. Assign one to
-///     <see cref="Configuration.PostgresConfiguration.Resilience" />, or derive your own with a <c>with</c> expression.
+///     <see cref="Configuration.PostgresWriteOptions.Resilience" />, or derive your own with a <c>with</c> expression.
 /// </summary>
 /// <remarks>
 ///     <para>
@@ -23,8 +22,8 @@ namespace NPipeline.Connectors.Postgres.Reliability;
 ///     </para>
 ///     <para>
 ///         The presets have no attempt timeout and no deadline. Each attempt is bounded by
-///         <see cref="Configuration.PostgresConfiguration.CommandTimeout" /> instead, or
-///         <see cref="Configuration.PostgresConfiguration.CopyTimeout" /> for <c>COPY</c>. A timeout set on the policy applies to
+///         <see cref="NPipeline.Connectors.Sql.SqlNodeOptions.CommandTimeout" /> instead, or
+///         <c>CommandTimeout</c> for <c>COPY</c>. A timeout set on the policy applies to
 ///         every operation, <c>COPY</c> included.
 ///     </para>
 /// </remarks>
@@ -37,13 +36,12 @@ public static class PostgresConnectorResilience
     ///     <see cref="NpgsqlException.IsTransient" />.
     /// </summary>
     public static Classifier Classifier { get; } = Classifier.Default
-        .On<NpgsqlException>(Judge)
-        .On<PostgresException>(Judge);
+        .On<NpgsqlException>(Judge);
 
     /// <summary>
     ///     Four attempts (three retries) and exponential backoff with full jitter from one second up to 30 seconds, or
     ///     from five seconds when the server has too many connections. There is no attempt timeout or deadline;
-    ///     <see cref="Configuration.PostgresConfiguration.CommandTimeout" /> (or <c>CopyTimeout</c> for <c>COPY</c>) bounds
+    ///     <see cref="NPipeline.Connectors.Sql.SqlNodeOptions.CommandTimeout" /> bounds
     ///     each attempt. Replaces
     ///     <c>MaxRetryAttempts = 3</c> and <c>RetryDelay = 1 s</c>.
     /// </summary>
@@ -73,11 +71,6 @@ public static class PostgresConnectorResilience
             NpgsqlException client => client.IsTransient
                 ? Verdict.Transient
                 : Verdict.Permanent,
-
-            // The connector's own wrapper, thrown by the source: judge the SQLSTATE it carries, or what it wraps.
-            PostgresException { ErrorCode: { } sqlState } => FromSqlState(sqlState),
-            PostgresException { InnerException: NpgsqlException or PostgresException } wrapper => Judge(wrapper.InnerException!),
-            PostgresException { InnerException: { } inner } => Classifier.Default.ClassifyException(inner),
             _ => Verdict.Permanent,
         };
     }
@@ -87,7 +80,7 @@ public static class PostgresConnectorResilience
         if (PostgresTransientErrorDetector.IsThrottlingSqlState(sqlState))
             return Verdict.Throttled();
 
-        return PostgresTransientErrorDetector.IsTransientSqlState(sqlState) || PostgresExceptionHandler.IsTransientSqlState(sqlState)
+        return PostgresTransientErrorDetector.IsTransientSqlState(sqlState)
             ? Verdict.Transient
             : Verdict.Permanent;
     }
