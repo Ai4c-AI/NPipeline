@@ -10,6 +10,11 @@
     "paths": ["src/NPipeline.Connectors.Azure.ServiceBus/", "tests/NPipeline.Connectors.Azure.ServiceBus.Tests/"]
   },
   {
+    "name": "Connectors.Database.RoundTrip",
+    "test": "tests/NPipeline.Connectors.Database.RoundTrip.Tests/NPipeline.Connectors.Database.RoundTrip.Tests.csproj",
+    "paths": ["src/NPipeline.Connectors/", "src/NPipeline.Connectors.DuckDB/", "src/NPipeline.Connectors.MySQL/", "src/NPipeline.Connectors.Postgres/", "src/NPipeline.Connectors.SqlServer/", "tests/NPipeline.Connectors.Database.RoundTrip.Tests/"]
+  },
+  {
     "name": "Connectors.Kafka",
     "test": "tests/NPipeline.Connectors.Kafka.Tests/NPipeline.Connectors.Kafka.Tests.csproj",
     "paths": ["src/NPipeline.Connectors.Kafka/", "tests/NPipeline.Connectors.Kafka.Tests/"]
