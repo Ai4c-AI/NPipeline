@@ -16,6 +16,7 @@ using Xunit;
 
 namespace NPipeline.Connectors.Tests.Files;
 
+[Collection(MetricCaptureCollection.Name)]
 public sealed class FileSourceNodeTests
 {
     private readonly InMemoryStorageProvider _provider = new();
@@ -300,6 +301,7 @@ public sealed class FileSourceNodeTests
     }
 }
 
+[Collection(MetricCaptureCollection.Name)]
 public sealed class FileSinkNodeTests
 {
     private static readonly StorageUri Target = InMemoryStorageProvider.Uri("out/data.txt");
@@ -436,6 +438,16 @@ public sealed class FileSinkNodeTests
     }
 
     private string Text(StorageUri uri) => Encoding.UTF8.GetString(_provider.Get(uri));
+}
+
+/// <summary>
+/// Meter listeners see measurements from the whole process, so tests that assert on metrics run with
+/// no other test in flight.
+/// </summary>
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class MetricCaptureCollection
+{
+    public const string Name = "Connector metrics";
 }
 
 /// <summary>Collects connector measurements published while it is alive.</summary>
