@@ -94,26 +94,25 @@ public class ExcelBenchmarks() : FileConnectorBenchmark(".xlsx")
 
 public class ParquetBenchmarks() : FileConnectorBenchmark(".parquet")
 {
-    private static readonly ParquetConfiguration Configuration = new() { UseAtomicWrite = false };
-
-    private static readonly ParquetConfiguration ProjectedConfiguration = new()
-    {
-        UseAtomicWrite = false,
-        ProjectedColumns = [nameof(WideRecord.Id), nameof(WideRecord.Name), nameof(WideRecord.Total)],
-    };
+    private static readonly string[] ThreeColumns = [nameof(WideRecord.Id), nameof(WideRecord.Name), nameof(WideRecord.Total)];
 
     protected override int Rows => 100_000;
 
-    /// <summary>Three of twenty columns: the case that projection (PQ-P3) and typed columnar mapping (PQ-P1) speed up.</summary>
+    /// <summary>Three of twenty columns into a record: only the mapped columns are read.</summary>
     [Benchmark]
-    public Task<int> ReadThreeColumns() =>
-        NodeRunner.ReadAsync(new ParquetSourceNode<(int, string, decimal)>(
-            Provider,
+    public Task<int> ReadThreeColumns() => NodeRunner.ReadAsync(ParquetConnector.Source<NarrowRecord>(ReadUri, o => o with { Provider = Provider }));
+
+    /// <summary>Three of twenty columns through <see cref="ParquetRow" /> and a manual mapper.</summary>
+    [Benchmark]
+    public Task<int> ReadThreeColumnsManually() =>
+        NodeRunner.ReadAsync(ParquetConnector.Source(
             ReadUri,
             row => (row.Get<int>(nameof(WideRecord.Id)), row.Get<string>(nameof(WideRecord.Name)), row.Get<decimal>(nameof(WideRecord.Total))),
-            ProjectedConfiguration));
+            o => o with { Provider = Provider, ProjectedColumns = ThreeColumns }));
 
-    protected override Task WriteAsync(StorageUri uri) => NodeRunner.WriteAsync(new ParquetSinkNode<WideRecord>(Provider, uri, Configuration), Records);
+    protected override Task WriteAsync(StorageUri uri) => NodeRunner.WriteAsync(ParquetConnector.Sink<WideRecord>(uri, o => o with { Provider = Provider }), Records);
 
-    protected override Task<int> ReadAsync(StorageUri uri) => NodeRunner.ReadAsync(new ParquetSourceNode<WideRecord>(Provider, uri, Configuration));
+    protected override Task<int> ReadAsync(StorageUri uri) => NodeRunner.ReadAsync(ParquetConnector.Source<WideRecord>(uri, o => o with { Provider = Provider }));
+
+    public sealed record NarrowRecord(int Id, string Name, decimal Total);
 }

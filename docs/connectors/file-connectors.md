@@ -8,7 +8,7 @@ order: 1
 
 The file connectors are built on one pair of base classes in `NPipeline.Connectors`, so they share their options,
 storage handling, error handling and metrics. This page describes that shared behaviour; each connector's page covers
-its format. The [CSV](csv.md), [JSON](json.md) and [Excel](excel.md) connectors use these bases; Parquet moves onto them next.
+its format. The [CSV](csv.md), [JSON](json.md), [Excel](excel.md) and [Parquet](parquet.md) connectors use these bases.
 
 ## Creating nodes
 
@@ -33,6 +33,8 @@ are immutable records, validated when the node is created.
 | `Compression` | `Auto` | `Auto` picks by suffix: `.gz` (gzip), `.br` (Brotli), `.zz` or `.zlib` (zlib), `.deflate`. Or `None`, `Gzip`, `Brotli`, `ZLib`, `Deflate`. |
 | `BufferSize` | 64 KB | The buffer for the format's reader or writer. |
 
+Excel and Parquet compress inside the file, so they do not take a stream `Compression`.
+
 Local files need neither a provider nor a resolver. For cloud storage, pass a provider, or a resolver that knows the
 scheme; see [Storage Providers](../storage-providers/index.md).
 
@@ -53,6 +55,13 @@ Files are read one after another, in ordinal path order. There is no `?` wildcar
 string. Listing needs a provider that supports it.
 
 Each file listed keeps the original URI's query parameters, so credentials and regions set there apply to every file.
+
+### Reading files in parallel
+
+Set `FileReadParallelism` above 1 to read that many files at once. Records still come out in path order: while the
+pipeline consumes one file, the next ones are read into bounded buffers, so a slow store's latency overlaps with work.
+Stopping early (a `Take`, a failure or cancellation) stops the readers and releases their files. It helps most with
+many small or medium files on object storage.
 
 ### Formats that need to seek
 

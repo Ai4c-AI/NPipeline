@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Threading.Channels;
 using NPipeline.Connectors.Diagnostics;
 using NPipeline.Connectors.Errors;
 using NPipeline.DataFlow;
@@ -102,6 +103,9 @@ public abstract class FileSourceNode<T> : SourceNode<T>
     /// <summary>The connector's name in metrics and traces, such as <c>csv</c>.</summary>
     protected abstract string ConnectorName { get; }
 
+    /// <summary>How many records each file read ahead of the current one may buffer. Defaults to 1,024.</summary>
+    protected virtual int ReadAheadBuffer => 1024;
+
     /// <summary>When <see cref="FileNodeOptions.Uri" /> is a directory, the file suffixes to read (for example <c>.parquet</c>); empty reads every file.</summary>
     protected virtual IReadOnlyList<string> DirectoryFileExtensions => [];
 
@@ -133,13 +137,104 @@ public abstract class FileSourceNode<T> : SourceNode<T>
         var files = await FileNodeSupport.ExpandAsync(provider, Options.Uri, Options.Recursive, DirectoryFileExtensions, cancellationToken)
             .ConfigureAwait(false);
 
-        foreach (var file in files)
+        if (Options.FileReadParallelism == 1 || files.Count < 2)
         {
-            await foreach (var item in ReadFileAsync(provider, file, deadLetters, cancellationToken).ConfigureAwait(false))
+            foreach (var file in files)
             {
-                yield return item;
+                await foreach (var item in ReadFileAsync(provider, file, deadLetters, cancellationToken).ConfigureAwait(false))
+                {
+                    yield return item;
+                }
+            }
+
+            yield break;
+        }
+
+        await foreach (var item in ReadFilesAheadAsync(provider, files, deadLetters, cancellationToken).ConfigureAwait(false))
+        {
+            yield return item;
+        }
+    }
+
+    /// <summary>
+    ///     Reads up to <see cref="FileSourceOptions.FileReadParallelism" /> files at once, yielding their records in file
+    ///     order. It is a sliding window: file <c>i + p</c> starts only once file <c>i</c> has been drained, so the file being
+    ///     consumed is always running and the bounded buffers cannot deadlock.
+    /// </summary>
+    private async IAsyncEnumerable<T> ReadFilesAheadAsync(
+        IStorageProvider provider,
+        IReadOnlyList<StorageUri> files,
+        DeadLetterChannel deadLetters,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var window = Math.Min(Options.FileReadParallelism, files.Count);
+        using var workers = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var running = new Queue<(Channel<T> Channel, Task Worker)>(window);
+        var next = 0;
+
+        try
+        {
+            while (running.Count < window)
+            {
+                running.Enqueue(StartReadAhead(provider, files[next++], deadLetters, workers.Token));
+            }
+
+            while (running.TryPeek(out var current))
+            {
+                await foreach (var item in current.Channel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    yield return item;
+                }
+
+                await current.Worker.ConfigureAwait(false);
+                _ = running.Dequeue();
+
+                if (next < files.Count)
+                    running.Enqueue(StartReadAhead(provider, files[next++], deadLetters, workers.Token));
             }
         }
+        finally
+        {
+            // The consumer stopped early or a file failed: stop the remaining readers and wait for them, so none is left
+            // blocked on a full buffer holding an open stream.
+            await workers.CancelAsync().ConfigureAwait(false);
+
+            foreach (var (_, worker) in running)
+            {
+                await worker.ConfigureAwait(false);
+            }
+        }
+    }
+
+    private (Channel<T> Channel, Task Worker) StartReadAhead(IStorageProvider provider, StorageUri file, DeadLetterChannel deadLetters, CancellationToken cancellationToken)
+    {
+        var channel = Channel.CreateBounded<T>(new BoundedChannelOptions(ReadAheadBuffer)
+        {
+            FullMode = BoundedChannelFullMode.Wait,
+            SingleReader = true,
+            SingleWriter = true,
+        });
+
+        // The worker never throws: every outcome, including cancellation, completes the channel, so the reader either
+        // drains it or observes the error.
+        var worker = Task.Run(async () =>
+        {
+            try
+            {
+                await foreach (var item in ReadFileAsync(provider, file, deadLetters, cancellationToken).ConfigureAwait(false))
+                {
+                    await channel.Writer.WriteAsync(item, cancellationToken).ConfigureAwait(false);
+                }
+
+                _ = channel.Writer.TryComplete();
+            }
+            catch (Exception ex)
+            {
+                _ = channel.Writer.TryComplete(ex);
+            }
+        }, CancellationToken.None);
+
+        return (channel, worker);
     }
 
     private async IAsyncEnumerable<T> ReadFileAsync(

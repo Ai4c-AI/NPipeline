@@ -182,6 +182,39 @@ public sealed class FileSourceNodeTests
     }
 
     [Fact]
+    public async Task Reads_files_ahead_in_parallel_and_keeps_file_order()
+    {
+        for (var i = 0; i < 20; i++)
+        {
+            Put($"in/{i:D2}.txt", string.Join('\n', Enumerable.Range(0, 50).Select(j => $"{i}-{j}")));
+        }
+
+        var rows = await NodeRunner(new LineSource(new LineSourceOptions { Uri = InMemoryStorageProvider.Uri("in/"), Provider = _provider, FileReadParallelism = 4 }));
+
+        rows.Should().Equal(Enumerable.Range(0, 20).SelectMany(i => Enumerable.Range(0, 50).Select(j => $"{i}-{j}")));
+    }
+
+    [Fact]
+    public async Task Stopping_a_parallel_read_early_releases_the_readers()
+    {
+        for (var i = 0; i < 40; i++)
+        {
+            Put($"in/{i:D2}.txt", string.Join('\n', Enumerable.Range(0, 5_000).Select(j => $"{j}")));
+        }
+
+        var source = new LineSource(new LineSourceOptions { Uri = InMemoryStorageProvider.Uri("in/"), Provider = _provider, FileReadParallelism = 8 });
+        var read = 0;
+
+        await foreach (var _ in source.OpenStream(new PipelineContext(), CancellationToken.None))
+        {
+            if (++read == 10)
+                break;
+        }
+
+        read.Should().Be(10, "disposing the stream stops and awaits the readers instead of hanging");
+    }
+
+    [Fact]
     public async Task Reports_rows_bytes_and_files_with_bounded_tags()
     {
         Put("data.txt", "a\nb\nc\n");

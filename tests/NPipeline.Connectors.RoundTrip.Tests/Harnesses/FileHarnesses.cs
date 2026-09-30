@@ -36,9 +36,7 @@ public sealed class ExcelHarness() : FileConnectorHarness(".xlsx")
 public sealed class ParquetHarness() : FileConnectorHarness(".parquet")
 {
     /// <summary>Small row groups by default, so round trips cross row-group boundaries.</summary>
-    public Func<ParquetConfiguration> Configuration { get; init; } = () => new ParquetConfiguration { RowGroupSize = 1_000 };
+    protected override SinkNode<T> CreateSink<T>() => ParquetConnector.Sink<T>(Uri, o => o with { Provider = Provider, RowGroupSize = 1_000 });
 
-    protected override SinkNode<T> CreateSink<T>() => new ParquetSinkNode<T>(Provider, Uri, Configuration());
-
-    protected override SourceNode<T> CreateSource<T>() => new ParquetSourceNode<T>(Provider, Uri, Configuration());
+    protected override SourceNode<T> CreateSource<T>() => ParquetConnector.Source<T>(Uri, o => o with { Provider = Provider });
 }

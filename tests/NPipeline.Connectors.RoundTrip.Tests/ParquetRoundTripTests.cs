@@ -1,3 +1,4 @@
+using NPipeline.Connectors.Files;
 using NPipeline.Connectors.Parquet;
 using NPipeline.Connectors.RoundTrip.Tests.Harnesses;
 using NPipeline.Connectors.RoundTrip.Tests.Infrastructure;
@@ -14,13 +15,13 @@ public sealed class ParquetRoundTripTests
     [Fact]
     public Task Scalars() => RoundTripScenarios.Scalars(_harness);
 
-    [KnownBugFact("PQ-4")]
+    [Fact]
     public Task SmallAndUnsignedIntegers() => RoundTripScenarios.SmallAndUnsignedIntegers(_harness);
 
     [Fact]
     public Task Nullables() => RoundTripScenarios.Nullables(_harness);
 
-    [KnownBugFact("PQ-3")]
+    [Fact]
     public Task Enums() => RoundTripScenarios.Enums(_harness);
 
     [Fact]
@@ -35,13 +36,13 @@ public sealed class ParquetRoundTripTests
     [Fact]
     public Task ControlCharacters() => RoundTripScenarios.ControlCharacters(_harness);
 
-    [KnownBugFact("PQ-10")]
+    [Fact]
     public Task Binary() => RoundTripScenarios.Binary(_harness);
 
-    [KnownBugFact("PQ-5")]
+    [Fact]
     public Task Lists() => RoundTripScenarios.Lists(_harness);
 
-    [KnownBugFact("X-1")]
+    [Fact]
     public Task PositionalRecords() => RoundTripScenarios.PositionalRecords(_harness);
 
     [Fact]
@@ -50,7 +51,7 @@ public sealed class ParquetRoundTripTests
     [Fact]
     public Task Empty() => RoundTripScenarios.Empty(_harness);
 
-    [KnownBugFact("PQ-12")]
+    [Fact]
     public Task Reads_from_non_seekable_streams() =>
         RoundTripScenarios.Scalars(new ParquetHarness { Provider = new InMemoryStorageProvider { NonSeekableReads = true } });
 
@@ -70,7 +71,8 @@ public sealed class ParquetRoundTripTests
     public async Task Atomic_write_keeps_uri_parameters_on_the_temporary_object()
     {
         var uri = StorageUri.Parse("mem://test/data.parquet?region=ap-southeast-2");
-        var sink = new ParquetSinkNode<ScalarRecord>(_harness.Provider, uri, new ParquetConfiguration());
+        // Always: the in-memory provider cannot move objects, so Auto would write the target directly.
+        var sink = ParquetConnector.Sink<ScalarRecord>(uri, o => o with { Provider = _harness.Provider, AtomicWrite = AtomicWrite.Always });
 
         await NodeRunner.WriteAsync(sink, [ScalarRecord.Create(1)]);
 
@@ -85,18 +87,16 @@ public sealed class ParquetRoundTripTests
         const int files = 40;
         const int rowsPerFile = 200;
         var provider = new InMemoryStorageProvider();
-        var configuration = new ParquetConfiguration { RowGroupSize = 10, FileReadParallelism = 4, UseAtomicWrite = false };
-
         for (var file = 0; file < files; file++)
         {
-            var sink = new ParquetSinkNode<ScalarRecord>(provider, InMemoryStorageProvider.Uri($"parts/f{file:D2}.parquet"), configuration);
+            var sink = ParquetConnector.Sink<ScalarRecord>(InMemoryStorageProvider.Uri($"parts/f{file:D2}.parquet"), o => o with { Provider = provider, RowGroupSize = 10 });
             await NodeRunner.WriteAsync(sink, Enumerable.Range(file * rowsPerFile, rowsPerFile).Select(ScalarRecord.Create));
         }
 
         for (var attempt = 0; attempt < 5; attempt++)
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            var source = new ParquetSourceNode<ScalarRecord>(provider, InMemoryStorageProvider.Uri("parts/"), configuration);
+            var source = ParquetConnector.Source<ScalarRecord>(InMemoryStorageProvider.Uri("parts/"), o => o with { Provider = provider, FileReadParallelism = 4 });
 
             var rows = await NodeRunner.ReadAsync(source, timeout.Token);
 
@@ -108,15 +108,13 @@ public sealed class ParquetRoundTripTests
     public async Task Stopping_a_parallel_read_early_releases_the_workers()
     {
         var provider = new InMemoryStorageProvider();
-        var configuration = new ParquetConfiguration { RowGroupSize = 10, FileReadParallelism = 4, UseAtomicWrite = false };
-
         for (var file = 0; file < 8; file++)
         {
-            var sink = new ParquetSinkNode<ScalarRecord>(provider, InMemoryStorageProvider.Uri($"parts/f{file}.parquet"), configuration);
+            var sink = ParquetConnector.Sink<ScalarRecord>(InMemoryStorageProvider.Uri($"parts/f{file}.parquet"), o => o with { Provider = provider, RowGroupSize = 10 });
             await NodeRunner.WriteAsync(sink, Enumerable.Range(file * 200, 200).Select(ScalarRecord.Create));
         }
 
-        var source = new ParquetSourceNode<ScalarRecord>(provider, InMemoryStorageProvider.Uri("parts/"), configuration);
+        var source = ParquetConnector.Source<ScalarRecord>(InMemoryStorageProvider.Uri("parts/"), o => o with { Provider = provider, FileReadParallelism = 4 });
         var stream = source.OpenStream(NPipeline.Pipeline.PipelineContext.CreateDefault(), CancellationToken.None);
         var read = 0;
 

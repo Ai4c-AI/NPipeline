@@ -155,7 +155,7 @@ public sealed class ExcelToParquetPipeline : IPipelineDefinition
             ExcelConnector.Source<Order>(StorageUri.FromFilePath("orders.xlsx"), o => o with { SheetName = "Orders", SkipRows = 2 }),
             "excel-source");
 
-        var sink = builder.AddSink(new ParquetSinkNode<Order>(StorageUri.FromFilePath("orders.parquet")), "parquet-sink");
+        var sink = builder.AddSink(ParquetConnector.Sink<Order>(StorageUri.FromFilePath("orders.parquet")), "parquet-sink");
 
         builder.Connect(source, sink);
     }

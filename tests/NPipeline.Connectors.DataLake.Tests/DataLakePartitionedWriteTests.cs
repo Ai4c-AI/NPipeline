@@ -342,7 +342,7 @@ public sealed class DataLakePartitionedWriteTests : IAsyncDisposable
 
         var spec = PartitionSpec<OrderRecord>.By(x => x.Region);
 
-        var config = new ParquetConfiguration
+        var config = new DataLakeParquetOptions
         {
             RowGroupSize = 10, // tiny row group to force early flushes
             MaxBufferedRows = maxBufferedRows,
@@ -399,7 +399,7 @@ public sealed class DataLakePartitionedWriteTests : IAsyncDisposable
     {
         // Arrange - row group size much smaller than total records to force multiple flushes
         var spec = PartitionSpec<OrderRecord>.By(x => x.Region);
-        var config = new ParquetConfiguration { RowGroupSize = 5, MaxBufferedRows = 20 };
+        var config = new DataLakeParquetOptions { RowGroupSize = 5, MaxBufferedRows = 20 };
 
         var regions = new[] { "EU", "US", "APAC" };
 

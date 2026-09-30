@@ -1,678 +1,157 @@
-using System.Diagnostics;
-using System.Reflection;
-using NPipeline.Connectors.Parquet.Mapping;
-using NPipeline.DataFlow;
-using NPipeline.Nodes;
-using NPipeline.Pipeline;
-using NPipeline.StorageProviders;
-using NPipeline.StorageProviders.Abstractions;
-using NPipeline.StorageProviders.Exceptions;
-using NPipeline.StorageProviders.Models;
+using System.Collections.Concurrent;
+using NPipeline.Connectors.Files;
+using NPipeline.Connectors.Mapping;
+using NPipeline.Connectors.Parquet.Schema;
+using NPipeline.Connectors.Parquet.Writing;
 using Parquet;
 using Parquet.Schema;
 
 namespace NPipeline.Connectors.Parquet;
 
 /// <summary>
-///     Sink node that writes items to Parquet files using a pluggable <see cref="IStorageProvider" />.
-///     Supports row-group buffered writing with bounded memory usage and atomic write support.
+///     Writes records to a Parquet file. Each record's members are written straight into typed column buffers, and a row
+///     group is flushed at <see cref="ParquetWriteOptions.RowGroupSize" /> rows or <see cref="ParquetWriteOptions.RowGroupBytes" />,
+///     whichever comes first.
 /// </summary>
-/// <typeparam name="T">Record type to serialize for each Parquet row.</typeparam>
-public sealed class ParquetSinkNode<T> : SinkNode<T>
+/// <typeparam name="T">The record type, or a scalar type for a one-column file.</typeparam>
+/// <remarks>
+///     Types map to columns as the connector documentation lists: dates as UTC timestamps, <see cref="Guid" /> as
+///     <c>UUID</c>, enums as their names, <c>decimal</c> as <c>DECIMAL(38, 18)</c> unless
+///     <see cref="Attributes.ParquetDecimalAttribute" /> says otherwise, and lists as <c>LIST</c> columns. On the file
+///     system the file is written under a temporary name and moved into place; object stores are written directly.
+/// </remarks>
+public sealed class ParquetSinkNode<T> : FileSinkNode<T>
 {
-    private static readonly Lazy<IStorageResolver> DefaultResolver =
-        new(() => StorageProviderFactory.CreateResolver());
+    private readonly ParquetWriteOptions _options;
+    private readonly ParquetWriteLayout<T> _layout;
 
-    private readonly ParquetConfiguration _configuration;
-    private readonly IStorageProvider? _provider;
-    private readonly IStorageResolver? _resolver;
-    private readonly StorageUri _uri;
-
-    /// <summary>
-    ///     Construct a Parquet sink node that resolves a storage provider from a resolver at execution time.
-    ///     Uses attribute-based mapping for automatic property-to-column mapping.
-    /// </summary>
-    /// <param name="uri">The URI of the Parquet file to write to.</param>
-    /// <param name="resolver">The storage resolver used to obtain storage provider. If <c>null</c>, a default resolver is used.</param>
-    /// <param name="configuration">Optional configuration for Parquet writing. If <c>null</c>, default configuration is used.</param>
-    /// <exception cref="ArgumentNullException">Thrown if <paramref name="uri" /> is <c>null</c>.</exception>
-    public ParquetSinkNode(
-        StorageUri uri,
-        IStorageResolver? resolver = null,
-        ParquetConfiguration? configuration = null)
+    /// <summary>Creates a sink that writes <typeparamref name="T" />'s readable members as columns.</summary>
+    /// <exception cref="NotSupportedException">A member's type has no Parquet column.</exception>
+    public ParquetSinkNode(ParquetWriteOptions options)
+        : base(options)
     {
-        ArgumentNullException.ThrowIfNull(uri);
-        _uri = uri;
-        _configuration = configuration ?? new ParquetConfiguration();
-        _configuration.Validate();
-        _resolver = resolver ?? DefaultResolver.Value;
+        _options = options;
+        _layout = ParquetWriteLayout<T>.For(options.Naming);
     }
 
-    /// <summary>
-    ///     Construct a Parquet sink node that uses a specific storage provider instance.
-    ///     Uses attribute-based mapping for automatic property-to-column mapping.
-    /// </summary>
-    /// <param name="provider">The storage provider to use for writing.</param>
-    /// <param name="uri">The URI of the Parquet file to write to.</param>
-    /// <param name="configuration">Optional configuration for Parquet writing. If <c>null</c>, default configuration is used.</param>
-    /// <exception cref="ArgumentNullException">Thrown if <paramref name="provider" /> or <paramref name="uri" /> is <c>null</c>.</exception>
-    public ParquetSinkNode(
-        IStorageProvider provider,
-        StorageUri uri,
-        ParquetConfiguration? configuration = null)
-    {
-        ArgumentNullException.ThrowIfNull(provider);
-        ArgumentNullException.ThrowIfNull(uri);
-        _uri = uri;
-        _configuration = configuration ?? new ParquetConfiguration();
-        _configuration.Validate();
-        _provider = provider;
-    }
+    /// <summary>The schema the sink writes.</summary>
+    public ParquetSchema Schema => _layout.Schema;
 
     /// <inheritdoc />
-    public override async Task ConsumeAsync(IDataStream<T> input, PipelineContext context, CancellationToken cancellationToken)
+    protected override string ConnectorName => "parquet";
+
+    /// <inheritdoc />
+    protected override bool SupportsCompression => false;
+
+    /// <inheritdoc />
+    protected override async Task WriteAsync(Stream stream, IAsyncEnumerable<T> items, FileWriteContext context, CancellationToken cancellationToken)
     {
-        var provider = _provider ?? StorageProviderFactory.GetProviderOrThrow(
-            _resolver ?? throw new InvalidOperationException("No storage resolver configured for ParquetSinkNode."),
-            _uri);
-
-        if (provider is IStorageProviderMetadataProvider metaProvider)
-        {
-            var meta = metaProvider.GetMetadata();
-
-            if (!meta.SupportsWrite)
-                throw new UnsupportedStorageCapabilityException(_uri, "write", meta.Name);
-        }
-
-        await WriteParquetAsync(provider, input, cancellationToken).ConfigureAwait(false);
-    }
-
-    private async Task WriteParquetAsync(
-        IStorageProvider provider,
-        IDataStream<T> input,
-        CancellationToken cancellationToken)
-    {
-        var observer = _configuration.Observer;
-        var stopwatch = Stopwatch.StartNew();
-        long totalRows = 0;
-        var rowGroupCount = 0;
-
-        // Get schema and column information
-        var schema = ParquetSchemaBuilder.Build<T>();
-        var columnNames = ParquetWriterMapperBuilder.GetColumnNames<T>();
-        var valueGetters = ParquetWriterMapperBuilder.GetValueGetters<T>();
-        var properties = ParquetWriterMapperBuilder.GetProperties<T>();
-
-        // Determine target URI (potentially temp file for atomic write)
-        var targetUri = _uri;
-        var useAtomicWrite = _configuration.UseAtomicWrite;
-
-        var tempUri = useAtomicWrite
-            ? CreateTempUri(_uri)
-            : _uri;
+        var builders = _layout.CreateBuilders();
 
         try
         {
-            var stream = await provider.OpenWriteAsync(tempUri, cancellationToken).ConfigureAwait(false);
-            await using var streamScope = stream.ConfigureAwait(false);
-            var writer = await CreateParquetWriter(stream, schema, cancellationToken).ConfigureAwait(false);
-            await using var writerScope = writer.ConfigureAwait(false);
+            var writer = await ParquetWriter.CreateAsync(_layout.Schema, stream, new ParquetOptions { CompressionMethod = _options.Codec }, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
 
-            // Buffer for accumulating rows before writing a row group
-            var buffer = new List<T>(_configuration.RowGroupSize);
-
-            await foreach (var item in input.WithCancellation(cancellationToken))
+            await using (writer.ConfigureAwait(false))
             {
-                if (item is null)
-                    continue;
+                var fields = new ParquetFieldWriter(builders);
+                var rows = 0;
 
-                buffer.Add(item);
-
-                if (buffer.Count >= _configuration.RowGroupSize)
+                await foreach (var item in items.WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
-                    await WriteRowGroup(writer, buffer, schema, columnNames, valueGetters, properties, cancellationToken).ConfigureAwait(false);
-                    observer?.OnRowGroupWritten(tempUri, rowGroupCount, buffer.Count);
-                    totalRows += buffer.Count;
-                    rowGroupCount++;
-                    buffer.Clear();
+                    _layout.Write(fields, item);
+                    rows++;
+
+                    // Sizes are summed every 256 rows: often enough for row groups to land near the target.
+                    if (rows >= _options.RowGroupSize || ((rows & 255) == 0 && EstimatedBytes(builders) >= _options.RowGroupBytes))
+                    {
+                        await FlushAsync(writer, builders, cancellationToken).ConfigureAwait(false);
+                        rows = 0;
+                    }
                 }
-            }
 
-            // Write any remaining buffered records as a final (potentially partial) row group
-            if (buffer.Count > 0)
-            {
-                await WriteRowGroup(writer, buffer, schema, columnNames, valueGetters, properties, cancellationToken).ConfigureAwait(false);
-                observer?.OnRowGroupWritten(tempUri, rowGroupCount, buffer.Count);
-                totalRows += buffer.Count;
-                rowGroupCount++;
+                if (rows > 0)
+                    await FlushAsync(writer, builders, cancellationToken).ConfigureAwait(false);
             }
-
-            await writer.DisposeAsync().ConfigureAwait(false);
-            await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
         }
-        catch
+        finally
         {
-            // On failure, attempt to clean up temp file if atomic write was enabled
-            // Use CancellationToken.None since the original token may be cancelled
-            if (useAtomicWrite)
+            foreach (var builder in builders)
             {
-                try
-                {
-                    // Best-effort cleanup - we don't want to mask the original exception
-                    if (provider is IDeletableStorageProvider deletableProvider)
-                        await deletableProvider.DeleteAsync(tempUri, CancellationToken.None).ConfigureAwait(false);
-                }
-                catch
-                {
-                    // Ignore cleanup failures
-                }
+                builder.Dispose();
             }
-
-            throw;
-        }
-
-        // For atomic write, now publish the temp file to the final location
-        if (useAtomicWrite && !tempUri.Equals(targetUri))
-            await PublishAtomicWrite(provider, tempUri, targetUri, cancellationToken).ConfigureAwait(false);
-
-        stopwatch.Stop();
-        observer?.OnFileWriteCompleted(targetUri, totalRows, -1, stopwatch.Elapsed);
-    }
-
-    private async Task<ParquetWriter> CreateParquetWriter(
-        Stream stream,
-        ParquetSchema schema,
-        CancellationToken cancellationToken)
-    {
-        var options = new ParquetOptions();
-
-        // Apply compression setting from configuration
-        options.CompressionMethod = _configuration.Compression;
-
-        // Parquet.Net 6.x uses ParquetOptions for configuration
-        var writer = await ParquetWriter.CreateAsync(schema, stream, options, cancellationToken: cancellationToken)
-            .ConfigureAwait(false);
-
-        return writer;
-    }
-
-    private async Task WriteRowGroup(
-        ParquetWriter writer,
-        List<T> buffer,
-        ParquetSchema schema,
-        string[] columnNames,
-        Func<T, object?>[] valueGetters,
-        PropertyInfo[] properties,
-        CancellationToken cancellationToken)
-    {
-        using var rowGroupWriter = writer.CreateRowGroup();
-
-        // Write each column
-        for (var colIndex = 0; colIndex < columnNames.Length; colIndex++)
-        {
-            var columnName = columnNames[colIndex];
-            var dataField = schema.DataFields.FirstOrDefault(f => f.Name == columnName);
-
-            if (dataField is null)
-                continue;
-
-            var property = properties[colIndex];
-            var underlyingType = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
-            var isNullableProperty = Nullable.GetUnderlyingType(property.PropertyType) is not null;
-            var valueGetter = valueGetters[colIndex];
-
-            // Use reflection to call the appropriate WriteAsync<T> method
-            await WriteColumnData(rowGroupWriter, dataField, underlyingType, isNullableProperty, buffer, valueGetter, cancellationToken).ConfigureAwait(false);
         }
     }
 
-    private async Task WriteColumnData(
-        ParquetRowGroupWriter rowGroupWriter,
-        DataField dataField,
-        Type underlyingType,
-        bool isNullableProperty,
-        List<T> buffer,
-        Func<T, object?> valueGetter,
-        CancellationToken cancellationToken)
+    private static long EstimatedBytes(ParquetColumnBuilder[] builders)
     {
-        // Note: WriteAsync in Parquet.Net v6 does not support cancellation tokens
-        // CA2016 warning is suppressed as intentional - the API design doesn't allow token forwarding
-#pragma warning disable CA2016
-        if (underlyingType == typeof(string))
+        long total = 0;
+
+        foreach (var builder in builders)
         {
-            var data = new string?[buffer.Count];
-
-            for (var i = 0; i < buffer.Count; i++)
-            {
-                data[i] = valueGetter(buffer[i]) as string;
-            }
-
-            await rowGroupWriter.WriteAsync(dataField, data).ConfigureAwait(false);
+            total += builder.EstimatedBytes;
         }
-        else if (underlyingType == typeof(int))
+
+        return total;
+    }
+
+    private static async Task FlushAsync(ParquetWriter writer, ParquetColumnBuilder[] builders, CancellationToken cancellationToken)
+    {
+        using var rowGroup = writer.CreateRowGroup();
+
+        foreach (var builder in builders)
         {
-            if (isNullableProperty)
-            {
-                var data = new int?[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is int intValue
-                        ? intValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<int>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new int[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is int intValue
-                        ? intValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<int>(dataField, data).ConfigureAwait(false);
-            }
+            await builder.WriteAsync(rowGroup, cancellationToken).ConfigureAwait(false);
+            builder.Reset();
         }
-        else if (underlyingType == typeof(long))
+    }
+}
+
+/// <summary>The schema and compiled writer for a record type, built once per type and naming policy.</summary>
+internal sealed class ParquetWriteLayout<T>
+{
+    private static readonly ConcurrentDictionary<ColumnNamingPolicy, ParquetWriteLayout<T>> Cache = new();
+
+    private readonly Type[] _memberTypes;
+    private readonly RecordWriterPlan<T, ParquetFieldWriter> _plan;
+
+    private ParquetWriteLayout(ColumnNamingPolicy naming)
+    {
+        var shapeOptions = ParquetShape.Options(naming);
+        var shape = RecordShape.For<T>(shapeOptions);
+        ParquetShape.ThrowIfUnsupported(shape);
+
+        _plan = RecordWriterPlan.Create<T, ParquetFieldWriter>(shapeOptions);
+
+        if (_plan.IsScalar)
         {
-            if (isNullableProperty)
-            {
-                var data = new long?[buffer.Count];
+            if (!ParquetTypeMap.IsSupported(typeof(T)))
+                throw new NotSupportedException($"{typeof(T).Name} has no Parquet column type.");
 
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is long longValue
-                        ? longValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<long>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new long[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is long longValue
-                        ? longValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<long>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (underlyingType == typeof(short))
-        {
-            if (isNullableProperty)
-            {
-                var data = new short?[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is short shortValue
-                        ? shortValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<short>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new short[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is short shortValue
-                        ? shortValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<short>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (underlyingType == typeof(byte))
-        {
-            if (isNullableProperty)
-            {
-                var data = new byte?[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is byte byteValue
-                        ? byteValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<byte>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new byte[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is byte byteValue
-                        ? byteValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<byte>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (underlyingType == typeof(float))
-        {
-            if (isNullableProperty)
-            {
-                var data = new float?[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is float floatValue
-                        ? floatValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<float>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new float[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is float floatValue
-                        ? floatValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<float>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (underlyingType == typeof(double))
-        {
-            if (isNullableProperty)
-            {
-                var data = new double?[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is double doubleValue
-                        ? doubleValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<double>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new double[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is double doubleValue
-                        ? doubleValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<double>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (underlyingType == typeof(bool))
-        {
-            if (isNullableProperty)
-            {
-                var data = new bool?[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is bool boolValue
-                        ? boolValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<bool>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new bool[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is bool boolValue
-                        ? boolValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<bool>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (underlyingType == typeof(decimal))
-        {
-            if (isNullableProperty)
-            {
-                var data = new decimal?[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is decimal decimalValue
-                        ? decimalValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<decimal>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new decimal[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is decimal decimalValue
-                        ? decimalValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<decimal>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (underlyingType == typeof(DateTime))
-        {
-            if (isNullableProperty)
-            {
-                var data = new DateTime?[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is DateTime dateTimeValue
-                        ? dateTimeValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<DateTime>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new DateTime[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is DateTime dateTimeValue
-                        ? dateTimeValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<DateTime>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (underlyingType == typeof(DateTimeOffset))
-        {
-            // DateTimeOffset is converted to DateTime (UTC) for storage
-            if (isNullableProperty)
-            {
-                var data = new DateTime?[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is DateTime dateTimeValue
-                        ? dateTimeValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<DateTime>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new DateTime[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is DateTime dateTimeValue
-                        ? dateTimeValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<DateTime>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (underlyingType == typeof(DateOnly))
-        {
-            // DateOnly is converted to DateTime for storage
-            if (isNullableProperty)
-            {
-                var data = new DateTime?[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is DateTime dateTimeValue
-                        ? dateTimeValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<DateTime>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new DateTime[buffer.Count];
-
-                for (var i = 0; i < buffer.Count; i++)
-                {
-                    var value = valueGetter(buffer[i]);
-
-                    data[i] = value is DateTime dateTimeValue
-                        ? dateTimeValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<DateTime>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (underlyingType == typeof(byte[]))
-        {
-            var data = new byte[buffer.Count][];
-
-            for (var i = 0; i < buffer.Count; i++)
-            {
-                var value = valueGetter(buffer[i]);
-                data[i] = value as byte[] ?? [];
-            }
-
-            await rowGroupWriter.WriteAsync(dataField, data).ConfigureAwait(false);
+            _memberTypes = [typeof(T)];
+            Schema = new ParquetSchema(ParquetTypeMap.CreateField(_plan.ColumnNames[0], typeof(T), null));
         }
         else
         {
-            // Default: convert to string representation
-            var data = new string?[buffer.Count];
-
-            for (var i = 0; i < buffer.Count; i++)
-            {
-                var value = valueGetter(buffer[i]);
-                data[i] = value?.ToString();
-            }
-
-            await rowGroupWriter.WriteAsync(dataField, data).ConfigureAwait(false);
-        }
-#pragma warning restore CA2016
-    }
-
-    private static StorageUri CreateTempUri(StorageUri uri) =>
-        // Keep everything but the path: parameters, port and user info select the account, region or endpoint, and a
-        // temporary object written elsewhere could not be moved or copied into place.
-        uri with { Path = $"{uri.Path}.tmp-{Guid.NewGuid():N}" };
-
-    private async Task PublishAtomicWrite(
-        IStorageProvider provider,
-        StorageUri tempUri,
-        StorageUri targetUri,
-        CancellationToken cancellationToken)
-    {
-        // For providers that support rename/move, use that
-        // Otherwise, copy and delete
-        if (provider is IMoveableStorageProvider moveableProvider)
-        {
-            await moveableProvider.MoveAsync(tempUri, targetUri, cancellationToken).ConfigureAwait(false);
-
-            // MoveAsync atomically moves the file - no separate cleanup needed
-        }
-        else
-        {
-            // Fallback: copy then delete
-            var readStream = await provider.OpenReadAsync(tempUri, cancellationToken).ConfigureAwait(false);
-            await using var readStreamScope = readStream.ConfigureAwait(false);
-            var writeStream = await provider.OpenWriteAsync(targetUri, cancellationToken).ConfigureAwait(false);
-            await using var writeStreamScope = writeStream.ConfigureAwait(false);
-            await readStream.CopyToAsync(writeStream, cancellationToken).ConfigureAwait(false);
-            await writeStream.FlushAsync(cancellationToken).ConfigureAwait(false);
-
-            if (provider is IDeletableStorageProvider deletableProvider)
-                await deletableProvider.DeleteAsync(tempUri, CancellationToken.None).ConfigureAwait(false);
+            var members = shape.Members.Where(m => m.CanRead).ToList();
+            _memberTypes = [.. members.Select(m => m.Type)];
+            Schema = new ParquetSchema(members.Select(m => ParquetTypeMap.CreateField(m.ColumnName, m.Type, m.Member)).ToArray());
         }
     }
+
+    public ParquetSchema Schema { get; }
+
+    public static ParquetWriteLayout<T> For(ColumnNamingPolicy naming) => Cache.GetOrAdd(naming, static policy => new ParquetWriteLayout<T>(policy));
+
+    public ParquetColumnBuilder[] CreateBuilders() =>
+        [.. Schema.Fields.Select((field, i) => ParquetColumnBuilders.ForMember(field, _memberTypes[i]))];
+
+    public void Write(ParquetFieldWriter fields, T item) => _plan.Write(fields, item);
+}
+
+/// <summary>The row the compiled writer writes: each member into its column's builder, with its static type.</summary>
+internal sealed class ParquetFieldWriter(ParquetColumnBuilder[] builders) : IFieldWriter
+{
+    public void WriteValue<TValue>(int ordinal, TValue value) => ((ParquetColumnBuilder<TValue>)builders[ordinal]).Add(value);
 }

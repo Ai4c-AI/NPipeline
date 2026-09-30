@@ -1,12 +1,20 @@
 ---
 title: "Parquet Connector"
-description: "Read and write Apache Parquet files with column projection, compression, and schema validation."
+description: "Read and write Apache Parquet files with typed columnar mapping, projection, row-group pruning and list columns."
 order: 4
 ---
 
 # Parquet Connector
 
-The `NPipeline.Connectors.Parquet` package reads and writes Apache Parquet files using [Parquet.Net](https://github.com/aloneguid/parquet-dotnet). Optimized for large analytical datasets with column projection pushdown, multi-file parallel reads, configurable compression, atomic writes, and schema compatibility modes.
+The `NPipeline.Connectors.Parquet` package reads and writes Apache Parquet files with
+[Parquet.Net](https://github.com/aloneguid/parquet-dotnet). Records map to columns through a mapper compiled once per
+file layout: the source reads each row group's mapped columns into typed arrays and builds records from them without
+boxing or name lookups, and the sink writes members straight into typed column buffers. Columns a record does not map
+are never read.
+
+Globs, atomic writes, row errors, parallel reads and metrics work the same in every file connector; see
+[File Connectors: Shared Behaviour](file-connectors.md). Parquet compresses inside the file, so the stream compression
+option does not apply.
 
 ## Installation
 
@@ -14,293 +22,207 @@ The `NPipeline.Connectors.Parquet` package reads and writes Apache Parquet files
 dotnet add package NPipeline.Connectors.Parquet
 ```
 
-**Dependencies:** [Parquet.Net](https://www.nuget.org/packages/Parquet.Net) 6.x, `NPipeline.Connectors`, `NPipeline.StorageProviders`
+**Dependencies:** [Parquet.Net](https://www.nuget.org/packages/Parquet.Net) 6.x, `NPipeline.Connectors`,
+`NPipeline.StorageProviders`
 
-## Storage Abstraction
-
-The Parquet connector uses NPipeline's storage abstraction layer. See the [CSV Connector - Storage Abstraction](csv.md#storage-abstraction) section for full details on `StorageUri`, `IStorageResolver`, and when you need an explicit resolver.
+## Reading
 
 ```csharp
-// Local file (no resolver needed)
-var source = new ParquetSourceNode<Order>(StorageUri.FromFilePath("orders.parquet"));
+public sealed record Order(int Id, string Customer, decimal Total, DateTimeOffset PlacedAt);
 
-// Cloud storage (explicit resolver)
-var source = new ParquetSourceNode<Order>(
-    StorageUri.Parse("s3://bucket/orders.parquet"),
-    resolver: myResolver);
+var source = ParquetConnector.Source<Order>(StorageUri.FromFilePath("orders.parquet"));
+builder.AddSource(source, "orders");
 ```
 
-## Column Mapping
+Columns bind to `Order`'s members case-insensitively, and only those four columns are read. A value that does not
+convert (a `null` for an `int`, say) fails the read with a `RecordMappingException` naming the row and column, unless a
+`RowErrorHandler` skips or dead-letters it. The row error's excerpt lists the row's values, since a Parquet row has no
+raw text.
 
-### Attribute-Based Mapping
+To read several files, give a directory (`s3://bucket/orders/`, which reads its `.parquet` files) or a glob
+(`s3://bucket/orders/**/*.parquet`). Files are read in path order; set `FileReadParallelism` to read ahead several
+files at once while keeping that order. Parquet needs to seek, so a stream that cannot (S3, SFTP) is first copied to a
+temporary file.
 
-Use `[ParquetColumn]` to map properties to Parquet columns:
+### Mapping
+
+| Type shape | How it maps |
+| --- | --- |
+| Class with setters or `init` accessors | Members set by column name |
+| Positional record or primary constructor | Constructor parameters matched to columns by name |
+| `required` members | Must have a column, or the file fails to bind |
+| `[Column("order_id")]` or `[ParquetColumn("order_id")]` | Sets the column name; `[Column]` wins when both are present |
+| `[IgnoreColumn]` or `[ParquetColumn(Ignore = true)]` | Leaves the member out |
+| `[ParquetDecimal(18, 2)]` | Sets a `decimal` column's precision and scale; the default is `DECIMAL(38, 18)` |
+| `int`, `string` and other single values | The file's first column |
+
+### Types
+
+| .NET type | Parquet column | Notes |
+| --- | --- | --- |
+| `bool`, `sbyte`, `byte`, `short`, `ushort`, `int`, `uint`, `long`, `ulong`, `float`, `double` | The matching physical and logical type | |
+| `decimal` | `DECIMAL(38, 18)`, or as `[ParquetDecimal]` says | |
+| `string`, `char` | `STRING` | Always nullable |
+| `byte[]` | `BINARY` | Always nullable |
+| `DateTime` | `TIMESTAMP(MICROS, UTC)` | Read back with `Kind = Utc`; a local time is converted |
+| `DateTimeOffset` | `TIMESTAMP(MICROS, UTC)` | Stored as its UTC instant; read back with a zero offset |
+| `DateOnly` | `DATE` | |
+| `TimeOnly` | `TIME(MICROS)` | |
+| `TimeSpan` | `INT64` ticks | |
+| `Guid` | `UUID` | |
+| Enums | `STRING` names | Read case-insensitively; numbers of defined values are accepted |
+| `T?` for any of the above | The same column, nullable | |
+| `T[]`, `List<T>`, `IList<T>`, `IReadOnlyList<T>`, `ICollection<T>`, `IReadOnlyCollection<T>`, `IEnumerable<T>` of the above | `LIST` | A `null` list, an empty list and `null` elements all round-trip |
+
+Timestamps and times keep microseconds, so a value's last tick digit is lost. A member of any other type (a nested
+class, a dictionary) fails when the node is created, naming the member; mark it `[IgnoreColumn]` or flatten it. Files
+with struct or map columns can still be read: those columns are skipped.
+
+Columns written by other tools convert to the member's type where no information is lost or the text parses: an `INT32`
+column reads into a `long`, `FLOAT` into `double`, `DATE` into `DateTime`, a timestamp into `DateTimeOffset`, `STRING`
+into a number, date or enum, and anything into `string`. Timestamps without a time zone, such as Impala's `INT96`, read
+as UTC.
+
+### Missing columns and partitions
+
+A member without a column keeps its initialiser, unless it is `required` (see
+[column binding](file-connectors.md#column-binding)). That makes adding a nullable member to a record safe for old files.
+
+Files under `key=value` directories (Hive partitioning) fill members named after the keys when the file has no such
+column, so `sales/region=EU/day=2026-01-02/part-0.parquet` sets `Region` and `Day`. A value of
+`__HIVE_DEFAULT_PARTITION__` is `null`. Set `PartitionColumns = false` to turn this off.
+
+### Skipping row groups and rows
+
+A `RowGroupFilter` sees each row group before its columns are read, with the range of values the writer recorded for
+each column, so a query for one day of a large file reads only the groups that can hold it:
 
 ```csharp
-using NPipeline.Connectors.Parquet;
+var day = new DateTime(2026, 1, 2, 0, 0, 0, DateTimeKind.Utc);
 
-public class Order
+var source = ParquetConnector.Source<Event>(uri, o => o with
 {
-    [ParquetColumn("order_id")]
-    public int Id { get; set; }
-
-    public string CustomerName { get; set; } = string.Empty;
-
-    [ParquetDecimal(18, 2)]  // Required for decimal properties
-    public decimal Amount { get; set; }
-
-    [ParquetColumn(Ignore = true)]
-    public string InternalNote { get; set; } = string.Empty;
-}
+    RowGroupFilter = group => !group.TryGetRange<DateTime>("At", out var min, out var max) || (min < day.AddDays(1) && max >= day),
+});
 ```
 
-> ⚠️ **Important:** Decimal properties **must** have a `[ParquetDecimal(precision, scale)]` attribute. Parquet requires explicit precision and scale for decimal types.
+`TryGetRange` returns `false` when the writer recorded no statistics or the column is unsigned (Parquet.Net reports
+unsigned statistics as signed), so keep the group in that case. A `RowFilter` sees each row as a `ParquetRow` before
+it is mapped.
 
-The generic `[Column]` and `[IgnoreColumn]` attributes from `NPipeline.Connectors.Attributes` are also supported.
+### Manual mapping
 
-### Supported Type Mappings
-
-| .NET Type | Parquet Type |
-|-----------|-------------|
-| `string` | UTF8 string |
-| `int`, `short`, `byte` | INT32 |
-| `long` | INT64 |
-| `float` | FLOAT |
-| `double` | DOUBLE |
-| `bool` | BOOLEAN |
-| `decimal` | DECIMAL (requires `[ParquetDecimal]`) |
-| `DateTime`, `DateTimeOffset` | TIMESTAMP |
-| `DateOnly` | DATE |
-| `Guid` | FIXED_LEN_BYTE_ARRAY |
-| `byte[]` | BYTE_ARRAY |
-| `enum` | INT32 |
-| `List<T>`, `T[]` | Repeated group |
-
-### Lambda-Based Mapping
+For full control, pass a mapper. It receives a `ParquetRow` holding every column, or only `ProjectedColumns` when set:
 
 ```csharp
-var source = new ParquetSourceNode<Order>(
+var source = ParquetConnector.Source(
     StorageUri.FromFilePath("orders.parquet"),
-    row => new Order
-    {
-        Id = row.Get<int>("order_id"),
-        CustomerName = row.Get<string>("customer_name") ?? string.Empty,
-        Amount = row.Get<decimal>("amount")
-    });
+    row => new Order(row.Get<int>("id"), row.Get<string>("customer"), row.GetOrDefault("total", 0m), row.Get<DateTimeOffset>("placed_at")),
+    o => o with { ProjectedColumns = ["id", "customer", "total", "placed_at"] });
 ```
 
-## Source Node - `ParquetSourceNode<T>`
+| `ParquetRow` member | Description |
+| --- | --- |
+| `Get<T>(string name)`, `Get<T>(int index)` | Read and convert a value; throws `FieldMappingException` naming the column |
+| `TryGet<T>(string name, out T value)` | Read and convert, returning `false` instead of throwing |
+| `GetOrDefault<T>(string name, T defaultValue)` | The value, or `defaultValue` when it is missing, `null` or does not convert |
+| `this[string name]`, `this[int index]` | The stored value (a list as an array), or `null` |
+| `HasColumn(string name)`, `IsNull(string name)` | Whether the row has the column, and whether its value is `null` or missing |
+| `ColumnNames`, `ColumnCount`, `Schema`, `RecordNumber` | The row's columns, the file's schema and the row's position |
 
-Reads Parquet files and emits each row as an item of type `T`. Streams row groups one at a time to limit memory usage.
+A `ParquetRow` is a snapshot and can be kept after the mapper returns. An exception the mapper throws is a row error.
 
-### Constructors
+`ParquetRowWriter.WriteAsync(stream, schema, rows)` writes rows back with the schema they were read with, for code
+that moves rows whose type is not known in advance, such as the [Data Lake](datalake.md) compactor.
+
+### Read options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `ProjectedColumns` | `null` | Extra columns to read; with a manual mapper, the only columns read |
+| `SchemaValidator` | `null` | Rejects a file by its schema, failing the read with `ParquetSchemaException` |
+| `RowGroupFilter` | `null` | Skips row groups before their columns are read |
+| `RowFilter` | `null` | Skips rows before they are mapped |
+| `PartitionColumns` | `true` | Fill members from `key=value` directories |
+| `Naming` | `AsIs` | How member names become column names, such as `ColumnNamingPolicy.SnakeCaseLower` |
+| `MissingColumns` | `ThrowForRequired` | What a member without a column means |
+
+Plus the [shared source options](file-connectors.md#options-every-file-source-and-sink-has): `Provider`, `Resolver`,
+`BufferSize`, `Recursive`, `RowErrorHandler`, `RawExcerptLength` and `FileReadParallelism`.
+
+## Writing
 
 ```csharp
-// Attribute-based mapping with optional resolver
-public ParquetSourceNode(
-    StorageUri uri,
-    IStorageResolver? resolver = null,
-    ParquetConfiguration? configuration = null)
-
-// Lambda-based mapping with optional resolver
-public ParquetSourceNode(
-    StorageUri uri,
-    Func<ParquetRow, T> rowMapper,
-    IStorageResolver? resolver = null,
-    ParquetConfiguration? configuration = null)
-
-// Attribute-based mapping with explicit provider
-public ParquetSourceNode(
-    IStorageProvider provider,
-    StorageUri uri,
-    ParquetConfiguration? configuration = null)
-
-// Lambda-based mapping with explicit provider
-public ParquetSourceNode(
-    IStorageProvider provider,
-    StorageUri uri,
-    Func<ParquetRow, T> rowMapper,
-    ParquetConfiguration? configuration = null)
+var sink = ParquetConnector.Sink<Order>(StorageUri.FromFilePath("orders.parquet"));
+builder.AddSink(sink, "orders-out");
 ```
 
-### Example: Column Projection
+The sink writes each readable member as a column (see [Types](#types)) and flushes a row group every `RowGroupSize`
+rows or once the buffered values reach about `RowGroupBytes`, whichever comes first, so wide rows do not hold hundreds
+of megabytes in memory. `sink.Schema` is the schema it writes. On the file system, the file is written under a
+temporary name and moved into place when complete; object stores are written directly.
 
-Read only the columns you need to reduce I/O:
+A `null` item fails the write by default; set `NullItems = NullItemHandling.Skip` to drop them.
 
-```csharp
-var config = new ParquetConfiguration
-{
-    ProjectedColumns = new[] { "OrderId", "Amount", "Date" },
-    FileReadParallelism = 4
-};
+### Write options
 
-var source = new ParquetSourceNode<OrderSummary>(
-    StorageUri.FromFilePath("orders.parquet"),
-    configuration: config);
-```
+| Option | Default | Description |
+| --- | --- | --- |
+| `RowGroupSize` | `50_000` | The most rows per row group |
+| `RowGroupBytes` | 128 MB | A row group is also flushed once its buffered values reach about this size |
+| `Codec` | `Snappy` | The compression codec: `None`, `Snappy`, `Gzip`, `Lz4Raw` or `Zstd` |
+| `Naming` | `AsIs` | How member names become column names |
 
-## Sink Node - `ParquetSinkNode<T>`
+Plus the [shared sink options](file-connectors.md#options-every-file-source-and-sink-has): `Provider`, `Resolver`,
+`BufferSize`, `AtomicWrite`, `NullItems` and `DeletePartialOnFailure`.
 
-Writes items to a Parquet file with configurable row groups, compression, and atomic writes.
+Row groups of 50,000 to 1,000,000 rows suit most query engines: larger groups compress better and prune coarser.
+`Zstd` gives smaller files than `Snappy` for a little more CPU.
 
-### Constructors
+## Examples
 
-```csharp
-// Attribute-based mapping with optional resolver
-public ParquetSinkNode(
-    StorageUri uri,
-    IStorageResolver? resolver = null,
-    ParquetConfiguration? configuration = null)
-
-// Attribute-based mapping with explicit provider
-public ParquetSinkNode(
-    IStorageProvider provider,
-    StorageUri uri,
-    ParquetConfiguration? configuration = null)
-```
-
-### Example: Compressed Output
-
-```csharp
-var config = new ParquetConfiguration
-{
-    RowGroupSize = 100_000,
-    Compression = CompressionMethod.Snappy,
-    UseAtomicWrite = true
-};
-
-var sink = new ParquetSinkNode<Order>(
-    StorageUri.FromFilePath("output.parquet"),
-    configuration: config);
-```
-
-## Configuration
-
-### Write Options
-
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `RowGroupSize` | `int` | `50,000` | Rows buffered before flushing a row group |
-| `Compression` | `CompressionMethod` | `Snappy` | Codec: `Snappy`, `Gzip`, or `None` |
-| `TargetFileSizeBytes` | `long?` | `256 MB` | Rotate files at this size; `null` disables |
-| `UseAtomicWrite` | `bool` | `true` | Write to temp file then rename on success |
-| `MaxBufferedRows` | `int` | `250,000` | Max rows across all partition buffers before flush |
-
-### Read Options
-
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `ProjectedColumns` | `IReadOnlyList<string>?` | `null` | Column whitelist - only read these columns |
-| `SchemaCompatibility` | `SchemaCompatibilityMode` | `Strict` | Schema validation mode (see below) |
-| `RecursiveDiscovery` | `bool` | `false` | Scan subdirectories for Parquet files |
-| `FileReadParallelism` | `int` | `1` | Number of files to read in parallel |
-| `RowFilter` | `Func<ParquetRow, bool>?` | `null` | Predicate to filter rows during read |
-| `SchemaValidator` | `Func<ParquetSchema, bool>?` | `null` | Validate schema before reading |
-
-### Error Handling
-
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `RowErrorHandler` | `Func<Exception, ParquetRow, bool>?` | `null` | Per-row error handler. Return `true` to skip, `false` to throw. |
-| `Observer` | `IParquetConnectorObserver?` | `null` | Lifecycle events listener for metrics and diagnostics |
-
-### Schema Compatibility Modes
-
-| Mode | Behavior |
-|------|----------|
-| `Strict` | File schema must exactly match the target type. Extra or missing columns cause an error. |
-| `Additive` | File may have extra columns (ignored) or missing columns (use defaults). |
-| `NameOnly` | Match by column name only, ignoring type differences where safe conversion exists. |
-
-## Performance Tips
-
-- **Column projection** (`ProjectedColumns`): reduces I/O significantly for wide tables - only the requested columns are read from disk.
-- **Parallel reads** (`FileReadParallelism`): set > 1 when reading multiple files or when storage supports concurrent access.
-- **Row group sizing**: larger groups improve compression ratio but increase memory. 50K–100K rows is a good starting point.
-- **Compression**: Snappy (default) balances speed and ratio. Use Gzip for better compression at the cost of CPU.
-
-## Example: Full Pipeline (CSV → Parquet)
+### CSV to Parquet
 
 ```csharp
 public sealed class CsvToParquetPipeline : IPipelineDefinition
 {
     public void Define(PipelineBuilder builder, PipelineContext context)
     {
-        var source = builder.AddSource(
-            CsvConnector.Source<Order>(StorageUri.FromFilePath("orders.csv")),
-            "csv-source");
-
-        var config = new ParquetConfiguration
-        {
-            Compression = CompressionMethod.Snappy,
-            UseAtomicWrite = true
-        };
-        var sink = builder.AddSink(
-            new ParquetSinkNode<Order>(
-                StorageUri.FromFilePath("orders.parquet"),
-                configuration: config),
-            "parquet-sink");
+        var source = builder.AddSource(CsvConnector.Source<Order>(StorageUri.FromFilePath("orders.csv")), "csv");
+        var sink = builder.AddSink(ParquetConnector.Sink<Order>(StorageUri.FromFilePath("orders.parquet"), o => o with { Codec = CompressionMethod.Zstd }), "parquet");
 
         builder.Connect(source, sink);
     }
 }
 ```
 
+### Reading a partitioned dataset from S3
+
+```csharp
+public sealed class Sale
+{
+    public int Id { get; set; }
+    public decimal Amount { get; set; }
+    public string Region { get; set; } = "";   // from region=... directories
+    public DateOnly Day { get; set; }          // from day=... directories
+}
+
+var source = ParquetConnector.Source<Sale>(
+    StorageUri.Parse("s3://my-bucket/sales/**/*.parquet"),
+    o => o with { Provider = new AwsS3StorageProvider(s3Options), FileReadParallelism = 4 });
+```
+
+### Skip bad rows and send them to the dead-letter sink
+
+```csharp
+var source = ParquetConnector.Source<Order>(uri, o => o with { RowErrorHandler = _ => RowErrorAction.DeadLetter });
+builder.AddSource(source, "orders");
+builder.AddDeadLetterSink(new MyDeadLetterSink()); // receives ConnectorRecordFailure items
+```
+
 ## Next Steps
 
-- [Data Lake Connector](datalake.md) - Hive-partitioned Parquet tables with time travel
-- [CSV Connector](csv.md) - simpler text-based format
-- [Storage Providers](../storage-providers/index.md) - read Parquet from cloud storage
-
-## Storage Abstraction
-
-All file connectors use `StorageUri` + `IStorageResolver`:
-
-```csharp
-// Local file
-var source = new ParquetSourceNode<Order>(StorageUri.FromFilePath("orders.parquet"));
-
-// Cloud storage
-var source = new ParquetSourceNode<Order>(
-    StorageUri.Parse("s3://my-bucket/data/orders.parquet"),
-    resolver: myStorageResolver);
-```
-
-## Compression Codecs
-
-| Codec | Ratio | Speed | Best For |
-|-------|-------|-------|----------|
-| `Snappy` (default) | Good | Fast | Most workloads |
-| `Gzip` | Better | Slower | Storage-optimized, archival |
-| `None` | - | Fastest | Already-compressed data, debugging |
-
-## Supported .NET Types
-
-| .NET Type | Parquet Type |
-|-----------|-------------|
-| `bool` | `BOOLEAN` |
-| `int`, `long` | `INT32`, `INT64` |
-| `float`, `double` | `FLOAT`, `DOUBLE` |
-| `decimal` | `FIXED_LEN_BYTE_ARRAY` (Decimal) |
-| `string` | `BYTE_ARRAY` (UTF8) |
-| `DateTime`, `DateTimeOffset` | `INT96` or `INT64` (timestamp) |
-| `byte[]` | `BYTE_ARRAY` |
-| `Guid` | `FIXED_LEN_BYTE_ARRAY` |
-| Nullable variants | Same with optional repetition |
-
-## Atomic Writes
-
-```csharp
-var config = new ParquetConfiguration { UseAtomicWrite = true };
-```
-
-With atomic writes enabled, data is written to a temporary file and renamed on success. This prevents partial files on failure - critical for data lake scenarios.
-
-## Best Practices
-
-1. **Use column projection** - only read what you need for wide tables
-2. **Use `Snappy` compression** (default) - best speed/ratio tradeoff
-3. **Enable atomic writes** for production - prevents partial files
-4. **Set `RowGroupSize = 50,000–100,000`** - balances compression and memory
-5. **Use `RecursiveDiscovery`** when reading partitioned directories
-6. **Use `FileReadParallelism > 1`** for multi-file reads on fast storage
+- [File Connectors: Shared Behaviour](file-connectors.md): globs, atomic writes, row errors, parallel reads, metrics
+- [Data Lake Connector](datalake.md): partitioned Parquet tables with snapshots and time travel
+- [CSV Connector](csv.md): delimited text
+- [Storage Providers](../storage-providers/index.md): read Parquet from S3, Azure Blob, GCS or SFTP

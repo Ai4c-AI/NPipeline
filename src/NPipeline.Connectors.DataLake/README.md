@@ -107,10 +107,10 @@ var partitionSpec = PartitionSpec<SalesRecord>
     .By(x => x.EventDate)
     .ThenBy(x => x.Region);
 
-var config = new ParquetConfiguration
+var options = new DataLakeParquetOptions
 {
     RowGroupSize = 100_000,
-    Compression = Parquet.CompressionMethod.Snappy
+    Codec = Parquet.CompressionMethod.Snappy
 };
 
 // Write data
@@ -118,7 +118,7 @@ await using var writer = new DataLakeTableWriter<SalesRecord>(
     provider,
     tableUri,
     partitionSpec,
-    config);
+    options);
 
 Console.WriteLine($"Snapshot ID: {writer.SnapshotId}");
 
@@ -165,7 +165,7 @@ The source node:
 
 1. Reads the manifest file to discover all data files
 2. Deduplicates entries by path (keeps latest version)
-3. Streams data from each file using `ParquetSourceNode<T>`
+3. Streams each file through the Parquet connector, which reads only the columns `T` maps
 
 ### Time Travel Queries
 
@@ -262,7 +262,7 @@ Use [`DataLakeCompactor`](DataLakeCompactor.cs) to consolidate small files:
 using NPipeline.Connectors.DataLake;
 using NPipeline.Connectors.DataLake.FormatAdapters;
 
-var compactor = new DataLakeCompactor(provider, tableUri, new ParquetConfiguration());
+var compactor = new DataLakeCompactor(provider, tableUri);
 
 // Dry run to see what would be compacted
 var dryRunRequest = new TableCompactRequest
@@ -418,13 +418,14 @@ This allows the same data files to be queried by multiple engines without ETL.
 
 ### File Sizing
 
-Target file sizes between 256 MB and 1 GB for optimal query performance:
+Each data file holds one partition buffer of up to `RowGroupSize` rows, so raise it for larger files and compact the
+small files that remain. Files between 256 MB and 1 GB suit most query engines:
 
 ```csharp
-var config = new ParquetConfiguration
+var options = new DataLakeParquetOptions
 {
-    RowGroupSize = 100_000,
-    TargetFileSizeBytes = 512L * 1024 * 1024 // 512 MB
+    RowGroupSize = 1_000_000,
+    RowGroupBytes = 256L * 1024 * 1024 // flush a row group early when rows are wide
 };
 ```
 
@@ -433,10 +434,10 @@ var config = new ParquetConfiguration
 Control memory during high-cardinality partition writes:
 
 ```csharp
-var config = new ParquetConfiguration
+var options = new DataLakeParquetOptions
 {
     MaxBufferedRows = 500_000,  // Total rows across all partition buffers
-    RowGroupSize = 50_000       // Rows per row group
+    RowGroupSize = 50_000       // Rows per partition buffer and row group
 };
 ```
 
@@ -519,11 +520,10 @@ public class DataLakePipeline : IPipelineDefinition
             .By(x => x.EventDate)
             .ThenBy(x => x.Region);
 
-        var config = new ParquetConfiguration
+        var options = new DataLakeParquetOptions
         {
             RowGroupSize = 100_000,
-            Compression = Parquet.CompressionMethod.Snappy,
-            TargetFileSizeBytes = 512L * 1024 * 1024
+            Codec = Parquet.CompressionMethod.Zstd
         };
 
         // Source: Read from Data Lake table with time travel
@@ -541,7 +541,7 @@ public class DataLakePipeline : IPipelineDefinition
                 provider,
                 _tableUri,
                 partitionSpec,
-                config),
+                options),
             "lake-sink");
 
         builder.Connect(source, transform);

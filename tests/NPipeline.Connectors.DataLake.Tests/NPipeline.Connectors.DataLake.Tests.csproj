@@ -36,6 +36,7 @@
         <ProjectReference Include="..\..\src\NPipeline.Connectors.DataLake\NPipeline.Connectors.DataLake.csproj"/>
         <ProjectReference Include="..\..\src\NPipeline.Connectors.Parquet\NPipeline.Connectors.Parquet.csproj"/>
         <ProjectReference Include="..\..\src\NPipeline.StorageProviders\NPipeline.StorageProviders.csproj"/>
+        <ProjectReference Include="..\NPipeline.Tests.Common\NPipeline.Tests.Common.csproj"/>
     </ItemGroup>
 
 </Project>

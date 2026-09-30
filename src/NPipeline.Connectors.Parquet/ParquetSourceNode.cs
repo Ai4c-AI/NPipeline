@@ -1,15 +1,9 @@
-using System.Diagnostics;
-using System.Reflection;
+using System.Globalization;
 using System.Runtime.CompilerServices;
-using System.Threading.Channels;
-using NPipeline.Connectors.Parquet.Mapping;
-using NPipeline.DataFlow;
-using NPipeline.DataFlow.DataStreams;
-using NPipeline.Nodes;
-using NPipeline.Pipeline;
-using NPipeline.StorageProviders;
-using NPipeline.StorageProviders.Abstractions;
-using NPipeline.StorageProviders.Exceptions;
+using NPipeline.Connectors.Files;
+using NPipeline.Connectors.Mapping;
+using NPipeline.Connectors.Parquet.Reading;
+using NPipeline.Connectors.Parquet.Schema;
 using NPipeline.StorageProviders.Models;
 using Parquet;
 using Parquet.Schema;
@@ -17,535 +11,201 @@ using Parquet.Schema;
 namespace NPipeline.Connectors.Parquet;
 
 /// <summary>
-///     Source node that reads Parquet data using a pluggable <see cref="IStorageProvider" />.
-///     Supports streaming row-group reading with bounded memory usage.
+///     Reads Parquet files into records. Each row group's mapped columns are read into typed arrays and records are built
+///     from them by a mapper compiled once per file layout, so values are neither boxed nor looked up by name; columns the
+///     record does not map are not read at all.
 /// </summary>
-/// <typeparam name="T">Type emitted for each Parquet row.</typeparam>
-public sealed class ParquetSourceNode<T> : SourceNode<T>
+/// <typeparam name="T">The record type, or <see cref="ParquetRow" /> with a manual mapper.</typeparam>
+/// <remarks>
+///     The options' <see cref="FileNodeOptions.Uri" /> can name a file, a directory (ending in <c>/</c>, which reads its
+///     <c>.parquet</c> files) or a glob. Parquet needs to seek, so a stream that cannot (S3, SFTP) is first copied to a
+///     temporary file.
+/// </remarks>
+public sealed class ParquetSourceNode<T> : FileSourceNode<T>
 {
-    private static readonly Lazy<IStorageResolver> DefaultResolver = new(
-        () => StorageProviderFactory.CreateResolver(),
-        LazyThreadSafetyMode.ExecutionAndPublication);
+    private readonly RecordBindingOptions _binding;
+    private readonly Func<ParquetRow, T>? _map;
+    private readonly HashSet<string> _mappedColumns;
+    private readonly ParquetReadOptions _options;
+    private readonly bool _scalar;
 
-    private static readonly string[] ParquetExtensions = [".parquet", ".snappy.parquet", ".gz.parquet", ".parquet.gzip"];
-
-    private readonly ParquetConfiguration _configuration;
-    private readonly IStorageProvider? _provider;
-    private readonly IStorageResolver? _resolver;
-    private readonly Func<ParquetRow, T> _rowMapper;
-    private readonly StorageUri _uri;
-
-    private ParquetSourceNode(
-        StorageUri uri,
-        ParquetConfiguration? configuration,
-        Func<ParquetRow, T> rowMapper)
+    /// <summary>Creates a source that maps columns to <typeparamref name="T" />'s members by name.</summary>
+    /// <exception cref="NotSupportedException">A mapped member's type has no Parquet column.</exception>
+    public ParquetSourceNode(ParquetReadOptions options)
+        : this(options, null, true)
     {
-        ArgumentNullException.ThrowIfNull(uri);
-        ArgumentNullException.ThrowIfNull(rowMapper);
-        _uri = uri;
-        _configuration = configuration ?? new ParquetConfiguration();
-        _configuration.Validate();
-        _rowMapper = rowMapper;
     }
 
-    /// <summary>
-    ///     Construct a Parquet source that uses attribute-based mapping.
-    ///     Properties are mapped using ParquetColumnAttribute or convention (property name as-is).
-    /// </summary>
-    /// <param name="uri">The URI of the Parquet file or directory to read from.</param>
-    /// <param name="resolver">
-    ///     The storage resolver used to obtain the storage provider. If <c>null</c>, a default resolver
-    ///     created by <see cref="StorageProviderFactory.CreateResolver" /> is used.
-    /// </param>
-    /// <param name="configuration">Optional configuration for Parquet reading. If <c>null</c>, default configuration is used.</param>
-    /// <exception cref="ArgumentNullException">Thrown if <paramref name="uri" /> is <c>null</c>.</exception>
-    public ParquetSourceNode(
-        StorageUri uri,
-        IStorageResolver? resolver = null,
-        ParquetConfiguration? configuration = null)
-        : this(uri, configuration, ParquetMapperBuilder.Build<T>())
+    /// <summary>Creates a source that builds each record from a <see cref="ParquetRow" /> with <paramref name="map" />.</summary>
+    /// <param name="options">The source's options.</param>
+    /// <param name="map">Builds a record from a row. An exception it throws is a row error.</param>
+    public ParquetSourceNode(ParquetReadOptions options, Func<ParquetRow, T> map)
+        : this(options, map ?? throw new ArgumentNullException(nameof(map)), false)
     {
-        _resolver = resolver;
     }
 
-    /// <summary>
-    ///     Construct a Parquet source that uses a specific storage provider with attribute-based mapping.
-    ///     Properties are mapped using ParquetColumnAttribute or convention (property name as-is).
-    /// </summary>
-    /// <param name="provider">The storage provider to use for reading.</param>
-    /// <param name="uri">The URI of the Parquet file or directory to read from.</param>
-    /// <param name="configuration">Optional configuration for Parquet reading. If <c>null</c>, default configuration is used.</param>
-    public ParquetSourceNode(
-        IStorageProvider provider,
-        StorageUri uri,
-        ParquetConfiguration? configuration = null)
-        : this(uri, configuration, ParquetMapperBuilder.Build<T>())
+    private ParquetSourceNode(ParquetReadOptions options, Func<ParquetRow, T>? map, bool bindMembers)
+        : base(options)
     {
-        ArgumentNullException.ThrowIfNull(provider);
-        _provider = provider;
-    }
+        _options = options;
+        _map = map;
+        _binding = new RecordBindingOptions { Shape = ParquetShape.Options(options.Naming), MissingColumns = options.MissingColumns };
+        _mappedColumns = new HashSet<string>(options.ProjectedColumns ?? [], StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>
-    ///     Construct a Parquet source that resolves a storage provider from a resolver at execution time.
-    /// </summary>
-    /// <param name="uri">The URI of the Parquet file or directory to read from.</param>
-    /// <param name="rowMapper">Row mapper used to construct <typeparamref name="T" /> from a <see cref="ParquetRow" />.</param>
-    /// <param name="resolver">
-    ///     The storage resolver used to obtain the storage provider. If <c>null</c>, a default resolver
-    ///     created by <see cref="StorageProviderFactory.CreateResolver" /> is used.
-    /// </param>
-    /// <param name="configuration">Optional configuration for Parquet reading. If <c>null</c>, default configuration is used.</param>
-    /// <exception cref="ArgumentNullException">Thrown if <paramref name="uri" /> is <c>null</c>.</exception>
-    public ParquetSourceNode(
-        StorageUri uri,
-        Func<ParquetRow, T> rowMapper,
-        IStorageResolver? resolver = null,
-        ParquetConfiguration? configuration = null)
-        : this(uri, configuration, rowMapper)
-    {
-        _resolver = resolver;
-    }
+        if (bindMembers)
+        {
+            var shape = RecordShape.For<T>(_binding.Shape);
+            ParquetShape.ThrowIfUnsupported(shape);
+            _mappedColumns.UnionWith(shape.Members.Select(m => m.ColumnName));
 
-    /// <summary>
-    ///     Construct a Parquet source that uses a specific storage provider.
-    /// </summary>
-    /// <param name="provider">The storage provider to use for reading.</param>
-    /// <param name="uri">The URI of the Parquet file or directory to read from.</param>
-    /// <param name="rowMapper">Row mapper used to construct <typeparamref name="T" /> from a <see cref="ParquetRow" />.</param>
-    /// <param name="configuration">Optional configuration for Parquet reading. If <c>null</c>, default configuration is used.</param>
-    public ParquetSourceNode(
-        IStorageProvider provider,
-        StorageUri uri,
-        Func<ParquetRow, T> rowMapper,
-        ParquetConfiguration? configuration = null)
-        : this(uri, configuration, rowMapper)
-    {
-        ArgumentNullException.ThrowIfNull(provider);
-        _provider = provider;
+            // A scalar record is the file's first column, whatever its name.
+            _scalar = shape.IsScalar;
+        }
     }
 
     /// <inheritdoc />
-    public override IDataStream<T> OpenStream(PipelineContext context, CancellationToken cancellationToken)
+    protected override string ConnectorName => "parquet";
+
+    /// <inheritdoc />
+    protected override IReadOnlyList<string> DirectoryFileExtensions { get; } = [".parquet"];
+
+    /// <inheritdoc />
+    protected override bool RequiresSeekableStream => true;
+
+    /// <inheritdoc />
+    protected override bool SupportsCompression => false;
+
+    /// <inheritdoc />
+    protected override async IAsyncEnumerable<T> ReadAsync(Stream stream, FileReadContext context, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var provider = _provider ?? StorageProviderFactory.GetProviderOrThrow(
-            _resolver ?? DefaultResolver.Value,
-            _uri);
+        var reader = await ParquetReader.CreateAsync(stream, leaveStreamOpen: true, cancellationToken: cancellationToken).ConfigureAwait(false);
 
-        if (provider is IStorageProviderMetadataProvider metaProvider)
+        await using (reader.ConfigureAwait(false))
         {
-            var meta = metaProvider.GetMetadata();
+            if (_options.SchemaValidator is { } validate && !validate(reader.Schema))
+                throw new ParquetSchemaException($"The schema of '{context.Source}' was rejected by SchemaValidator.");
 
-            if (!meta.SupportsRead)
-                throw new UnsupportedStorageCapabilityException(_uri, "read", meta.Name);
-        }
+            var fields = reader.Schema.Fields;
+            var columns = fields.Select(ParquetColumn.Create).ToArray();
+            var names = fields.Select(f => f.Name).ToList();
+            var partitions = _options.PartitionColumns ? PartitionValues(context.Uri, names) : [];
+            var columnNames = names.Concat(partitions.Select(p => p.Key)).ToArray();
 
-        var stream = ReadAll(provider, _uri, _configuration, cancellationToken);
-        return new DataStream<T>(stream, $"ParquetSourceNode<{typeof(T).Name}>");
-    }
+            // Only the columns the record maps (or the options name) are read; a manual mapper without projection reads all.
+            var readAll = _map is not null && _options.ProjectedColumns is null;
 
-    private async IAsyncEnumerable<T> ReadAll(
-        IStorageProvider provider,
-        StorageUri uri,
-        ParquetConfiguration config,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
-    {
-        var files = await DiscoverParquetFiles(provider, uri, config, cancellationToken).ConfigureAwait(false);
+            var loaded = Enumerable.Range(0, columns.Length)
+                .Where(i => columns[i] is not null && (readAll || (_scalar && i == 0) || _mappedColumns.Contains(names[i])))
+                .ToArray();
 
-        if (config.FileReadParallelism <= 1 || files.Count <= 1)
-        {
-            foreach (var fileUri in files)
+            var mapper = _map is null ? RecordBinder.Bind<T, ParquetFieldReader>(columnNames, _binding) : null;
+            var fieldReader = new ParquetFieldReader(columns, names, [.. partitions.Select(p => p.Value)]);
+            var layout = new ParquetRowLayout(reader.Schema, [.. loaded.Select(i => names[i])]);
+            var statistics = RowGroupFields(fields);
+            var millisecondTimestamps = reader.Metadata?.CreatedBy?.StartsWith("Parquet.Net", StringComparison.Ordinal) == true;
+            long recordNumber = 0;
+
+            for (var group = 0; group < reader.RowGroupCount; group++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                using var rowGroup = reader.OpenRowGroupReader(group);
 
-                await foreach (var item in ReadFile(provider, fileUri, config, cancellationToken).ConfigureAwait(false))
+                if (_options.RowGroupFilter is { } keep && !keep(new ParquetRowGroupInfo(context.Source, group, rowGroup, statistics, millisecondTimestamps)))
                 {
-                    yield return item;
-                }
-            }
-
-            yield break;
-        }
-
-        await foreach (var item in ReadAllParallel(provider, files, config, cancellationToken).ConfigureAwait(false))
-        {
-            yield return item;
-        }
-    }
-
-    private async IAsyncEnumerable<T> ReadAllParallel(
-        IStorageProvider provider,
-        IReadOnlyList<StorageUri> files,
-        ParquetConfiguration config,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        // A sliding window over the files, in order: file i + p starts only once file i has been drained. The file being
-        // consumed is therefore always running, so bounded channels cannot deadlock the way a semaphore shared by
-        // workers started all at once could (later files could take every slot while file 0 never started).
-        var maxParallelism = Math.Min(config.FileReadParallelism, files.Count);
-        using var workersCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var running = new Queue<(Channel<T> Channel, Task Worker)>(maxParallelism);
-        var nextFile = 0;
-
-        try
-        {
-            while (running.Count < maxParallelism)
-            {
-                running.Enqueue(StartFileWorker(provider, files[nextFile++], config, workersCts.Token));
-            }
-
-            while (running.TryPeek(out var current))
-            {
-                await foreach (var item in current.Channel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
-                {
-                    yield return item;
-                }
-
-                await current.Worker.ConfigureAwait(false);
-                _ = running.Dequeue();
-
-                if (nextFile < files.Count)
-                    running.Enqueue(StartFileWorker(provider, files[nextFile++], config, workersCts.Token));
-            }
-        }
-        finally
-        {
-            // The consumer stopped early or a file failed: stop the remaining workers and wait for them, so no worker is
-            // left blocked on a full channel holding an open stream.
-            await workersCts.CancelAsync().ConfigureAwait(false);
-
-            foreach (var (_, worker) in running)
-            {
-                await worker.ConfigureAwait(false);
-            }
-        }
-    }
-
-    private (Channel<T> Channel, Task Worker) StartFileWorker(
-        IStorageProvider provider,
-        StorageUri fileUri,
-        ParquetConfiguration config,
-        CancellationToken cancellationToken)
-    {
-        var channel = Channel.CreateBounded<T>(new BoundedChannelOptions(config.RowGroupSize)
-        {
-            FullMode = BoundedChannelFullMode.Wait,
-            SingleReader = true,
-            SingleWriter = true,
-        });
-
-        // The worker never throws: every outcome, including cancellation, completes the channel, so the reader either
-        // drains it or observes the error.
-        var worker = Task.Run(async () =>
-        {
-            try
-            {
-                await foreach (var item in ReadFile(provider, fileUri, config, cancellationToken).ConfigureAwait(false))
-                {
-                    await channel.Writer.WriteAsync(item, cancellationToken).ConfigureAwait(false);
-                }
-
-                _ = channel.Writer.TryComplete();
-            }
-            catch (Exception ex)
-            {
-                _ = channel.Writer.TryComplete(ex);
-            }
-        }, CancellationToken.None);
-
-        return (channel, worker);
-    }
-
-    private async Task<IReadOnlyList<StorageUri>> DiscoverParquetFiles(
-        IStorageProvider provider,
-        StorageUri uri,
-        ParquetConfiguration config,
-        CancellationToken cancellationToken)
-    {
-        // Check if the URI points to a single file
-        var path = uri.Path ?? string.Empty;
-
-        if (ParquetExtensions.Any(ext => path.EndsWith(ext, StringComparison.OrdinalIgnoreCase)))
-            return [uri];
-
-        // Directory listing - ListAsync returns IAsyncEnumerable
-        var parquetFiles = new List<StorageUri>();
-
-        await foreach (var item in provider.ListAsync(uri, config.RecursiveDiscovery, cancellationToken).ConfigureAwait(false))
-        {
-            // Use !IsDirectory to check for files
-            if (!item.IsDirectory && ParquetExtensions.Any(ext => item.Uri.Path?.EndsWith(ext, StringComparison.OrdinalIgnoreCase) == true))
-                parquetFiles.Add(item.Uri);
-        }
-
-        return [.. parquetFiles.OrderBy(u => u.Path, StringComparer.OrdinalIgnoreCase)];
-    }
-
-    private async IAsyncEnumerable<T> ReadFile(
-        IStorageProvider provider,
-        StorageUri fileUri,
-        ParquetConfiguration config,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
-    {
-        var observer = config.Observer;
-        var stopwatch = Stopwatch.StartNew();
-        long totalRows = 0;
-        long totalBytes = 0;
-
-        observer?.OnFileReadStarted(fileUri);
-
-        var stream = await provider.OpenReadAsync(fileUri, cancellationToken).ConfigureAwait(false);
-        await using var streamScope = stream.ConfigureAwait(false);
-
-        if (stream.CanSeek)
-            totalBytes = stream.Length;
-
-        var reader = await ParquetReader.CreateAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
-        await using var readerScope = reader.ConfigureAwait(false);
-
-        // Validate schema if configured
-        if (config.SchemaValidator is not null)
-        {
-            if (!config.SchemaValidator(reader.Schema))
-                throw new ParquetSchemaException($"Schema validation failed for file '{fileUri}'");
-        }
-
-        // Build column name to DataField mapping (computed once per file)
-        var dataFields = reader.Schema.GetDataFields();
-        var columnNameToField = new Dictionary<string, DataField>(StringComparer.OrdinalIgnoreCase);
-        var columnNameToIndex = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-
-        for (var i = 0; i < dataFields.Length; i++)
-        {
-            var field = dataFields[i];
-
-            if (!string.IsNullOrEmpty(field.Name))
-            {
-                columnNameToField[field.Name] = field;
-                columnNameToIndex[field.Name] = i;
-            }
-        }
-
-        // Determine which columns to read
-        string[]? columnsToRead = null;
-
-        if (config.ProjectedColumns is not null && config.ProjectedColumns.Count > 0)
-            columnsToRead = [.. config.ProjectedColumns];
-
-        // Read each row group
-        for (var rowGroupIndex = 0; rowGroupIndex < reader.RowGroupCount; rowGroupIndex++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            using var rowGroupReader = reader.OpenRowGroupReader(rowGroupIndex);
-            var rowCount = rowGroupReader.RowCount;
-
-            observer?.OnRowGroupRead(fileUri, rowGroupIndex, rowCount);
-
-            // Read column data
-            var columnData = await ReadRowGroupColumns(rowGroupReader, columnNameToField, columnsToRead, cancellationToken).ConfigureAwait(false);
-
-            // Yield rows from this row group
-            for (var rowIndex = 0L; rowIndex < rowCount; rowIndex++)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                var row = CreateParquetRow(columnData, rowIndex, columnNameToIndex, reader.Schema);
-
-                // Apply row filter if configured
-                if (config.RowFilter is not null && !config.RowFilter(row))
+                    recordNumber += rowGroup.RowCount;
                     continue;
-
-                T? record;
-
-                try
-                {
-                    record = _rowMapper(row);
-                }
-                catch (Exception ex)
-                {
-                    observer?.OnRowMappingError(fileUri, ex);
-
-                    var handler = config.RowErrorHandler;
-
-                    if (handler is not null && handler(ex, row))
-                        continue; // handler opted to skip
-
-                    throw;
                 }
 
-                if (record is not null)
+                foreach (var ordinal in loaded)
                 {
-                    totalRows++;
-                    yield return record;
+                    await columns[ordinal]!.LoadAsync(rowGroup, cancellationToken).ConfigureAwait(false);
+                }
+
+                var rowCount = checked((int)rowGroup.RowCount);
+
+                for (var row = 0; row < rowCount; row++)
+                {
+                    recordNumber++;
+                    fieldReader.Row = row;
+                    T item = default!;
+                    Exception? error = null;
+                    ParquetRow? snapshot = null;
+
+                    try
+                    {
+                        if (_options.RowFilter is { } filter && !filter(snapshot = Snapshot(layout, columns, loaded, row, recordNumber)))
+                            continue;
+
+                        item = mapper is not null ? mapper(fieldReader) : _map!(snapshot ?? Snapshot(layout, columns, loaded, row, recordNumber));
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        error = ex;
+                    }
+
+                    if (error is not null)
+                    {
+                        await context.HandleRowErrorAsync(recordNumber, error, Describe(columns, loaded, names, row), cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    yield return item;
                 }
             }
         }
-
-        stopwatch.Stop();
-        observer?.OnFileReadCompleted(fileUri, totalRows, totalBytes, stopwatch.Elapsed);
     }
 
-    private async Task<Dictionary<string, object?[]>> ReadRowGroupColumns(
-        ParquetRowGroupReader rowGroupReader,
-        Dictionary<string, DataField> columnNameToField,
-        string[]? columnsToRead,
-        CancellationToken cancellationToken)
+    private static ParquetRow Snapshot(ParquetRowLayout layout, ParquetColumn?[] columns, int[] loaded, int row, long recordNumber)
     {
-        var columnData = new Dictionary<string, object?[]>(StringComparer.OrdinalIgnoreCase);
+        var values = new object?[loaded.Length];
 
-        var columns = columnsToRead ?? [.. columnNameToField.Keys];
-
-        foreach (var columnName in columns)
+        for (var i = 0; i < loaded.Length; i++)
         {
-            if (!columnNameToField.TryGetValue(columnName, out var field))
+            values[i] = columns[loaded[i]]!.Boxed(row);
+        }
+
+        return new ParquetRow(layout, values, recordNumber);
+    }
+
+    // A file has no raw record text, so the excerpt lists the row's values.
+    private static string Describe(ParquetColumn?[] columns, int[] loaded, List<string> names, int row) =>
+        string.Join(", ", loaded.Select(i => $"{names[i]}={Convert.ToString(columns[i]!.Boxed(row), CultureInfo.InvariantCulture)}"));
+
+    private static Dictionary<string, DataField> RowGroupFields(IReadOnlyList<Field> fields)
+    {
+        var map = new Dictionary<string, DataField>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var field in fields.OfType<DataField>())
+        {
+            _ = map.TryAdd(field.Name, field);
+        }
+
+        return map;
+    }
+
+    /// <summary>The <c>key=value</c> directories in the file's path, for keys the file has no column for.</summary>
+    private static List<KeyValuePair<string, string?>> PartitionValues(StorageUri file, List<string> columns)
+    {
+        var result = new List<KeyValuePair<string, string?>>();
+        var segments = file.Path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+
+        foreach (var segment in segments.Take(segments.Length - 1))
+        {
+            var separator = segment.IndexOf('=', StringComparison.Ordinal);
+
+            if (separator <= 0)
                 continue;
 
-            // Read the column using reflection to invoke the Parquet.net v6 ReadAsync overloads.
-            var values = await ReadColumnDataAsync(rowGroupReader, field, cancellationToken).ConfigureAwait(false);
-            columnData[columnName] = values;
-        }
+            var key = Uri.UnescapeDataString(segment[..separator]);
 
-        return columnData;
-    }
+            if (columns.Contains(key, StringComparer.OrdinalIgnoreCase) || result.Any(p => string.Equals(p.Key, key, StringComparison.OrdinalIgnoreCase)))
+                continue;
 
-    private async Task<object?[]> ReadColumnDataAsync(ParquetRowGroupReader rowGroupReader, DataField field, CancellationToken cancellationToken)
-    {
-        var rowCount = checked((int)rowGroupReader.RowCount);
-        var clrType = field.ClrType;
-
-        Array typedValues;
-        object valuesMemory;
-        object? invocationResult;
-
-        // Parquet.net 6.1.0+ normalizes string columns to ReadOnlyMemory<char>, so match both
-        if (clrType == typeof(string) || clrType == typeof(ReadOnlyMemory<char>))
-        {
-            typedValues = new string[rowCount];
-            valuesMemory = new Memory<string>((string[])typedValues);
-
-            var stringReadMethod = typeof(ParquetRowGroupReader).GetMethod(
-                                       nameof(ParquetRowGroupReader.ReadAsync),
-                                       [typeof(DataField), typeof(Memory<string>), typeof(Memory<int>?), typeof(CancellationToken)])
-                                   ?? throw new InvalidOperationException("Could not find string ReadAsync overload on ParquetRowGroupReader");
-
-            invocationResult = stringReadMethod.Invoke(rowGroupReader, [field, valuesMemory, null, cancellationToken]);
-        }
-        else if (clrType == typeof(byte[]) || clrType == typeof(ReadOnlyMemory<byte>))
-        {
-            // Parquet.net 6.1.0+ normalizes byte[] columns to ReadOnlyMemory<byte>, so match both
-            typedValues = new byte[rowCount][];
-
-            var byteArrayReadMethod = typeof(ParquetRowGroupReader).GetMethod(
-                                          nameof(ParquetRowGroupReader.ReadAsync),
-                                          [typeof(DataField), typeof(Memory<byte[]>), typeof(Memory<int>?), typeof(CancellationToken)])
-                                      ?? throw new InvalidOperationException("Could not find byte[] ReadAsync overload on ParquetRowGroupReader");
-
-            invocationResult = byteArrayReadMethod.Invoke(rowGroupReader, [field, new Memory<byte[]>((byte[][])typedValues), null, cancellationToken]);
-        }
-        else
-        {
-            var usesNullableValueBuffer = field.IsNullable && clrType.IsValueType;
-
-            var elementType = usesNullableValueBuffer
-                ? typeof(Nullable<>).MakeGenericType(clrType)
-                : clrType;
-
-            typedValues = Array.CreateInstance(elementType, rowCount);
-
-            var memoryType = typeof(Memory<>).MakeGenericType(elementType);
-
-            valuesMemory = Activator.CreateInstance(memoryType, typedValues)
-                           ?? throw new InvalidOperationException($"Failed to create {memoryType}");
-
-            var readMethod = GetGenericReadAsyncMethod(usesNullableValueBuffer).MakeGenericMethod(clrType);
-            invocationResult = readMethod.Invoke(rowGroupReader, [field, valuesMemory, null, cancellationToken]);
-        }
-
-        await AwaitReadAsyncResult(invocationResult).ConfigureAwait(false);
-
-        var result = new object?[typedValues.Length];
-
-        for (var i = 0; i < typedValues.Length; i++)
-        {
-            result[i] = typedValues.GetValue(i);
+            // Hive writes a null partition value as __HIVE_DEFAULT_PARTITION__.
+            var value = Uri.UnescapeDataString(segment[(separator + 1)..]);
+            result.Add(new KeyValuePair<string, string?>(key, value == "__HIVE_DEFAULT_PARTITION__" ? null : value));
         }
 
         return result;
-    }
-
-    private static MethodInfo GetGenericReadAsyncMethod(bool nullableValueBuffer)
-    {
-        var readMethods = typeof(ParquetRowGroupReader)
-            .GetMethods()
-            .Where(m => m.Name == nameof(ParquetRowGroupReader.ReadAsync)
-                        && m.IsGenericMethodDefinition
-                        && m.GetGenericArguments().Length == 1);
-
-        foreach (var method in readMethods)
-        {
-            var parameters = method.GetParameters();
-
-            if (parameters.Length != 4
-                || parameters[0].ParameterType != typeof(DataField)
-                || parameters[2].ParameterType != typeof(Memory<int>?)
-                || parameters[3].ParameterType != typeof(CancellationToken))
-                continue;
-
-            var valuesParameterType = parameters[1].ParameterType;
-
-            if (!valuesParameterType.IsGenericType || valuesParameterType.GetGenericTypeDefinition() != typeof(Memory<>))
-                continue;
-
-            var valueType = valuesParameterType.GetGenericArguments()[0];
-
-            if (!nullableValueBuffer && valueType.IsGenericParameter)
-                return method;
-
-            if (nullableValueBuffer
-                && valueType.IsGenericType
-                && valueType.GetGenericTypeDefinition() == typeof(Nullable<>)
-                && valueType.GetGenericArguments()[0].IsGenericParameter)
-                return method;
-        }
-
-        throw new InvalidOperationException(
-            $"Could not find generic ReadAsync overload for nullableValueBuffer={nullableValueBuffer}.");
-    }
-
-    private static async Task AwaitReadAsyncResult(object? invocationResult)
-    {
-        if (invocationResult is ValueTask valueTask)
-        {
-            await valueTask.ConfigureAwait(false);
-            return;
-        }
-
-        if (invocationResult is Task task)
-        {
-            await task.ConfigureAwait(false);
-            return;
-        }
-
-        throw new InvalidOperationException("Unexpected ReadAsync return type.");
-    }
-
-    private ParquetRow CreateParquetRow(
-        Dictionary<string, object?[]> columnData,
-        long rowIndex,
-        Dictionary<string, int> columnNameToIndex,
-        ParquetSchema schema)
-    {
-        var values = new object?[columnNameToIndex.Count];
-
-        foreach (var kvp in columnNameToIndex)
-        {
-            var columnName = kvp.Key;
-            var index = kvp.Value;
-
-            if (columnData.TryGetValue(columnName, out var columnValues) && rowIndex < columnValues.Length)
-                values[index] = columnValues[rowIndex];
-        }
-
-        return new ParquetRow(values, columnNameToIndex, schema);
     }
 }

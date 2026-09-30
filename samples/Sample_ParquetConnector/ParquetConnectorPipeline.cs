@@ -1,6 +1,7 @@
 using NPipeline.Connectors.Parquet;
 using NPipeline.Pipeline;
 using NPipeline.StorageProviders.Models;
+using Parquet;
 using Sample_ParquetConnector.Nodes;
 
 namespace Sample_ParquetConnector;
@@ -14,7 +15,10 @@ public sealed class ParquetConnectorPipeline : IPipelineDefinition
     public void Define(PipelineBuilder builder, PipelineContext context)
     {
         var source = builder.AddSource(new SalesDataSourceNode(), "sales-source");
-        var sink = builder.AddSink(new ParquetSinkNode<SalesRecord>(StorageUri.FromFilePath(GetOutputPath())), "parquet-sink");
+        // Each record's members become typed columns; Zstd trades a little CPU for smaller files than the Snappy default.
+        var sink = builder.AddSink(
+            ParquetConnector.Sink<SalesRecord>(StorageUri.FromFilePath(GetOutputPath()), o => o with { Codec = CompressionMethod.Zstd }),
+            "parquet-sink");
 
         builder.Connect(source, sink);
     }

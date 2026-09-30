@@ -1,7 +1,6 @@
 using NPipeline.Connectors.DataLake.Manifest;
 using NPipeline.Connectors.DataLake.Partitioning;
 using NPipeline.Connectors.DataLake.Snapshot;
-using NPipeline.Connectors.Parquet;
 using NPipeline.DataFlow;
 using NPipeline.DataFlow.DataStreams;
 using NPipeline.Pipeline;
@@ -17,7 +16,7 @@ namespace NPipeline.Connectors.DataLake;
 /// <typeparam name="T">The record type being written.</typeparam>
 public sealed class DataLakeTableWriter<T> : IAsyncDisposable
 {
-    private readonly ParquetConfiguration _configuration;
+    private readonly DataLakeParquetOptions _options;
     private readonly PartitionSpec<T>? _partitionSpec;
     private readonly IStorageProvider _provider;
     private readonly FileSequenceContext _sequenceContext = new();
@@ -30,12 +29,12 @@ public sealed class DataLakeTableWriter<T> : IAsyncDisposable
     /// <param name="provider">The storage provider to use for writing.</param>
     /// <param name="tableBasePath">The base path of the table.</param>
     /// <param name="partitionSpec">Optional partition specification.</param>
-    /// <param name="configuration">Optional Parquet configuration.</param>
+    /// <param name="options">How data files are written and buffered; <see cref="DataLakeParquetOptions.Default" /> when <c>null</c>.</param>
     public DataLakeTableWriter(
         IStorageProvider provider,
         StorageUri tableBasePath,
         PartitionSpec<T>? partitionSpec = null,
-        ParquetConfiguration? configuration = null)
+        DataLakeParquetOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(provider);
         ArgumentNullException.ThrowIfNull(tableBasePath);
@@ -43,8 +42,7 @@ public sealed class DataLakeTableWriter<T> : IAsyncDisposable
         _provider = provider;
         TableBasePath = tableBasePath;
         _partitionSpec = partitionSpec;
-        _configuration = configuration ?? new ParquetConfiguration();
-        _configuration.Validate();
+        _options = (options ?? DataLakeParquetOptions.Default).Validated();
         SnapshotId = ManifestWriter.GenerateSnapshotId();
     }
 
@@ -193,7 +191,7 @@ public sealed class DataLakeTableWriter<T> : IAsyncDisposable
             totalBufferedRows++;
 
             // Check if we need to flush any partition buffers
-            if (buffer.Count >= _configuration.RowGroupSize)
+            if (buffer.Count >= _options.RowGroupSize)
             {
                 await FlushPartitionBufferAsync(partitionPath, buffer, cancellationToken)
                     .ConfigureAwait(false);
@@ -203,7 +201,7 @@ public sealed class DataLakeTableWriter<T> : IAsyncDisposable
             }
 
             // Backpressure guard: flush largest buffers if we exceed MaxBufferedRows
-            if (totalBufferedRows > _configuration.MaxBufferedRows)
+            if (totalBufferedRows > _options.MaxBufferedRows)
             {
                 await FlushLargestBuffersAsync(partitionBuffers, cancellationToken)
                     .ConfigureAwait(false);
@@ -234,11 +232,9 @@ public sealed class DataLakeTableWriter<T> : IAsyncDisposable
             ? fileName
             : $"{partitionPath}{fileName}";
 
-        var fullPath = BuildFullPath(relativePath);
-        var fileUri = StorageUri.Parse($"{TableBasePath.Scheme}://{TableBasePath.Host}{fullPath}");
+        var fileUri = TableBasePath.Combine(relativePath);
 
-        // Write Parquet file
-        var sinkNode = new ParquetSinkNode<T>(_provider, fileUri, _configuration);
+        var sinkNode = _options.Sink<T>(_provider, fileUri);
 
         // Create a data pipe from the buffer
         var dataStream = new InMemoryDataStream<T>(buffer);
@@ -289,7 +285,7 @@ public sealed class DataLakeTableWriter<T> : IAsyncDisposable
     {
         // Find buffers that are at least half full
         var buffersToFlush = partitionBuffers
-            .Where(kvp => kvp.Value.Count >= _configuration.RowGroupSize / 2)
+            .Where(kvp => kvp.Value.Count >= _options.RowGroupSize / 2)
             .OrderByDescending(kvp => kvp.Value.Count)
             .Take(3) // Flush up to 3 largest buffers
             .ToList();
@@ -305,7 +301,7 @@ public sealed class DataLakeTableWriter<T> : IAsyncDisposable
 
     private async Task AppendUnpartitionedAsync(IDataStream<T> data, CancellationToken cancellationToken)
     {
-        var buffer = new List<T>(_configuration.RowGroupSize);
+        var buffer = new List<T>(_options.RowGroupSize);
 
         await foreach (var record in data.WithCancellation(cancellationToken))
         {
@@ -314,7 +310,7 @@ public sealed class DataLakeTableWriter<T> : IAsyncDisposable
 
             buffer.Add(record);
 
-            if (buffer.Count >= _configuration.RowGroupSize)
+            if (buffer.Count >= _options.RowGroupSize)
             {
                 await FlushUnpartitionedBufferAsync(buffer, cancellationToken)
                     .ConfigureAwait(false);
@@ -335,15 +331,6 @@ public sealed class DataLakeTableWriter<T> : IAsyncDisposable
         List<T> buffer,
         CancellationToken cancellationToken) =>
         FlushPartitionBufferAsync(string.Empty, buffer, cancellationToken);
-
-    private string BuildFullPath(string relativePath)
-    {
-        var basePath = TableBasePath.Path?.TrimStart('/') ?? string.Empty;
-
-        return string.IsNullOrEmpty(basePath)
-            ? $"/{relativePath.TrimStart('/')}"
-            : $"/{basePath}/{relativePath.TrimStart('/')}";
-    }
 
     private static string GenerateFileName(int sequence)
     {

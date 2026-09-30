@@ -32,7 +32,7 @@ public static class Program
         Console.WriteLine();
 
         Console.WriteLine("First 5 records (read back from Parquet):");
-        var sourceNode = new ParquetSourceNode<SalesRecord>(StorageUri.FromFilePath(outputPath));
+        var sourceNode = ParquetConnector.Source<SalesRecord>(StorageUri.FromFilePath(outputPath));
         var count = 0;
 
         await foreach (var record in sourceNode.OpenStream(PipelineContext.CreateDefault(), CancellationToken.None))

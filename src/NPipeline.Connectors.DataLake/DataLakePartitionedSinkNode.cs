@@ -1,6 +1,5 @@
 using NPipeline.Connectors.DataLake.Manifest;
 using NPipeline.Connectors.DataLake.Partitioning;
-using NPipeline.Connectors.Parquet;
 using NPipeline.DataFlow;
 using NPipeline.DataFlow.DataStreams;
 using NPipeline.Nodes;
@@ -21,7 +20,7 @@ public sealed class DataLakePartitionedSinkNode<T> : SinkNode<T>
     private static readonly Lazy<IStorageResolver> DefaultResolver =
         new(() => StorageProviderFactory.CreateResolver());
 
-    private readonly ParquetConfiguration _configuration;
+    private readonly DataLakeParquetOptions _options;
     private readonly PartitionSpec<T>? _partitionSpec;
     private readonly IStorageProvider? _provider;
     private readonly IStorageResolver? _resolver;
@@ -33,20 +32,19 @@ public sealed class DataLakePartitionedSinkNode<T> : SinkNode<T>
     /// <param name="tableBasePath">The base path of the table.</param>
     /// <param name="partitionSpec">Optional partition specification.</param>
     /// <param name="resolver">The storage resolver.</param>
-    /// <param name="configuration">Optional Parquet configuration.</param>
+    /// <param name="options">How data files are written and buffered; <see cref="DataLakeParquetOptions.Default" /> when <c>null</c>.</param>
     public DataLakePartitionedSinkNode(
         StorageUri tableBasePath,
         PartitionSpec<T>? partitionSpec = null,
         IStorageResolver? resolver = null,
-        ParquetConfiguration? configuration = null)
+        DataLakeParquetOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(tableBasePath);
 
         _tableBasePath = tableBasePath;
         _partitionSpec = partitionSpec;
         _resolver = resolver ?? DefaultResolver.Value;
-        _configuration = configuration ?? new ParquetConfiguration();
-        _configuration.Validate();
+        _options = (options ?? DataLakeParquetOptions.Default).Validated();
     }
 
     /// <summary>
@@ -55,12 +53,12 @@ public sealed class DataLakePartitionedSinkNode<T> : SinkNode<T>
     /// <param name="provider">The storage provider.</param>
     /// <param name="tableBasePath">The base path of the table.</param>
     /// <param name="partitionSpec">Optional partition specification.</param>
-    /// <param name="configuration">Optional Parquet configuration.</param>
+    /// <param name="options">How data files are written and buffered; <see cref="DataLakeParquetOptions.Default" /> when <c>null</c>.</param>
     public DataLakePartitionedSinkNode(
         IStorageProvider provider,
         StorageUri tableBasePath,
         PartitionSpec<T>? partitionSpec = null,
-        ParquetConfiguration? configuration = null)
+        DataLakeParquetOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(provider);
         ArgumentNullException.ThrowIfNull(tableBasePath);
@@ -68,8 +66,7 @@ public sealed class DataLakePartitionedSinkNode<T> : SinkNode<T>
         _provider = provider;
         _tableBasePath = tableBasePath;
         _partitionSpec = partitionSpec;
-        _configuration = configuration ?? new ParquetConfiguration();
-        _configuration.Validate();
+        _options = (options ?? DataLakeParquetOptions.Default).Validated();
     }
 
     /// <inheritdoc />
@@ -131,7 +128,7 @@ public sealed class DataLakePartitionedSinkNode<T> : SinkNode<T>
             totalBufferedRows++;
 
             // Check if we need to flush this partition buffer
-            if (buffer.Count >= _configuration.RowGroupSize)
+            if (buffer.Count >= _options.RowGroupSize)
             {
                 await FlushBufferAsync(
                     provider,
@@ -147,7 +144,7 @@ public sealed class DataLakePartitionedSinkNode<T> : SinkNode<T>
             }
 
             // Backpressure guard
-            if (totalBufferedRows > _configuration.MaxBufferedRows)
+            if (totalBufferedRows > _options.MaxBufferedRows)
             {
                 await FlushLargestBuffersAsync(
                     provider,
@@ -185,7 +182,7 @@ public sealed class DataLakePartitionedSinkNode<T> : SinkNode<T>
         string snapshotId,
         CancellationToken cancellationToken)
     {
-        var buffer = new List<T>(_configuration.RowGroupSize);
+        var buffer = new List<T>(_options.RowGroupSize);
         var sequenceContext = new FileSequenceContext();
 
         await foreach (var record in input.WithCancellation(cancellationToken))
@@ -195,7 +192,7 @@ public sealed class DataLakePartitionedSinkNode<T> : SinkNode<T>
 
             buffer.Add(record);
 
-            if (buffer.Count >= _configuration.RowGroupSize)
+            if (buffer.Count >= _options.RowGroupSize)
             {
                 await FlushBufferAsync(
                     provider,
@@ -239,11 +236,9 @@ public sealed class DataLakePartitionedSinkNode<T> : SinkNode<T>
             ? fileName
             : $"{partitionPath}{fileName}";
 
-        var fullPath = BuildFullPath(relativePath);
-        var fileUri = StorageUri.Parse($"{_tableBasePath.Scheme}://{_tableBasePath.Host}{fullPath}");
+        var fileUri = _tableBasePath.Combine(relativePath);
 
-        // Write Parquet file
-        var sinkNode = new ParquetSinkNode<T>(provider, fileUri, _configuration);
+        var sinkNode = _options.Sink<T>(provider, fileUri);
 
         // Create a data pipe from the buffer
         var dataStream = new InMemoryDataStream<T>(buffer);
@@ -297,7 +292,7 @@ public sealed class DataLakePartitionedSinkNode<T> : SinkNode<T>
         CancellationToken cancellationToken)
     {
         var buffersToFlush = partitionBuffers
-            .Where(kvp => kvp.Value.Count >= _configuration.RowGroupSize / 2)
+            .Where(kvp => kvp.Value.Count >= _options.RowGroupSize / 2)
             .OrderByDescending(kvp => kvp.Value.Count)
             .Take(3)
             .ToList();
@@ -315,15 +310,6 @@ public sealed class DataLakePartitionedSinkNode<T> : SinkNode<T>
 
             kvp.Value.Clear();
         }
-    }
-
-    private string BuildFullPath(string relativePath)
-    {
-        var basePath = _tableBasePath.Path?.TrimStart('/') ?? string.Empty;
-
-        return string.IsNullOrEmpty(basePath)
-            ? $"/{relativePath.TrimStart('/')}"
-            : $"/{basePath}/{relativePath.TrimStart('/')}";
     }
 
     private static string GenerateFileName(int sequence)

@@ -7,8 +7,6 @@ using NPipeline.Connectors.Parquet;
 using NPipeline.Pipeline;
 using NPipeline.StorageProviders.Abstractions;
 using NPipeline.StorageProviders.Models;
-using Parquet;
-using Parquet.Schema;
 
 namespace NPipeline.Connectors.DataLake;
 
@@ -18,7 +16,7 @@ namespace NPipeline.Connectors.DataLake;
 /// </summary>
 public sealed class DataLakeCompactor
 {
-    private readonly ParquetConfiguration _configuration;
+    private readonly DataLakeParquetOptions _options;
     private readonly IStorageProvider _provider;
     private readonly StorageUri _tableBasePath;
 
@@ -27,19 +25,18 @@ public sealed class DataLakeCompactor
     /// </summary>
     /// <param name="provider">The storage provider.</param>
     /// <param name="tableBasePath">The base path of the table.</param>
-    /// <param name="configuration">Optional Parquet configuration.</param>
+    /// <param name="options">How compacted files are written; <see cref="DataLakeParquetOptions.Default" /> when <c>null</c>.</param>
     public DataLakeCompactor(
         IStorageProvider provider,
         StorageUri tableBasePath,
-        ParquetConfiguration? configuration = null)
+        DataLakeParquetOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(provider);
         ArgumentNullException.ThrowIfNull(tableBasePath);
 
         _provider = provider;
         _tableBasePath = tableBasePath;
-        _configuration = configuration ?? new ParquetConfiguration();
-        _configuration.Validate();
+        _options = (options ?? DataLakeParquetOptions.Default).Validated();
     }
 
     /// <summary>
@@ -316,15 +313,11 @@ public sealed class DataLakeCompactor
         StorageUri fileUri,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        // Use ParquetSourceNode to read rows with an identity mapper (row => row)
-        // since ParquetRow doesn't have a parameterless constructor for attribute mapping
-        var sourceNode = new ParquetSourceNode<ParquetRow>(_provider, fileUri, row => row, _configuration);
+        var dataStream = DataLakeParquetOptions.Rows(_provider, fileUri).OpenStream(PipelineContext.CreateDefault(), cancellationToken);
 
-        var dataStream = sourceNode.OpenStream(PipelineContext.CreateDefault(), cancellationToken);
-
-        await foreach (var item in dataStream.WithCancellation(cancellationToken))
+        await foreach (var row in dataStream.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
-            yield return item;
+            yield return row;
         }
     }
 
@@ -336,451 +329,14 @@ public sealed class DataLakeCompactor
         if (records.Count == 0)
             return;
 
-        // Get the schema from the first record
-        var schema = records[0].Schema;
-        var columnNames = records[0].ColumnNames;
+        var stream = await _provider.OpenWriteAsync(fileUri, cancellationToken).ConfigureAwait(false);
 
-        var stream = await _provider.OpenWriteAsync(fileUri, cancellationToken)
-            .ConfigureAwait(false);
-
-        await using var streamScope = stream.ConfigureAwait(false);
-
-        var options = new ParquetOptions();
-        options.CompressionMethod = _configuration.Compression;
-
-        var writer = await ParquetWriter.CreateAsync(schema, stream, options, cancellationToken: cancellationToken)
-            .ConfigureAwait(false);
-
-        await using var writerScope = writer.ConfigureAwait(false);
-
-        using var rowGroupWriter = writer.CreateRowGroup();
-
-        // Write each column
-        foreach (var columnName in columnNames)
+        await using (stream.ConfigureAwait(false))
         {
-            var field = schema.Fields.FirstOrDefault(f => f.Name == columnName);
-
-            if (field is null || field is not DataField dataField)
-                continue;
-
-            await WriteColumnDataAsync(rowGroupWriter, dataField, records, columnName, cancellationToken)
+            // The rows keep the schema of the file they were read from; the group shares one layout.
+            await ParquetRowWriter.WriteAsync(stream, records[0].Schema, records, _options.Codec, _options.RowGroupSize, cancellationToken)
                 .ConfigureAwait(false);
         }
-    }
-
-    private async Task WriteColumnDataAsync(
-        ParquetRowGroupWriter rowGroupWriter,
-        DataField dataField,
-        List<ParquetRow> records,
-        string columnName,
-        CancellationToken cancellationToken)
-    {
-        var fieldType = dataField.ClrType;
-        var isNullable = dataField.IsNullable;
-
-        // Note: WriteAsync in Parquet.Net v6 does not support cancellation tokens
-        // CA2016 warning is suppressed as intentional - the API design doesn't allow token forwarding
-#pragma warning disable CA2016
-        if (fieldType == typeof(string))
-        {
-            var data = new string?[records.Count];
-
-            for (var i = 0; i < records.Count; i++)
-            {
-                data[i] = records[i][columnName] as string;
-            }
-
-            await rowGroupWriter.WriteAsync(dataField, data).ConfigureAwait(false);
-        }
-        else if (fieldType == typeof(int))
-        {
-            if (isNullable)
-            {
-                var data = new int?[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is int intValue
-                        ? intValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<int>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new int[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is int intValue
-                        ? intValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<int>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (fieldType == typeof(long))
-        {
-            if (isNullable)
-            {
-                var data = new long?[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is long longValue
-                        ? longValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<long>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new long[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is long longValue
-                        ? longValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<long>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (fieldType == typeof(short))
-        {
-            if (isNullable)
-            {
-                var data = new short?[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is short shortValue
-                        ? shortValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<short>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new short[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is short shortValue
-                        ? shortValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<short>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (fieldType == typeof(byte))
-        {
-            if (isNullable)
-            {
-                var data = new byte?[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is byte byteValue
-                        ? byteValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<byte>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new byte[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is byte byteValue
-                        ? byteValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<byte>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (fieldType == typeof(float))
-        {
-            if (isNullable)
-            {
-                var data = new float?[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is float floatValue
-                        ? floatValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<float>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new float[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is float floatValue
-                        ? floatValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<float>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (fieldType == typeof(double))
-        {
-            if (isNullable)
-            {
-                var data = new double?[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is double doubleValue
-                        ? doubleValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<double>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new double[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is double doubleValue
-                        ? doubleValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<double>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (fieldType == typeof(bool))
-        {
-            if (isNullable)
-            {
-                var data = new bool?[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is bool boolValue
-                        ? boolValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<bool>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new bool[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is bool boolValue
-                        ? boolValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<bool>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (fieldType == typeof(decimal))
-        {
-            if (isNullable)
-            {
-                var data = new decimal?[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is decimal decimalValue
-                        ? decimalValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<decimal>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new decimal[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is decimal decimalValue
-                        ? decimalValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<decimal>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (fieldType == typeof(DateTime))
-        {
-            if (isNullable)
-            {
-                var data = new DateTime?[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is DateTime dateTimeValue
-                        ? dateTimeValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<DateTime>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new DateTime[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is DateTime dateTimeValue
-                        ? dateTimeValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<DateTime>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (fieldType == typeof(DateTimeOffset))
-        {
-            if (isNullable)
-            {
-                var data = new DateTime?[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is DateTime dateTimeValue
-                        ? dateTimeValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<DateTime>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new DateTime[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is DateTime dateTimeValue
-                        ? dateTimeValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<DateTime>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (fieldType == typeof(DateOnly))
-        {
-            if (isNullable)
-            {
-                var data = new DateTime?[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is DateTime dateTimeValue
-                        ? dateTimeValue
-                        : null;
-                }
-
-                await rowGroupWriter.WriteAsync<DateTime>(dataField, data).ConfigureAwait(false);
-            }
-            else
-            {
-                var data = new DateTime[records.Count];
-
-                for (var i = 0; i < records.Count; i++)
-                {
-                    var value = records[i][columnName];
-
-                    data[i] = value is DateTime dateTimeValue
-                        ? dateTimeValue
-                        : default;
-                }
-
-                await rowGroupWriter.WriteAsync<DateTime>(dataField, data).ConfigureAwait(false);
-            }
-        }
-        else if (fieldType == typeof(byte[]))
-        {
-            var data = new byte[records.Count][];
-
-            for (var i = 0; i < records.Count; i++)
-            {
-                var value = records[i][columnName];
-                data[i] = value as byte[] ?? [];
-            }
-
-            await rowGroupWriter.WriteAsync(dataField, data).ConfigureAwait(false);
-        }
-        else
-        {
-            // Default: convert to string representation
-            var data = new string?[records.Count];
-
-            for (var i = 0; i < records.Count; i++)
-            {
-                var value = records[i][columnName];
-                data[i] = value?.ToString();
-            }
-
-            await rowGroupWriter.WriteAsync(dataField, data).ConfigureAwait(false);
-        }
-#pragma warning restore CA2016
     }
 
     private async Task DeleteFilesAsync(
@@ -804,16 +360,8 @@ public sealed class DataLakeCompactor
         }
     }
 
-    private StorageUri BuildFileUri(string relativePath)
-    {
-        var basePath = _tableBasePath.Path?.TrimStart('/') ?? string.Empty;
-
-        var fullPath = string.IsNullOrEmpty(basePath)
-            ? $"/{relativePath.TrimStart('/')}"
-            : $"/{basePath}/{relativePath.TrimStart('/')}";
-
-        return StorageUri.Parse($"{_tableBasePath.Scheme}://{_tableBasePath.Host}{fullPath}");
-    }
+    // Combine keeps the table URI's parameters (credentials, region) on each file's URI.
+    private StorageUri BuildFileUri(string relativePath) => _tableBasePath.Combine(relativePath);
 
     private static string GenerateCompactedFileName(int sequence)
     {

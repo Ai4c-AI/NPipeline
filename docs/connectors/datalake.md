@@ -28,36 +28,21 @@ dotnet add package NPipeline.Connectors.DataLake
 
 ## Source Node - `DataLakeTableSourceNode<T>`
 
-Reads all Parquet files in a table, following the manifest to resolve the current (or historical) snapshot.
-
-### Constructors
+Reads every data file of a table's current snapshot, or of an earlier one, following the manifest. Files are read with
+the [Parquet connector](parquet.md), so records map to columns as described there.
 
 ```csharp
-// Current snapshot with optional resolver
-public DataLakeTableSourceNode(
-    StorageUri tableBasePath,
-    IStorageResolver? resolver = null,
-    ParquetConfiguration? configuration = null)
+// The current snapshot
+new DataLakeTableSourceNode<SalesRecord>(StorageUri tableBasePath, IStorageResolver? resolver = null)
+new DataLakeTableSourceNode<SalesRecord>(IStorageProvider provider, StorageUri tableBasePath)
 
-// Current snapshot with explicit provider
-public DataLakeTableSourceNode(
-    IStorageProvider provider,
-    StorageUri tableBasePath,
-    ParquetConfiguration? configuration = null)
+// The table as it was at a point in time
+new DataLakeTableSourceNode<SalesRecord>(StorageUri tableBasePath, DateTimeOffset asOf, IStorageResolver? resolver = null)
+new DataLakeTableSourceNode<SalesRecord>(IStorageProvider provider, StorageUri tableBasePath, DateTimeOffset asOf)
 
-// Historical snapshot (time travel)
-public DataLakeTableSourceNode(
-    StorageUri tableBasePath,
-    DateTimeOffset asOf,
-    IStorageResolver? resolver = null,
-    ParquetConfiguration? configuration = null)
-
-// Historical snapshot with explicit provider
-public DataLakeTableSourceNode(
-    IStorageProvider provider,
-    StorageUri tableBasePath,
-    DateTimeOffset asOf,
-    ParquetConfiguration? configuration = null)
+// A specific snapshot
+new DataLakeTableSourceNode<SalesRecord>(StorageUri tableBasePath, string snapshotId, IStorageResolver? resolver = null)
+new DataLakeTableSourceNode<SalesRecord>(IStorageProvider provider, StorageUri tableBasePath, string snapshotId)
 ```
 
 ### Example: Time Travel
@@ -70,69 +55,67 @@ var source = new DataLakeTableSourceNode<SalesRecord>(
     resolver: myResolver);
 ```
 
+Query parameters on the table URI (credentials, a region) are kept on every data file's URI.
+
 ## Sink Node - `DataLakePartitionedSinkNode<T>`
 
-Writes items to a partitioned table, routing each item to the appropriate partition directory based on a `PartitionSpec`.
-
-### Constructors
+Writes items to a partitioned table, routing each item to the partition directory its `PartitionSpec` gives it, and
+records the files in the manifest once they are written.
 
 ```csharp
-// With optional resolver
-public DataLakePartitionedSinkNode(
+new DataLakePartitionedSinkNode<SalesRecord>(
     StorageUri tableBasePath,
-    PartitionSpec<T>? partitionSpec = null,
+    PartitionSpec<SalesRecord>? partitionSpec = null,
     IStorageResolver? resolver = null,
-    ParquetConfiguration? configuration = null)
+    DataLakeParquetOptions? options = null)
 
-// With explicit provider
-public DataLakePartitionedSinkNode(
+new DataLakePartitionedSinkNode<SalesRecord>(
     IStorageProvider provider,
     StorageUri tableBasePath,
-    PartitionSpec<T>? partitionSpec = null,
-    ParquetConfiguration? configuration = null)
+    PartitionSpec<SalesRecord>? partitionSpec = null,
+    DataLakeParquetOptions? options = null)
 ```
+
+`DataLakeTableWriter<T>` offers the same writes outside a pipeline, with `AppendAsync` and snapshot queries.
 
 ### Example: Partitioned Write
 
 ```csharp
-var partitionSpec = new PartitionSpec<SalesRecord>()
-    .AddColumn("year", r => r.OrderDate.Year.ToString())
-    .AddColumn("region", r => r.Region);
+var partitionSpec = PartitionSpec<SalesRecord>.By(r => r.Year).ThenBy(r => r.Region);
 
 var sink = new DataLakePartitionedSinkNode<SalesRecord>(
     StorageUri.Parse("s3://data-lake/sales"),
-    partitionSpec: partitionSpec,
-    resolver: myResolver,
-    configuration: new ParquetConfiguration
-    {
-        Compression = CompressionMethod.Snappy,
-        UseAtomicWrite = true
-    });
+    partitionSpec,
+    myResolver,
+    new DataLakeParquetOptions { Codec = CompressionMethod.Zstd });
 ```
 
 This produces a directory structure like:
 
 ```
 s3://data-lake/sales/
-  year=2024/region=US/part-00001.parquet
-  year=2024/region=EU/part-00001.parquet
-  year=2025/region=US/part-00001.parquet
+  year=2024/region=US/part-00001-1a2b3c4d.parquet
+  year=2024/region=EU/part-00002-5e6f7a8b.parquet
+  year=2025/region=US/part-00003-9c0d1e2f.parquet
   _manifest/
-    snapshot-20240115T120000Z.json
+    manifest.ndjson
+    snapshots/
 ```
 
-## Configuration
+## Options
 
-The Data Lake connector uses `ParquetConfiguration` for all Parquet-specific settings (compression, row group size, etc.). See [Parquet Connector - Configuration](parquet.md#configuration) for the full property reference.
+`DataLakeParquetOptions` sets how the table's data files are written and buffered. The writer, the partitioned sink and
+the compactor take it; readers need none.
 
-Key options for data lake use:
+| Option | Default | Description |
+| --- | --- | --- |
+| `RowGroupSize` | `50_000` | Rows buffered per partition before a data file is written, and the most rows per row group |
+| `RowGroupBytes` | 128 MB | A row group is also flushed once its buffered values reach about this size |
+| `Codec` | `Snappy` | The compression codec |
+| `MaxBufferedRows` | `250_000` | The most rows buffered across all partitions; beyond it the largest buffers are written early |
 
-| Property | Recommendation | Why |
-|----------|---------------|-----|
-| `UseAtomicWrite` | `true` | Prevents partial files on failure |
-| `Compression` | `Snappy` | Fast compression for analytical queries |
-| `RowGroupSize` | `50,000–100,000` | Balance between compression and memory |
-| `MaxBufferedRows` | `250,000` | Controls memory across partition buffers |
+Data files have unique names and only become part of the table when the manifest records them, so they are written
+directly rather than through a temporary file.
 
 ## Example: Full Pipeline
 
@@ -145,15 +128,13 @@ public sealed class SalesIngestionPipeline : IPipelineDefinition
             CsvConnector.Source<SalesRecord>(StorageUri.FromFilePath("daily-sales.csv")),
             "csv-source");
 
-        var partitionSpec = new PartitionSpec<SalesRecord>()
-            .AddColumn("year", r => r.Date.Year.ToString())
-            .AddColumn("month", r => r.Date.Month.ToString("D2"));
+        var partitionSpec = PartitionSpec<SalesRecord>.By(r => r.Year).ThenBy(r => r.Month);
 
         var sink = builder.AddSink(
             new DataLakePartitionedSinkNode<SalesRecord>(
                 StorageUri.Parse("s3://data-lake/sales"),
-                partitionSpec: partitionSpec,
-                resolver: myResolver),
+                partitionSpec,
+                myResolver),
             "lake-sink");
 
         builder.Connect(source, sink);
@@ -174,28 +155,38 @@ public sealed class SalesIngestionPipeline : IPipelineDefinition
 The `PartitionSpec<T>` defines how records are partitioned into directories:
 
 ```csharp
-var spec = new PartitionSpec<SalesRecord>()
-    .AddColumn("year", r => r.Date.Year.ToString())
-    .AddColumn("month", r => r.Date.Month.ToString("D2"))
-    .AddColumn("region", r => r.Region);
+var spec = PartitionSpec<SalesRecord>.By(r => r.Year)
+    .ThenBy(r => r.Month)
+    .ThenBy(r => r.Region, "region_code");
 ```
 
-Produces: `year=2024/month=01/region=US/part-00001.parquet`
+Produces: `year=2024/month=1/region_code=US/part-00001-1a2b3c4d.parquet`
 
 ### Reading Partitioned Data
 
+`DataLakeTableSourceNode<T>` reads the files the manifest lists, in every partition. To read the files of a partitioned
+directory without a manifest, use the Parquet connector with a glob; it fills members from the `key=value` directories:
+
 ```csharp
-var source = new DataLakeSourceNode<SalesRecord>(
-    StorageUri.Parse("s3://data-lake/sales"),
-    resolver: myResolver,
-    configuration: new ParquetConfiguration
-    {
-        RecursiveDiscovery = true,
-        FileReadParallelism = 4
-    });
+var source = ParquetConnector.Source<SalesRecord>(
+    StorageUri.Parse("s3://data-lake/sales/**/*.parquet"),
+    o => o with { Provider = s3Provider, FileReadParallelism = 4 });
 ```
 
-With `RecursiveDiscovery = true`, the connector reads all `.parquet` files in subdirectories.
+## Compaction
+
+`DataLakeCompactor` merges a partition's small files into one, writing the rows back with their files' schema, and
+records the swap in the manifest:
+
+```csharp
+var result = await new DataLakeCompactor(provider, table).CompactAsync(new TableCompactRequest
+{
+    TableBasePath = table,
+    Provider = provider,
+    SmallFileThresholdBytes = 32L * 1024 * 1024,
+    MinFilesToCompact = 5,
+});
+```
 
 ## Manifest / Snapshots
 
@@ -245,23 +236,14 @@ the `ManifestReader` constructor to change this.
 
 ## Schema Evolution
 
-When reading, use `SchemaCompatibilityMode.Additive` to handle schema drift:
-
-```csharp
-var config = new ParquetConfiguration
-{
-    SchemaCompatibility = SchemaCompatibilityMode.Additive
-};
-```
-
-- **Strict**: File must exactly match target type
-- **Additive**: Extra columns ignored, missing columns use defaults
+Each data file is read with the [Parquet connector's mapping](parquet.md#missing-columns-and-partitions): columns bind by
+name, columns the record does not map are ignored, and a member missing from older files keeps its initialiser unless
+it is `required`. Adding a nullable member to the record is therefore safe for tables written before it existed.
 
 ## Best Practices
 
-1. **Choose partition keys carefully** - high-cardinality keys create too many small files
-2. **Use `UseAtomicWrite = true`** - prevents partial files on failure
-3. **Use `Snappy` compression** - fast and widely supported by query engines
-4. **Set `MaxBufferedRows`** to control memory across partition buffers
-5. **Use `RecursiveDiscovery`** for reading - handles partition subdirectories automatically
-6. **Query with DuckDB** - use the DuckDB connector to query data lake files with SQL
+1. **Choose partition keys carefully**: high-cardinality keys create too many small files.
+2. **Compact regularly**: `DataLakeCompactor` merges small files into larger ones.
+3. **Set `MaxBufferedRows`** to bound memory when records fan out to many partitions.
+4. **Use `Snappy` or `Zstd`**: both are fast and widely supported by query engines.
+5. **Query with DuckDB**: use the DuckDB connector to query data lake files with SQL.

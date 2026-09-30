@@ -105,11 +105,18 @@ public abstract record FileSourceOptions : FileNodeOptions
     /// <summary>The longest raw excerpt a <see cref="RowError" /> carries, in characters; <c>0</c> omits it (for sensitive data).</summary>
     public int RawExcerptLength { get; init; } = DefaultRawExcerptLength;
 
+    /// <summary>
+    ///     How many files to read at once when <see cref="FileNodeOptions.Uri" /> names several. Records still arrive in file
+    ///     order: later files are read ahead into a bounded buffer while the current one is consumed. Defaults to 1.
+    /// </summary>
+    public int FileReadParallelism { get; init; } = 1;
+
     /// <inheritdoc />
     public override void Validate()
     {
         base.Validate();
         ArgumentOutOfRangeException.ThrowIfNegative(RawExcerptLength, nameof(RawExcerptLength));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(FileReadParallelism, nameof(FileReadParallelism));
     }
 }
 

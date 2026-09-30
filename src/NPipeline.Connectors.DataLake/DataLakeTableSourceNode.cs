@@ -1,6 +1,5 @@
 using System.Runtime.CompilerServices;
 using NPipeline.Connectors.DataLake.Manifest;
-using NPipeline.Connectors.Parquet;
 using NPipeline.DataFlow;
 using NPipeline.DataFlow.DataStreams;
 using NPipeline.Nodes;
@@ -23,7 +22,6 @@ public sealed class DataLakeTableSourceNode<T> : SourceNode<T>
         new(() => StorageProviderFactory.CreateResolver());
 
     private readonly DateTimeOffset? _asOf;
-    private readonly ParquetConfiguration _configuration;
     private readonly IStorageProvider? _provider;
     private readonly IStorageResolver? _resolver;
     private readonly string? _snapshotId;
@@ -34,18 +32,14 @@ public sealed class DataLakeTableSourceNode<T> : SourceNode<T>
     /// </summary>
     /// <param name="tableBasePath">The base path of the table.</param>
     /// <param name="resolver">The storage resolver.</param>
-    /// <param name="configuration">Optional Parquet configuration.</param>
     public DataLakeTableSourceNode(
         StorageUri tableBasePath,
-        IStorageResolver? resolver = null,
-        ParquetConfiguration? configuration = null)
+        IStorageResolver? resolver = null)
     {
         ArgumentNullException.ThrowIfNull(tableBasePath);
 
         _tableBasePath = tableBasePath;
         _resolver = resolver;
-        _configuration = configuration ?? new ParquetConfiguration();
-        _configuration.Validate();
     }
 
     /// <summary>
@@ -53,19 +47,15 @@ public sealed class DataLakeTableSourceNode<T> : SourceNode<T>
     /// </summary>
     /// <param name="provider">The storage provider.</param>
     /// <param name="tableBasePath">The base path of the table.</param>
-    /// <param name="configuration">Optional Parquet configuration.</param>
     public DataLakeTableSourceNode(
         IStorageProvider provider,
-        StorageUri tableBasePath,
-        ParquetConfiguration? configuration = null)
+        StorageUri tableBasePath)
     {
         ArgumentNullException.ThrowIfNull(provider);
         ArgumentNullException.ThrowIfNull(tableBasePath);
 
         _provider = provider;
         _tableBasePath = tableBasePath;
-        _configuration = configuration ?? new ParquetConfiguration();
-        _configuration.Validate();
     }
 
     /// <summary>
@@ -74,13 +64,11 @@ public sealed class DataLakeTableSourceNode<T> : SourceNode<T>
     /// <param name="tableBasePath">The base path of the table.</param>
     /// <param name="asOf">The timestamp for time travel (returns data as of this point in time).</param>
     /// <param name="resolver">The storage resolver.</param>
-    /// <param name="configuration">Optional Parquet configuration.</param>
     public DataLakeTableSourceNode(
         StorageUri tableBasePath,
         DateTimeOffset asOf,
-        IStorageResolver? resolver = null,
-        ParquetConfiguration? configuration = null)
-        : this(tableBasePath, resolver, configuration)
+        IStorageResolver? resolver = null)
+        : this(tableBasePath, resolver)
     {
         _asOf = asOf;
     }
@@ -91,13 +79,11 @@ public sealed class DataLakeTableSourceNode<T> : SourceNode<T>
     /// <param name="provider">The storage provider.</param>
     /// <param name="tableBasePath">The base path of the table.</param>
     /// <param name="asOf">The timestamp for time travel.</param>
-    /// <param name="configuration">Optional Parquet configuration.</param>
     public DataLakeTableSourceNode(
         IStorageProvider provider,
         StorageUri tableBasePath,
-        DateTimeOffset asOf,
-        ParquetConfiguration? configuration = null)
-        : this(provider, tableBasePath, configuration)
+        DateTimeOffset asOf)
+        : this(provider, tableBasePath)
     {
         _asOf = asOf;
     }
@@ -108,13 +94,11 @@ public sealed class DataLakeTableSourceNode<T> : SourceNode<T>
     /// <param name="tableBasePath">The base path of the table.</param>
     /// <param name="snapshotId">The snapshot ID to read.</param>
     /// <param name="resolver">The storage resolver.</param>
-    /// <param name="configuration">Optional Parquet configuration.</param>
     public DataLakeTableSourceNode(
         StorageUri tableBasePath,
         string snapshotId,
-        IStorageResolver? resolver = null,
-        ParquetConfiguration? configuration = null)
-        : this(tableBasePath, resolver, configuration)
+        IStorageResolver? resolver = null)
+        : this(tableBasePath, resolver)
     {
         ArgumentNullException.ThrowIfNull(snapshotId);
         _snapshotId = snapshotId;
@@ -126,13 +110,11 @@ public sealed class DataLakeTableSourceNode<T> : SourceNode<T>
     /// <param name="provider">The storage provider.</param>
     /// <param name="tableBasePath">The base path of the table.</param>
     /// <param name="snapshotId">The snapshot ID to read.</param>
-    /// <param name="configuration">Optional Parquet configuration.</param>
     public DataLakeTableSourceNode(
         IStorageProvider provider,
         StorageUri tableBasePath,
-        string snapshotId,
-        ParquetConfiguration? configuration = null)
-        : this(provider, tableBasePath, configuration)
+        string snapshotId)
+        : this(provider, tableBasePath)
     {
         ArgumentNullException.ThrowIfNull(snapshotId);
         _snapshotId = snapshotId;
@@ -200,25 +182,16 @@ public sealed class DataLakeTableSourceNode<T> : SourceNode<T>
         StorageUri fileUri,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        // Use ParquetSourceNode to read the file
-        var sourceNode = new ParquetSourceNode<T>(provider, fileUri, _configuration);
+        var sourceNode = DataLakeParquetOptions.Source<T>(provider, fileUri);
 
         var dataStream = sourceNode.OpenStream(PipelineContext.CreateDefault(), cancellationToken);
 
-        await foreach (var item in dataStream.WithCancellation(cancellationToken))
+        await foreach (var item in dataStream.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
             yield return item;
         }
     }
 
-    private StorageUri BuildFileUri(string relativePath)
-    {
-        var basePath = _tableBasePath.Path?.TrimStart('/') ?? string.Empty;
-
-        var fullPath = string.IsNullOrEmpty(basePath)
-            ? $"/{relativePath.TrimStart('/')}"
-            : $"/{basePath}/{relativePath.TrimStart('/')}";
-
-        return StorageUri.Parse($"{_tableBasePath.Scheme}://{_tableBasePath.Host}{fullPath}");
-    }
+    // Combine keeps the table URI's parameters (credentials, region) on each file's URI.
+    private StorageUri BuildFileUri(string relativePath) => _tableBasePath.Combine(relativePath);
 }

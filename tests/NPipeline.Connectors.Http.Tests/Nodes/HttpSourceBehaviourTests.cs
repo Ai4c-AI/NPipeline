@@ -144,7 +144,8 @@ public sealed class HttpSourceBehaviourTests
             Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
             ActivityStopped = activity =>
             {
-                if (activity.GetTagItem("server.address") as string == "api.test")
+                // The listener is process-wide; a host no other test uses keeps parallel tests' activities out.
+                if (activity.GetTagItem("server.address") as string == "traces.test")
                     activities.Enqueue(activity);
             },
         };
@@ -152,12 +153,12 @@ public sealed class HttpSourceBehaviourTests
         ActivitySource.AddActivityListener(listener);
         var api = new Api(_ => Json("[1]"));
 
-        _ = await ReadAsync<int>(api, o => o with { BaseUri = new Uri("https://api.test:8443/items?cursor=abc&token=xyz") });
+        _ = await ReadAsync<int>(api, o => o with { BaseUri = new Uri("https://traces.test:8443/items?cursor=abc&token=xyz") });
 
         var activity = activities.Should().ContainSingle().Subject;
         activity.GetTagItem("http.request.method").Should().Be("GET");
-        activity.GetTagItem("url.full").Should().Be("https://api.test:8443/items?cursor=REDACTED&token=REDACTED");
-        activity.GetTagItem("server.address").Should().Be("api.test");
+        activity.GetTagItem("url.full").Should().Be("https://traces.test:8443/items?cursor=REDACTED&token=REDACTED");
+        activity.GetTagItem("server.address").Should().Be("traces.test");
         activity.GetTagItem("server.port").Should().Be(8443);
         activity.GetTagItem("http.response.status_code").Should().Be(200);
     }
