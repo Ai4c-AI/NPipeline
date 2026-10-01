@@ -52,7 +52,7 @@ Connector and test projects suppress `CS1591` (missing XML docs) via `WarningsNo
 
 ## Custom Analyzers
 
-NPipeline ships 20+ Roslyn analyzers in `NPipeline.Analyzers`. They run during every build.
+NPipeline ships 20+ Roslyn analyzers in `NPipeline.Analyzers`, packed inside the `NPipeline` package. They run during every build.
 
 ### Configuration & Setup
 

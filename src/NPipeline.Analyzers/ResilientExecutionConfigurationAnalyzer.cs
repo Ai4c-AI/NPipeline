@@ -55,7 +55,7 @@ public sealed class ResilientExecutionConfigurationAnalyzer : DiagnosticAnalyzer
         customTags: WellKnownDiagnosticTags.CompilationEnd);
 
     /// <inheritdoc />
-    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => [Rule, RestartNeverConsultedRule];
+    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => ImmutableArray.Create(Rule, RestartNeverConsultedRule);
 
     /// <inheritdoc />
     public override void Initialize(AnalysisContext context)

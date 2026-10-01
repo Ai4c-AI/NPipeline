@@ -30,7 +30,7 @@ public sealed class InefficientStringOperationsAnalyzer : ProfileGatedDiagnostic
         + "Avoid string concatenation with '+' in loops and hot path methods.");
 
     /// <inheritdoc />
-    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => [Rule];
+    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => ImmutableArray.Create(Rule);
 
     /// <inheritdoc />
     protected override void RegisterProfileGatedActions(CompilationStartAnalysisContext context)

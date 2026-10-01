@@ -18,7 +18,7 @@ public sealed class LinqInHotPathsCodeFixProvider : CodeFixProvider
 {
     /// <inheritdoc />
     public override ImmutableArray<string> FixableDiagnosticIds =>
-        [LinqInHotPathsAnalyzer.LinqInHotPathsId];
+        ImmutableArray.Create(LinqInHotPathsAnalyzer.LinqInHotPathsId);
 
     /// <inheritdoc />
     public override FixAllProvider GetFixAllProvider() => WellKnownFixAllProviders.BatchFixer;

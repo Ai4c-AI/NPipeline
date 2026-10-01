@@ -29,7 +29,7 @@ public sealed class SinkNodeInputConsumptionAnalyzer : DiagnosticAnalyzer
 
     /// <inheritdoc />
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
-        [SinkNodeInputNotConsumedRule];
+        ImmutableArray.Create(SinkNodeInputNotConsumedRule);
 
     /// <inheritdoc />
     public override void Initialize(AnalysisContext context)

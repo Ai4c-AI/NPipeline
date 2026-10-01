@@ -36,7 +36,7 @@ public sealed class SourceNodeStreamingAnalyzer : ProfileGatedDiagnosticAnalyzer
 
     /// <inheritdoc />
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
-        [SourceNodeStreamingRule];
+        ImmutableArray.Create(SourceNodeStreamingRule);
 
     /// <inheritdoc />
     protected override void RegisterProfileGatedActions(CompilationStartAnalysisContext context)

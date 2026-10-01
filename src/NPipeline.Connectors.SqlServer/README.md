@@ -29,6 +29,7 @@ Targets .NET 8.0, 9.0 and 10.0.
 - **Three write strategies**: multi-row `INSERT` statements under the 2,100-parameter limit, one statement per row, or
   `SqlBulkCopy` streamed from a data reader.
 - **`MERGE … WITH (HOLDLOCK)` upserts**, identity columns left out of writes, and parameters typed for plan reuse.
+- **A build-time analyzer** (NP9502) that warns when a checkpointing query has no `ORDER BY`, included in this package.
 
 ## Usage
 

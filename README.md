@@ -93,11 +93,8 @@ dotnet add package NPipeline
 dotnet add package NPipeline.Extensions.DependencyInjection
 ```
 
-Additionally, install the Analyzer package to enable Roslyn analyzers that provide compile-time checks and guardrails:
-
-```bash
-dotnet add package NPipeline.Analyzers
-```
+The `NPipeline` package includes Roslyn analyzers and code fixes that provide compile-time checks and guardrails, so
+there's nothing extra to install.
 
 ## Simple Example
 
@@ -169,8 +166,7 @@ NPipeline is modular - install only what you need.
 
 | Package                                      | Purpose                                                                                |
 |----------------------------------------------|----------------------------------------------------------------------------------------|
-| **NPipeline**                                | Core streaming pipeline functionality (zero dependencies)                              |
-| **NPipeline.Analyzers**                      | Roslyn analyzers for compile-time validation, style guidance, and developer guardrails |
+| **NPipeline**                                | Core streaming pipeline functionality and build-time analyzers (zero dependencies)     |
 | **NPipeline.Extensions.DependencyInjection** | Integration with Microsoft DI container                                                |
 | **NPipeline.Extensions.Testing**             | Core testing utilities with in-memory nodes, test harness, and assertion helpers       |
 | **NPipeline.Extensions.Testing.FluentAssertions** | FluentAssertions extensions for asserting on pipeline results                    |

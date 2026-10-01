@@ -32,7 +32,7 @@ public sealed class CancellationTokenRespectAnalyzer : DiagnosticAnalyzer
 
     /// <inheritdoc />
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
-        [CancellationTokenNotRespectedRule];
+        ImmutableArray.Create(CancellationTokenNotRespectedRule);
 
     /// <inheritdoc />
     public override void Initialize(AnalysisContext context)

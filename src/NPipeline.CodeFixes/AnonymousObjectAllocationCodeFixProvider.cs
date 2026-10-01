@@ -18,7 +18,7 @@ public sealed class AnonymousObjectAllocationCodeFixProvider : CodeFixProvider
 {
     /// <inheritdoc />
     public override ImmutableArray<string> FixableDiagnosticIds =>
-        [AnonymousObjectAllocationAnalyzer.AnonymousObjectAllocationId];
+        ImmutableArray.Create(AnonymousObjectAllocationAnalyzer.AnonymousObjectAllocationId);
 
     /// <inheritdoc />
     public override FixAllProvider GetFixAllProvider() => WellKnownFixAllProviders.BatchFixer;

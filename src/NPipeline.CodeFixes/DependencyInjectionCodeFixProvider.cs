@@ -18,7 +18,7 @@ public sealed class DependencyInjectionCodeFixProvider : CodeFixProvider
 {
     /// <inheritdoc />
     public override ImmutableArray<string> FixableDiagnosticIds =>
-        [DependencyInjectionAnalyzer.DependencyInjectionAntiPatternId];
+        ImmutableArray.Create(DependencyInjectionAnalyzer.DependencyInjectionAntiPatternId);
 
     /// <inheritdoc />
     public override FixAllProvider GetFixAllProvider() => WellKnownFixAllProviders.BatchFixer;

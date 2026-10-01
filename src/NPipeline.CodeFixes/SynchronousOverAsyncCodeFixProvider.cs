@@ -18,7 +18,7 @@ public sealed class SynchronousOverAsyncCodeFixProvider : CodeFixProvider
 {
     /// <inheritdoc />
     public override ImmutableArray<string> FixableDiagnosticIds =>
-        [SynchronousOverAsyncAnalyzer.SynchronousOverAsyncId];
+        ImmutableArray.Create(SynchronousOverAsyncAnalyzer.SynchronousOverAsyncId);
 
     /// <inheritdoc />
     public override FixAllProvider GetFixAllProvider() => WellKnownFixAllProviders.BatchFixer;

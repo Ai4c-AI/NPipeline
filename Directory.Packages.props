@@ -1,6 +1,14 @@
 <Project>
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+
+    <!--
+      The Roslyn version the shipped analyzers and code fixes compile against. They travel inside the
+      NPipeline and connector packages, so this is the oldest compiler every consumer must have: an
+      analyzer built against a newer Roslyn than the consumer's SDK fails to load (CS9057). 4.8.0 is the
+      .NET 8 SDK. Test projects keep the newer central version.
+    -->
+    <RoslynAnalyzerHostVersion>4.8.0</RoslynAnalyzerHostVersion>
   </PropertyGroup>
   <ItemGroup>
     <PackageVersion Include="AWSSDK.Core" Version="4.0.102.7" />

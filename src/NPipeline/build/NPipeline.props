@@ -4,8 +4,11 @@
             NPipelineOptimizationProfile controls whether performance-sensitive Roslyn analyzers fire.
             Default:  Analyzers NP9103, NP9104, NP9105, NP9106, NP9107 are suppressed.
                      Best for prototyping and low-to-medium-throughput scenarios.
-            HighThroughput: All analyzers are active (current legacy behavior).
+            HighThroughput: All analyzers are active.
             Users can also suppress individual rules via .editorconfig regardless of this setting.
+
+            This file ships in both build/ and buildTransitive/, so a project that only references a
+            connector package still gets the property and the analyzers that read it.
         -->
         <NPipelineOptimizationProfile Condition="'$(NPipelineOptimizationProfile)' == ''">Default</NPipelineOptimizationProfile>
     </PropertyGroup>

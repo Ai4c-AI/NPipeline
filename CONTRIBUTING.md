@@ -192,7 +192,7 @@ public ReturnType MethodName(ParameterType parameterName)
 
 ### Analyzers
 
-The project includes custom Roslyn analyzers (`NPipeline.Analyzers`) that provide compile-time validation and guidance. Ensure your code passes all analyzer rules before submitting a pull request.
+The project includes custom Roslyn analyzers (`NPipeline.Analyzers`, shipped inside the `NPipeline` package) that provide compile-time validation and guidance. Ensure your code passes all analyzer rules before submitting a pull request.
 
 ## Pull Request Process
 

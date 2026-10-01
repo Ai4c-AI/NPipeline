@@ -36,7 +36,7 @@ public sealed class PipelineContextAccessAnalyzer : DiagnosticAnalyzer
 
     /// <inheritdoc />
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
-        [UnsafePipelineContextAccessRule];
+        ImmutableArray.Create(UnsafePipelineContextAccessRule);
 
     /// <inheritdoc />
     public override void Initialize(AnalysisContext context)

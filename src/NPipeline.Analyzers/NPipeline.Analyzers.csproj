@@ -21,7 +21,7 @@
 
     <ItemGroup>
         <PackageReference Include="Microsoft.CodeAnalysis.Analyzers" PrivateAssets="all"/>
-        <PackageReference Include="Microsoft.CodeAnalysis.CSharp" PrivateAssets="all"/>
+        <PackageReference Include="Microsoft.CodeAnalysis.CSharp" VersionOverride="$(RoslynAnalyzerHostVersion)" PrivateAssets="all"/>
     </ItemGroup>
 
     <ItemGroup>

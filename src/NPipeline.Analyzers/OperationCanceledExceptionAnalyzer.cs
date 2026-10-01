@@ -37,7 +37,7 @@ public sealed class OperationCanceledExceptionAnalyzer : DiagnosticAnalyzer
 
     /// <inheritdoc />
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
-        [SwallowingOperationCanceledExceptionRule];
+        ImmutableArray.Create(SwallowingOperationCanceledExceptionRule);
 
     /// <inheritdoc />
     public override void Initialize(AnalysisContext context)

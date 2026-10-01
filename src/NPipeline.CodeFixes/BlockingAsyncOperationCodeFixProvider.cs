@@ -18,7 +18,7 @@ public sealed class BlockingAsyncOperationCodeFixProvider : CodeFixProvider
 {
     /// <inheritdoc />
     public override ImmutableArray<string> FixableDiagnosticIds =>
-        [BlockingAsyncOperationAnalyzer.BlockingAsyncOperationId];
+        ImmutableArray.Create(BlockingAsyncOperationAnalyzer.BlockingAsyncOperationId);
 
     /// <inheritdoc />
     public override FixAllProvider GetFixAllProvider() => WellKnownFixAllProviders.BatchFixer;

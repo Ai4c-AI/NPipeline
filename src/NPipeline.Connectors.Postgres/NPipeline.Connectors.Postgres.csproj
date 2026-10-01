@@ -37,6 +37,16 @@
     </ItemGroup>
 
     <ItemGroup>
+        <!--
+            The connector's analyzers ship inside this package, the same way the core analyzers ship inside
+            NPipeline. The ProjectReference is for build order only; the DLL travels in analyzers/dotnet/cs.
+        -->
+        <ProjectReference Include="..\NPipeline.Connectors.Postgres.Analyzers\NPipeline.Connectors.Postgres.Analyzers.csproj" PrivateAssets="All" ReferenceOutputAssembly="false"/>
+
+        <None Include="..\NPipeline.Connectors.Postgres.Analyzers\bin\$(Configuration)\netstandard2.0\NPipeline.Connectors.Postgres.Analyzers.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false"/>
+    </ItemGroup>
+
+    <ItemGroup>
         <None Include="..\..\icon.png" Pack="true" PackagePath="\"/>
         <None Include="README.md" Pack="true" PackagePath="\"/>
         <None Include="LICENSE.txt" Pack="true" PackagePath="\"/>

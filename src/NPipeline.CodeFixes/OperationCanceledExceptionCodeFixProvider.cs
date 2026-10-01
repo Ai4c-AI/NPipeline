@@ -18,7 +18,7 @@ public sealed class OperationCanceledExceptionCodeFixProvider : CodeFixProvider
 {
     /// <inheritdoc />
     public override ImmutableArray<string> FixableDiagnosticIds =>
-        [OperationCanceledExceptionAnalyzer.SwallowingOperationCanceledExceptionId];
+        ImmutableArray.Create(OperationCanceledExceptionAnalyzer.SwallowingOperationCanceledExceptionId);
 
     /// <inheritdoc />
     public override FixAllProvider GetFixAllProvider() => WellKnownFixAllProviders.BatchFixer;

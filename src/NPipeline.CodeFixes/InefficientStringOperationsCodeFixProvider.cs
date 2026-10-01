@@ -20,7 +20,7 @@ public sealed class InefficientStringOperationsCodeFixProvider : CodeFixProvider
 {
     /// <inheritdoc />
     public override ImmutableArray<string> FixableDiagnosticIds =>
-        [InefficientStringOperationsAnalyzer.InefficientStringOperationsId];
+        ImmutableArray.Create(InefficientStringOperationsAnalyzer.InefficientStringOperationsId);
 
     /// <inheritdoc />
     public override FixAllProvider GetFixAllProvider() => WellKnownFixAllProviders.BatchFixer;

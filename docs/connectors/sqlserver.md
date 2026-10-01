@@ -140,7 +140,7 @@ var source = sources.CreateSourceNode<Order>("SELECT * FROM dbo.Orders ORDER BY 
 
 ## Analyzer
 
-The `NPipeline.Connectors.SqlServer.Analyzers` package reports **NP9502** when a source checkpoints
+The connector package includes a build-time analyzer that reports **NP9502** when a source checkpoints
 (`CheckpointStrategy.Offset` or `InMemory`) with a query that has no `ORDER BY`; see
 [Checkpoints](sql-connectors.md#checkpoints).
 

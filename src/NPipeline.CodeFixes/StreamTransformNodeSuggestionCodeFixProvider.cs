@@ -19,7 +19,7 @@ public sealed class StreamTransformNodeSuggestionCodeFixProvider : CodeFixProvid
 {
     /// <inheritdoc />
     public override ImmutableArray<string> FixableDiagnosticIds =>
-        [StreamTransformNodeSuggestionAnalyzer.StreamTransformNodeSuggestionId];
+        ImmutableArray.Create(StreamTransformNodeSuggestionAnalyzer.StreamTransformNodeSuggestionId);
 
     /// <inheritdoc />
     public override FixAllProvider GetFixAllProvider() => WellKnownFixAllProviders.BatchFixer;

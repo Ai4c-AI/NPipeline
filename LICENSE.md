@@ -14,7 +14,6 @@ The following directories are governed by the **MIT License**:
 
 * `/src/NPipeline/` (Core Engine)
 * `/src/NPipeline.Analyzers/` (Core Analyzers)
-* `/src/NPipeline.Analyzers.Package/` (Analyzer Package)
 * `/src/NPipeline.CodeFixes/` (Code Fixes)
 * `/src/NPipeline.Connectors/` (Base Abstractions)
 * `/src/NPipeline.Extensions.DependencyInjection/`

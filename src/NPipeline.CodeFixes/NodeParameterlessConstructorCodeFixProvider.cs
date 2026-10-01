@@ -18,10 +18,10 @@ public sealed class NodeParameterlessConstructorCodeFixProvider : CodeFixProvide
 {
     /// <inheritdoc />
     public override ImmutableArray<string> FixableDiagnosticIds =>
-    [
+    ImmutableArray.Create(
         NodeParameterlessConstructorAnalyzer.MissingParameterlessConstructorId,
-        NodeParameterlessConstructorAnalyzer.PerformanceSuggestionId,
-    ];
+        NodeParameterlessConstructorAnalyzer.PerformanceSuggestionId
+    );
 
     /// <inheritdoc />
     public override FixAllProvider GetFixAllProvider() => WellKnownFixAllProviders.BatchFixer;

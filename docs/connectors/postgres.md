@@ -117,8 +117,8 @@ Registers `IPostgresConnectionPool`, `IPostgresSourceNodeFactory` and `IPostgres
 
 ## Analyzer
 
-The `NPipeline.Connectors.Postgres.Analyzers` package reports **NP9501** when a source checkpoints with a query that has
-no `ORDER BY`; see [Checkpoints](sql-connectors.md#checkpoints).
+The connector package includes a build-time analyzer that reports **NP9501** when a source checkpoints with a query that
+has no `ORDER BY`; see [Checkpoints](sql-connectors.md#checkpoints). You don't need to install anything else.
 
 ## Next Steps
 

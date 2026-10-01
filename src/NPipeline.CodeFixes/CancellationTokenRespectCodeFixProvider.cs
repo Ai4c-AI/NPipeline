@@ -21,7 +21,7 @@ public sealed class CancellationTokenRespectCodeFixProvider : CodeFixProvider
     ///     Gets the fixable diagnostic IDs.
     /// </summary>
     public override ImmutableArray<string> FixableDiagnosticIds =>
-        [CancellationTokenRespectAnalyzer.CancellationTokenNotRespectedId];
+        ImmutableArray.Create(CancellationTokenRespectAnalyzer.CancellationTokenNotRespectedId);
 
     /// <summary>
     ///     Gets the fix all provider.

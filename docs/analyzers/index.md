@@ -12,18 +12,18 @@ This is a key differentiator: most data pipeline libraries only fail at runtime.
 
 ## Installation
 
-The analyzers are distributed as separate NuGet packages and must be added explicitly:
+The analyzers and code fixes ship inside the `NPipeline` package, so there's nothing extra to install. They also
+reach projects that reference NPipeline only through another package, such as a connector.
 
-```bash
-dotnet add package NPipeline.Analyzers
-```
+Connector-specific analyzers ship inside their connector packages:
 
-Connector-specific analyzers are also separate packages:
+| Package | Rules |
+|---------|-------|
+| `NPipeline.Connectors.Postgres` | NP9501 |
+| `NPipeline.Connectors.SqlServer` | NP9502 |
 
-```bash
-dotnet add package NPipeline.Connectors.Postgres.Analyzers
-dotnet add package NPipeline.Connectors.SqlServer.Analyzers
-```
+The analyzers require the .NET 8 SDK (Roslyn 4.8) or later. To turn a rule off, set its severity to `none` in
+`.editorconfig`.
 
 ## NP90xx - Configuration and Setup
 
@@ -185,7 +185,7 @@ Set the property in your project file:
 
 This corresponds to the runtime `PipelineBuilder.WithOptimizationProfile()` setting. See [Optimization Profiles](../guides/optimization-profiles.md) for the full picture.
 
-When profile metadata is available in your compiled assemblies (for example from `NPipeline.Analyzers` package props), NPipeline warns at runtime build if the MSBuild profile and runtime profile diverge.
+When profile metadata is available in your compiled assemblies (the `NPipeline` package stamps it at build time), NPipeline warns at runtime build if the MSBuild profile and runtime profile diverge.
 
 ## Suppressing Rules
 

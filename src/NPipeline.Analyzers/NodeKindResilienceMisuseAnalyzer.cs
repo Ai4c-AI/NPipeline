@@ -43,7 +43,7 @@ public sealed class NodeKindResilienceMisuseAnalyzer : DiagnosticAnalyzer
         + "https://docs.npipeline.net/analyzers/reliability#np9204-transform-only-resilience-setting.");
 
     /// <inheritdoc />
-    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => [Rule];
+    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => ImmutableArray.Create(Rule);
 
     /// <inheritdoc />
     public override void Initialize(AnalysisContext context)

@@ -30,6 +30,7 @@ Targets .NET 8.0, 9.0 and 10.0.
   binary `COPY`.
 - **Dates and times typed by the target column**, so a `timestamp` value does not depend on the session's time zone.
 - **`INSERT … ON CONFLICT` upserts** and snake_case column names by default.
+- **A build-time analyzer** (NP9501) that warns when a checkpointing query has no `ORDER BY`, included in this package.
 
 ## Usage
 

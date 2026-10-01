@@ -32,7 +32,7 @@ public sealed class AnonymousObjectAllocationAnalyzer : ProfileGatedDiagnosticAn
         + "https://docs.npipeline.net/analyzers/performance#np9105-anonymous-object-allocation.");
 
     /// <inheritdoc />
-    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => [Rule];
+    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => ImmutableArray.Create(Rule);
 
     /// <inheritdoc />
     protected override void RegisterProfileGatedActions(CompilationStartAnalysisContext context)

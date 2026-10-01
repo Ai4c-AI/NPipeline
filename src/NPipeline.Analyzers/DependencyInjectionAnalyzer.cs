@@ -28,7 +28,7 @@ public sealed class DependencyInjectionAnalyzer : DiagnosticAnalyzer
         "https://github.com/ChrisJacques/NPipeline/blob/main/docs/architecture/dependency-injection.md");
 
     /// <inheritdoc />
-    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => [DependencyInjectionAntiPatternRule];
+    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => ImmutableArray.Create(DependencyInjectionAntiPatternRule);
 
     /// <inheritdoc />
     public override void Initialize(AnalysisContext context)

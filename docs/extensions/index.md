@@ -10,8 +10,7 @@ NPipeline is distributed as a set of NuGet packages. The core `NPipeline` packag
 
 | Package | Description |
 | --- | --- |
-| `NPipeline` | Pipeline runtime, node base classes, resilience, error handling, configuration |
-| `NPipeline.Analyzers` | Roslyn analyzers and code fixes for pipeline configuration issues |
+| `NPipeline` | Pipeline runtime, node base classes, resilience, error handling, configuration, and [build-time analyzers](../analyzers/index.md) |
 
 ## Extension Packages
 
@@ -75,12 +74,7 @@ Connectors provide pre-built source and sink nodes for reading from and writing 
 | `NPipeline.Connectors.Http` | HTTP/REST API source/sink with pagination, auth, retry, rate limiting |
 | `NPipeline.Connectors.DataLake` | Data Lake table abstractions with partitioning, manifests, snapshots, time travel |
 
-### Connector Analyzers
-
-| Package | Description |
-| --- | --- |
-| `NPipeline.Connectors.Postgres.Analyzers` | PostgreSQL-specific analyzers (checkpointing validation) |
-| `NPipeline.Connectors.SqlServer.Analyzers` | SQL Server-specific analyzers (checkpointing validation) |
+The PostgreSQL and SQL Server connector packages include analyzers that check checkpointing queries.
 
 ## Storage Provider Packages
 

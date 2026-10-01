@@ -31,7 +31,7 @@ public sealed class StreamTransformNodeExecutionStrategyAnalyzer : DiagnosticAna
         + "creating a custom strategy that implements both interfaces.");
 
     /// <inheritdoc />
-    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => [Rule];
+    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => ImmutableArray.Create(Rule);
 
     /// <inheritdoc />
     public override void Initialize(AnalysisContext context)

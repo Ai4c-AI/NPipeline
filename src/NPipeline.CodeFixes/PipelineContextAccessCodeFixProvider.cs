@@ -18,7 +18,7 @@ public sealed class PipelineContextAccessCodeFixProvider : CodeFixProvider
 {
     /// <inheritdoc />
     public override ImmutableArray<string> FixableDiagnosticIds =>
-        [PipelineContextAccessAnalyzer.UnsafePipelineContextAccessId];
+        ImmutableArray.Create(PipelineContextAccessAnalyzer.UnsafePipelineContextAccessId);
 
     /// <inheritdoc />
     public override FixAllProvider GetFixAllProvider() => WellKnownFixAllProviders.BatchFixer;

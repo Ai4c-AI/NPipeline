@@ -37,7 +37,7 @@ public sealed class BlockingAsyncOperationAnalyzer : DiagnosticAnalyzer
 
     /// <inheritdoc />
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
-        [BlockingAsyncOperationRule];
+        ImmutableArray.Create(BlockingAsyncOperationRule);
 
     /// <inheritdoc />
     public override void Initialize(AnalysisContext context)

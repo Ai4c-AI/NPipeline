@@ -5,22 +5,9 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
-        <IsPackable>true</IsPackable>
+        <IsPackable>false</IsPackable>
         <RootNamespace>NPipeline.Connectors.SqlServer.Analyzers</RootNamespace>
         <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
-
-        <!-- Package Configuration -->
-        <PackageId>NPipeline.Connectors.SqlServer.Analyzers</PackageId>
-        <Title>NPipeline SQL Server Connector Analyzers</Title>
-        <Description>SQL Server connector-specific analyzers for NPipeline, including checkpointing validation</Description>
-        <PackageTags>analyzers;roslyn;npipeline;diagnostics;sqlserver;connector</PackageTags>
-        <Authors>NPipeline Team</Authors>
-        <Copyright>Copyright © NPipeline Team</Copyright>
-        <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
-        <PackageReadmeFile>README.md</PackageReadmeFile>
-        <PackageProjectUrl>https://github.com/npipeline/NPipeline</PackageProjectUrl>
-        <RepositoryUrl>https://github.com/npipeline/NPipeline</RepositoryUrl>
-        <RepositoryType>git</RepositoryType>
 
         <!-- Analyzer Configuration -->
         <DevelopmentDependency>true</DevelopmentDependency>
@@ -34,17 +21,11 @@
 
     <ItemGroup>
         <PackageReference Include="Microsoft.CodeAnalysis.Analyzers" PrivateAssets="all"/>
-        <PackageReference Include="Microsoft.CodeAnalysis.CSharp" PrivateAssets="all"/>
+        <PackageReference Include="Microsoft.CodeAnalysis.CSharp" VersionOverride="$(RoslynAnalyzerHostVersion)" PrivateAssets="all"/>
     </ItemGroup>
 
     <ItemGroup>
         <InternalsVisibleTo Include="NPipeline.Connectors.SqlServer.Analyzers.Tests"/>
-    </ItemGroup>
-
-    <!-- Include README in package -->
-    <ItemGroup>
-        <None Include="README.md" Pack="true" PackagePath="\"/>
-        <None Include="LICENSE.txt" Pack="true" PackagePath="\"/>
     </ItemGroup>
 
 </Project>

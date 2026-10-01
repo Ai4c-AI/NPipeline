@@ -18,7 +18,7 @@ public class StreamTransformNodeExecutionStrategyCodeFixProvider : CodeFixProvid
 {
     /// <inheritdoc />
     public sealed override ImmutableArray<string> FixableDiagnosticIds =>
-        ["NP9402"];
+        ImmutableArray.Create("NP9402");
 
     /// <inheritdoc />
     public sealed override FixAllProvider GetFixAllProvider() => WellKnownFixAllProviders.BatchFixer;

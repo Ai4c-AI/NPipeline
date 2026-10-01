@@ -31,7 +31,7 @@ public sealed class InefficientExceptionHandlingAnalyzer : DiagnosticAnalyzer
         + "https://docs.npipeline.net/analyzers/reliability#np9202-inefficient-exception-handling.");
 
     /// <inheritdoc />
-    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => [Rule];
+    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => ImmutableArray.Create(Rule);
 
     /// <inheritdoc />
     public override void Initialize(AnalysisContext context)

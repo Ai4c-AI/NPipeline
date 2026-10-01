@@ -35,7 +35,7 @@ public sealed class SynchronousOverAsyncAnalyzer : DiagnosticAnalyzer
 
     /// <inheritdoc />
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
-        [SynchronousOverAsyncRule];
+        ImmutableArray.Create(SynchronousOverAsyncRule);
 
     /// <inheritdoc />
     public override void Initialize(AnalysisContext context)

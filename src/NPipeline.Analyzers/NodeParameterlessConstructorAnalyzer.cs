@@ -46,7 +46,7 @@ public sealed class NodeParameterlessConstructorAnalyzer : DiagnosticAnalyzer
 
     /// <inheritdoc />
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
-        [MissingParameterlessConstructorRule, PerformanceSuggestionRule];
+        ImmutableArray.Create(MissingParameterlessConstructorRule, PerformanceSuggestionRule);
 
     /// <inheritdoc />
     public override void Initialize(AnalysisContext context)

@@ -654,7 +654,6 @@ services.AddStorageProvidersFromConfiguration(config =>
 ## Related Packages
 
 - **[NPipeline](https://www.nuget.org/packages/NPipeline)** - Core pipeline framework
-- **[NPipeline.Analyzers](https://www.nuget.org/packages/NPipeline.Analyzers)** - Roslyn analyzers for pipeline development
 - **[NPipeline.Extensions](https://www.nuget.org/packages/NPipeline.Extensions)** - Additional pipeline components and utilities
 
 ## License

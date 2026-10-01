@@ -45,7 +45,7 @@ public sealed class TimeoutConfigurationAnalyzer : DiagnosticAnalyzer
         + "https://docs.npipeline.net/analyzers/configuration#np9005-timeout-configuration-issues.");
 
     /// <inheritdoc />
-    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => [Rule];
+    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => ImmutableArray.Create(Rule);
 
     /// <inheritdoc />
     public override void Initialize(AnalysisContext context)

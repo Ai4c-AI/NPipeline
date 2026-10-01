@@ -128,8 +128,8 @@ var source = PostgresConnector.Source<Order>(connectionString, "SELECT * FROM or
 
 - **Order.** Skipping lands on the same rows only when the query returns them in a stable order, so give it an
   `ORDER BY` on a unique, increasing key (an identity column, or a timestamp plus the key). Without one, a restart can
-  skip rows it never read or read rows twice. The SQL Server and PostgreSQL analyzer packages warn when a
-  checkpointing query has no `ORDER BY`.
+  skip rows it never read or read rows twice. The SQL Server and PostgreSQL connector packages include
+  analyzers that warn when a checkpointing query has no `ORDER BY`.
 - **At least once.** A checkpoint is saved every `CheckpointInterval` and when the read ends, fails or is cancelled.
   After a crash, the rows read since the last save are read again.
 - **Later runs.** A completed read keeps its checkpoint, so the next run skips the rows already read and emits only

@@ -41,7 +41,7 @@ public sealed class SourceNodeStreamingCodeFixProvider : CodeFixProvider
 {
     /// <inheritdoc />
     public override ImmutableArray<string> FixableDiagnosticIds =>
-        [SourceNodeStreamingAnalyzer.SourceNodeStreamingId];
+        ImmutableArray.Create(SourceNodeStreamingAnalyzer.SourceNodeStreamingId);
 
     /// <inheritdoc />
     public override FixAllProvider GetFixAllProvider() => WellKnownFixAllProviders.BatchFixer;

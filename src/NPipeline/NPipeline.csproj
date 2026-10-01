@@ -40,13 +40,25 @@
     </ItemGroup>
 
     <ItemGroup>
-        <!-- Include analyzers as a compile-time development dependency only
-             PrivateAssets="All" - not included in NuGet package dependencies
-             ReferenceOutputAssembly="false" - not referenced at runtime
-             This keeps the core dependency-free. -->
-        <ProjectReference Include="../NPipeline.Analyzers/NPipeline.Analyzers.csproj"
-                          PrivateAssets="All"
-                          ReferenceOutputAssembly="false"/>
+        <!--
+            The analyzers and their fixes ship inside this package rather than as a package of their own,
+            so every consumer gets them without opting in. ReferenceOutputAssembly is off because the
+            library does not use them; the ProjectReferences are here for build order, and the DLLs travel
+            in analyzers/dotnet/cs, which is where the compiler looks. Analyzers flow to consumers of any
+            package that depends on this one.
+        -->
+        <ProjectReference Include="../NPipeline.Analyzers/NPipeline.Analyzers.csproj" PrivateAssets="All" ReferenceOutputAssembly="false"/>
+        <ProjectReference Include="../NPipeline.CodeFixes/NPipeline.CodeFixes.csproj" PrivateAssets="All" ReferenceOutputAssembly="false"/>
+
+        <None Include="../NPipeline.Analyzers/bin/$(Configuration)/netstandard2.0/NPipeline.Analyzers.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false"/>
+        <None Include="../NPipeline.CodeFixes/bin/$(Configuration)/netstandard2.0/NPipeline.CodeFixes.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false"/>
+
+        <!--
+            The optimization-profile property the analyzers read. buildTransitive/ carries it to projects
+            that only reference a connector; build/ covers clients that predate buildTransitive.
+        -->
+        <None Include="build/NPipeline.props" Pack="true" PackagePath="build/NPipeline.props"/>
+        <None Include="build/NPipeline.props" Pack="true" PackagePath="buildTransitive/NPipeline.props"/>
     </ItemGroup>
 
     <ItemGroup>

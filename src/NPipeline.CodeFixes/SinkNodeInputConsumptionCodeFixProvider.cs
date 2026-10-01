@@ -18,7 +18,7 @@ public sealed class SinkNodeInputConsumptionCodeFixProvider : CodeFixProvider
 {
     /// <inheritdoc />
     public override ImmutableArray<string> FixableDiagnosticIds =>
-        [SinkNodeInputConsumptionAnalyzer.SinkNodeInputNotConsumedId];
+        ImmutableArray.Create(SinkNodeInputConsumptionAnalyzer.SinkNodeInputNotConsumedId);
 
     /// <inheritdoc />
     public override FixAllProvider GetFixAllProvider() => WellKnownFixAllProviders.BatchFixer;

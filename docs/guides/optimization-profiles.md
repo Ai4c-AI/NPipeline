@@ -49,7 +49,7 @@ The MSBuild property controls which analyzers fire during `dotnet build`:
 
 These two settings represent the same decision from different angles. Set them to the same value - the runtime profile governs execution behavior, while the MSBuild property governs analyzer behavior.
 
-When profile metadata is available (for example via the `NPipeline.Analyzers` package), NPipeline emits a runtime build warning if these values differ. This catches analyzer/runtime drift early.
+When profile metadata is available (the `NPipeline` package stamps it into your assembly at build time), NPipeline emits a runtime build warning if these values differ. This catches analyzer/runtime drift early.
 
 ## Default Profile
 

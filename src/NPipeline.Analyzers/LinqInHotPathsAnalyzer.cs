@@ -41,7 +41,7 @@ public sealed class LinqInHotPathsAnalyzer : ProfileGatedDiagnosticAnalyzer
             "TakeWhile", "Join", "GroupJoin", "Zip", "SequenceEqual", "All", "Any", "Contains");
 
     /// <inheritdoc />
-    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => [Rule];
+    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => ImmutableArray.Create(Rule);
 
     /// <inheritdoc />
     protected override void RegisterProfileGatedActions(CompilationStartAnalysisContext context)
